@@ -1,13 +1,11 @@
 import json
 import uuid
-from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.mongo import get_projects_collection
 from app.models.project import Project
 from app.models.schemas import (
     ProjectCreate, ProjectUpdate, ProjectResponse, ProjectListResponse,
@@ -205,38 +203,6 @@ async def gen_ui(project_id: int, body: GenerateUIRequest, user=Depends(_get_use
     await db.refresh(project)
     return ProjectResponse.model_validate(project)
 
-
-@router.post("/{project_id}/save-to-mongo")
-async def save_to_mongo(project_id: int, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
-    project = await _get_project(project_id, user, db)
-    collection = get_projects_collection()
-
-    doc = {
-        "pg_id": project.id,
-        "user_id": user.id,
-        "name": project.name,
-        "description": project.description,
-        "features": project.features,
-        "language": project.language,
-        "status": project.status,
-        "entities": json.loads(project.entities) if project.entities else None,
-        "validation": {
-            "rules": project.validation_rules,
-            "generated_code": project.validation_code,
-        } if project.validation_rules else None,
-        "ui": {
-            "description": project.ui_description,
-            "generated_code": project.ui_code,
-        } if project.ui_description else None,
-        "saved_at": datetime.now(timezone.utc),
-    }
-
-    await collection.update_one(
-        {"pg_id": project.id, "user_id": user.id},
-        {"$set": doc},
-        upsert=True,
-    )
-    return {"message": "Project saved to MongoDB", "project_id": project.id}
 
 
 @router.post("/{project_id}/generate-ui-xml", response_model=ProjectResponse)
