@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import Response
@@ -11,11 +12,14 @@ from app.models.project import Project
 from app.models.schemas import (
     ProjectCreate, ProjectUpdate, ProjectResponse, ProjectListResponse,
     ExtractRequest, RefineRequest, GenerateValidationRequest, GenerateUIRequest,
+    GenerateUIXmlRequest, GenerateFromXmlRequest, ScreenCreate, ScreenUpdate,
 )
 from app.services.auth_service import get_current_user
 from app.services.ai_service import (
     extract_entities, refine_entities, generate_sql,
-    generate_validation_code, generate_ui_code,
+    generate_entity_code, edit_validation_code, generate_ui_code,
+    generate_ui_xml, generate_html_from_xml, generate_api_from_xml,
+    generate_er_diagram,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -90,10 +94,17 @@ async def extract_project_entities(project_id: int, body: ExtractRequest, user=D
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI extraction failed: {e}")
 
+    try:
+        entity_code = await generate_entity_code(entities, project.language or "Python")
+    except Exception:
+        entity_code = None
+
     project.description = body.description
     project.features = body.features
     project.entities = json.dumps(entities)
     project.status = "draft"
+    if entity_code:
+        project.validation_code = entity_code
     await db.commit()
     await db.refresh(project)
     return ProjectResponse.model_validate(project)
@@ -159,14 +170,18 @@ async def download_json(project_id: int, user=Depends(_get_user), db: AsyncSessi
 async def gen_validation(project_id: int, body: GenerateValidationRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
     project = await _get_project(project_id, user, db)
     entities = json.loads(project.entities) if project.entities else None
+    existing_code = project.validation_code or ""
     try:
-        code = await generate_validation_code(
-            rules=body.rules, entities=entities, language=project.language or "Python",
+        code = await edit_validation_code(
+            instruction=body.rules,
+            existing_code=existing_code,
+            entities=entities,
+            language=project.language or "Python",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Validation generation failed: {e}")
 
-    project.validation_rules = body.rules
+    project.validation_rules = (project.validation_rules or "") + "\n" + body.rules
     project.validation_code = code
     await db.commit()
     await db.refresh(project)
@@ -222,3 +237,194 @@ async def save_to_mongo(project_id: int, user=Depends(_get_user), db: AsyncSessi
         upsert=True,
     )
     return {"message": "Project saved to MongoDB", "project_id": project.id}
+
+
+@router.post("/{project_id}/generate-ui-xml", response_model=ProjectResponse)
+async def gen_ui_xml(project_id: int, body: GenerateUIXmlRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    entities = json.loads(project.entities) if project.entities else None
+    try:
+        xml = await generate_ui_xml(description=body.description, entities=entities)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"XML generation failed: {e}")
+
+    project.ui_description = body.description
+    project.ui_xml = xml
+    project.ui_html = None
+    project.ui_api = None
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+@router.post("/{project_id}/generate-ui-html", response_model=ProjectResponse)
+async def gen_ui_html(project_id: int, body: GenerateFromXmlRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    try:
+        html = await generate_html_from_xml(xml=body.xml, frontend_lang=body.frontend_lang)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"HTML generation failed: {e}")
+
+    project.ui_html = html
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+@router.post("/{project_id}/generate-ui-api", response_model=ProjectResponse)
+async def gen_ui_api(project_id: int, body: GenerateFromXmlRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    try:
+        api_code = await generate_api_from_xml(
+            xml=body.xml,
+            backend_lang=project.language or "Python",
+            frontend_lang=project.frontend_language or "React",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"API generation failed: {e}")
+
+    project.ui_api = api_code
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+def _get_screens(project) -> list:
+    if not project.ui_screens:
+        return []
+    try:
+        return json.loads(project.ui_screens)
+    except Exception:
+        return []
+
+
+def _save_screens(project, screens: list):
+    project.ui_screens = json.dumps(screens)
+
+
+def _find_screen(screens: list, screen_id: str):
+    for i, s in enumerate(screens):
+        if s.get("id") == screen_id:
+            return i, s
+    return -1, None
+
+
+@router.post("/{project_id}/screens", response_model=ProjectResponse)
+async def create_screen(project_id: int, body: ScreenCreate, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    screens = _get_screens(project)
+    screens.append({"id": str(uuid.uuid4())[:8], "name": body.name, "description": body.description, "xml": "", "html": "", "api": ""})
+    _save_screens(project, screens)
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+@router.put("/{project_id}/screens/{screen_id}", response_model=ProjectResponse)
+async def update_screen(project_id: int, screen_id: str, body: ScreenUpdate, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    screens = _get_screens(project)
+    idx, screen = _find_screen(screens, screen_id)
+    if screen is None:
+        raise HTTPException(status_code=404, detail="Screen not found")
+    if body.name is not None:
+        screen["name"] = body.name
+    if body.description is not None:
+        screen["description"] = body.description
+    screens[idx] = screen
+    _save_screens(project, screens)
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+@router.delete("/{project_id}/screens/{screen_id}", response_model=ProjectResponse)
+async def delete_screen(project_id: int, screen_id: str, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    screens = _get_screens(project)
+    screens = [s for s in screens if s.get("id") != screen_id]
+    _save_screens(project, screens)
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+@router.post("/{project_id}/screens/{screen_id}/generate-xml", response_model=ProjectResponse)
+async def gen_screen_xml(project_id: int, screen_id: str, body: GenerateUIXmlRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    screens = _get_screens(project)
+    idx, screen = _find_screen(screens, screen_id)
+    if screen is None:
+        raise HTTPException(status_code=404, detail="Screen not found")
+    entities = json.loads(project.entities) if project.entities else None
+    try:
+        xml = await generate_ui_xml(description=body.description, entities=entities)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"XML generation failed: {e}")
+    screen["description"] = body.description
+    screen["xml"] = xml
+    screen["html"] = ""
+    screen["api"] = ""
+    screens[idx] = screen
+    _save_screens(project, screens)
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+@router.post("/{project_id}/screens/{screen_id}/generate-html", response_model=ProjectResponse)
+async def gen_screen_html(project_id: int, screen_id: str, body: GenerateFromXmlRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    screens = _get_screens(project)
+    idx, screen = _find_screen(screens, screen_id)
+    if screen is None:
+        raise HTTPException(status_code=404, detail="Screen not found")
+    try:
+        html = await generate_html_from_xml(xml=body.xml, frontend_lang=body.frontend_lang)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"HTML generation failed: {e}")
+    screen["html"] = html
+    screens[idx] = screen
+    _save_screens(project, screens)
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+@router.post("/{project_id}/screens/{screen_id}/generate-api", response_model=ProjectResponse)
+async def gen_screen_api(project_id: int, screen_id: str, body: GenerateFromXmlRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    screens = _get_screens(project)
+    idx, screen = _find_screen(screens, screen_id)
+    if screen is None:
+        raise HTTPException(status_code=404, detail="Screen not found")
+    try:
+        api_code = await generate_api_from_xml(xml=body.xml, backend_lang=project.language or "Python", frontend_lang=project.frontend_language or "React")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"API generation failed: {e}")
+    screen["api"] = api_code
+    screens[idx] = screen
+    _save_screens(project, screens)
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+@router.post("/{project_id}/generate-er-diagram", response_model=ProjectResponse)
+async def gen_er_diagram(project_id: int, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    if not project.entities:
+        raise HTTPException(status_code=400, detail="Extract a database schema first")
+
+    try:
+        entities = json.loads(project.entities)
+        diagram = await generate_er_diagram(entities)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ER diagram generation failed: {e}")
+
+    project.er_diagram = diagram
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)

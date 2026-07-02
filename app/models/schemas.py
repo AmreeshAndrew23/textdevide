@@ -53,6 +53,12 @@ class ProjectUpdate(BaseModel):
     validation_code: Optional[str] = None
     ui_description: Optional[str] = None
     ui_code: Optional[str] = None
+    ui_xml: Optional[str] = None
+    ui_html: Optional[str] = None
+    ui_api: Optional[str] = None
+    frontend_language: Optional[str] = None
+    er_diagram: Optional[str] = None
+    ui_screens: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):
@@ -62,11 +68,17 @@ class ProjectResponse(BaseModel):
     features: Optional[str] = None
     entities: Optional[str] = None
     language: str = "Python"
+    frontend_language: str = "React"
     status: str = "draft"
     validation_rules: Optional[str] = None
     validation_code: Optional[str] = None
     ui_description: Optional[str] = None
     ui_code: Optional[str] = None
+    ui_xml: Optional[str] = None
+    ui_html: Optional[str] = None
+    ui_api: Optional[str] = None
+    er_diagram: Optional[str] = None
+    ui_screens: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -103,3 +115,22 @@ class GenerateValidationRequest(BaseModel):
 
 class GenerateUIRequest(BaseModel):
     description: str
+
+
+class GenerateUIXmlRequest(BaseModel):
+    description: str
+
+
+class GenerateFromXmlRequest(BaseModel):
+    xml: str
+    frontend_lang: str = "HTML/CSS"
+
+
+class ScreenCreate(BaseModel):
+    name: str
+    description: str = ""
+
+
+class ScreenUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
