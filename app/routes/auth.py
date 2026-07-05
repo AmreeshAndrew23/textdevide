@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models.schemas import UserRegister, UserLogin, GoogleTokenRequest, TokenResponse, UserResponse
+from app.models.schemas import UserRegister, UserLogin, GoogleTokenRequest, TokenResponse, UserResponse, UserUpdate
 from app.services.auth_service import (
     register_user,
     authenticate_user,
@@ -39,4 +39,17 @@ async def login_google(body: GoogleTokenRequest, db: AsyncSession = Depends(get_
 async def me(authorization: str = Header(...), db: AsyncSession = Depends(get_db)):
     token = authorization.replace("Bearer ", "")
     user = await get_current_user(db, token)
+    return UserResponse.model_validate(user)
+
+
+@router.put("/me", response_model=UserResponse)
+async def update_me(body: UserUpdate, authorization: str = Header(...), db: AsyncSession = Depends(get_db)):
+    token = authorization.replace("Bearer ", "")
+    user = await get_current_user(db, token)
+    if body.full_name is not None:
+        user.full_name = body.full_name
+    if body.github_token is not None:
+        user.github_token = body.github_token
+    await db.commit()
+    await db.refresh(user)
     return UserResponse.model_validate(user)

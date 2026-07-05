@@ -13,4 +13,5 @@ class User(Base):
     picture = Column(String, nullable=True)
     auth_provider = Column(String, default="email")
     is_active = Column(Boolean, default=True)
+    github_token = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

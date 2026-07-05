@@ -19,6 +19,7 @@ from app.services.ai_service import (
     generate_ui_xml, generate_html_from_xml, generate_api_from_xml,
     generate_er_diagram,
 )
+from app.services.github_service import create_repo, push_files, build_push_files
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -58,6 +59,17 @@ async def create_project(body: ProjectCreate, user=Depends(_get_user), db: Async
     db.add(project)
     await db.commit()
     await db.refresh(project)
+
+    if user.github_token:
+        try:
+            repo = await create_repo(user.github_token, body.name, body.description or "")
+            project.github_repo = repo["full_name"]
+            project.github_repo_url = repo["html_url"]
+            await db.commit()
+            await db.refresh(project)
+        except Exception:
+            pass  # GitHub failure must not block project creation
+
     return ProjectResponse.model_validate(project)
 
 
@@ -394,3 +406,27 @@ async def gen_er_diagram(project_id: int, user=Depends(_get_user), db: AsyncSess
     await db.commit()
     await db.refresh(project)
     return ProjectResponse.model_validate(project)
+
+
+@router.post("/{project_id}/push-to-github")
+async def push_to_github(project_id: int, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    if not user.github_token:
+        raise HTTPException(status_code=400, detail="No GitHub token saved. Go to Settings to add your token.")
+    project = await _get_project(project_id, user, db)
+    if not project.github_repo:
+        try:
+            repo = await create_repo(user.github_token, project.name, project.description or "")
+            project.github_repo = repo["full_name"]
+            project.github_repo_url = repo["html_url"]
+            await db.commit()
+            await db.refresh(project)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to create GitHub repo: {e}")
+    files = build_push_files(project)
+    if not files:
+        raise HTTPException(status_code=400, detail="Nothing to push yet. Generate some code first.")
+    try:
+        await push_files(user.github_token, project.github_repo, files)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Push failed: {e}")
+    return {"message": "Code pushed to GitHub", "repo_url": project.github_repo_url}

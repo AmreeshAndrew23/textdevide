@@ -23,6 +23,8 @@ class Project(Base):
     ui_api = Column(Text, nullable=True)
     er_diagram = Column(Text, nullable=True)
     ui_screens = Column(Text, nullable=True)
+    github_repo = Column(String, nullable=True)
+    github_repo_url = Column(String, nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

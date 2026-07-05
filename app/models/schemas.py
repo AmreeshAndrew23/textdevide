@@ -30,9 +30,15 @@ class UserResponse(BaseModel):
     full_name: Optional[str] = None
     picture: Optional[str] = None
     auth_provider: str
+    github_token: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    github_token: Optional[str] = None
 
 
 class ProjectCreate(BaseModel):
@@ -79,6 +85,8 @@ class ProjectResponse(BaseModel):
     ui_api: Optional[str] = None
     er_diagram: Optional[str] = None
     ui_screens: Optional[str] = None
+    github_repo: Optional[str] = None
+    github_repo_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -93,6 +101,7 @@ class ProjectListResponse(BaseModel):
     status: str = "draft"
     language: str = "Python"
     entities: Optional[str] = None
+    github_repo_url: Optional[str] = None
     updated_at: datetime
 
     class Config:
