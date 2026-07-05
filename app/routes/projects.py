@@ -19,7 +19,7 @@ from app.services.ai_service import (
     generate_ui_xml, generate_html_from_xml, generate_api_from_xml,
     generate_er_diagram,
 )
-from app.services.github_service import create_repo, push_files, build_push_files
+from app.services.github_service import create_repo, push_files, build_push_files, build_commit_message
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -422,11 +422,12 @@ async def push_to_github(project_id: int, user=Depends(_get_user), db: AsyncSess
             await db.refresh(project)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to create GitHub repo: {e}")
-    files = build_push_files(project)
+    files, screen_names = build_push_files(project)
     if not files:
         raise HTTPException(status_code=400, detail="Nothing to push yet. Generate some code first.")
+    commit_msg = build_commit_message(project, screen_names)
     try:
-        await push_files(user.github_token, project.github_repo, files)
+        await push_files(user.github_token, project.github_repo, files, commit_message=commit_msg)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Push failed: {e}")
-    return {"message": "Code pushed to GitHub", "repo_url": project.github_repo_url}
+    return {"message": f"Pushed: {commit_msg}", "repo_url": project.github_repo_url}

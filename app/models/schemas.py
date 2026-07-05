@@ -135,6 +135,10 @@ class GenerateFromXmlRequest(BaseModel):
     frontend_lang: str = "HTML/CSS"
 
 
+class PushToGithubRequest(BaseModel):
+    commit_message: str = "Update from Text Dev IDE"
+
+
 class ScreenCreate(BaseModel):
     name: str
     description: str = ""

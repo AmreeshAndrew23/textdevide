@@ -72,11 +72,13 @@ def build_push_files(project) -> dict:
                "C#": "cs", "Go": "go", "Ruby": "rb", "PHP": "php"}.get(project.language, "txt")
         files[f"src/validation.{ext}"] = project.validation_code
 
+    screen_names = []
     if project.ui_screens:
         try:
             screens = json.loads(project.ui_screens)
             for screen in screens:
                 name = re.sub(r"[^a-zA-Z0-9_\-]", "_", screen.get("name", "screen"))
+                screen_names.append(screen.get("name", name))
                 if screen.get("html"):
                     files[f"ui/{name}.html"] = screen["html"]
                 if screen.get("xml"):
@@ -84,4 +86,16 @@ def build_push_files(project) -> dict:
         except Exception:
             pass
 
-    return files
+    return files, screen_names
+
+
+def build_commit_message(project, screen_names: list) -> str:
+    parts = []
+    if project.validation_code:
+        parts.append("validation code")
+    if screen_names:
+        names = ", ".join(screen_names[:3])
+        suffix = f" +{len(screen_names) - 3} more" if len(screen_names) > 3 else ""
+        parts.append(f"{len(screen_names)} screen{'s' if len(screen_names) > 1 else ''}: {names}{suffix}")
+    body = " and ".join(parts) if parts else "project files"
+    return f"Update {body}"
