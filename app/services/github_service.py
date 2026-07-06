@@ -63,11 +63,11 @@ def build_push_files(project) -> tuple:
     root
     ├── README.md
     ├── meta-data/
-    │   ├── schema/          ← screen XML definitions
-    │   ├── validations/     ← validation rules text
-    │   └── ui/              ← screen descriptions
+    │   ├── schema/          ← database table XML (one per table, e.g. Course.xml)
+    │   ├── ui/              ← screen XML definitions (one per screen)
+    │   └── validations/     ← validation rules text
     └── deployment/
-        ├── db-design/       ← SQL schema
+        ├── db-design/       ← SQL files (one per table, e.g. Course.sql)
         ├── html/            ← generated HTML screens
         ├── API/             ← generated API code per screen
         └── common-library/  ← validation/entity code (Python/Java/etc)
@@ -82,10 +82,10 @@ def build_push_files(project) -> tuple:
         readme += f"{project.description}\n\n"
     readme += f"**Language:** {project.language}\n\n"
     readme += "## Structure\n"
-    readme += "- `meta-data/schema/` — UI screen XML definitions\n"
+    readme += "- `meta-data/schema/` — database table XML definitions (one per table)\n"
+    readme += "- `meta-data/ui/` — screen XML definitions (one per screen)\n"
     readme += "- `meta-data/validations/` — validation rules\n"
-    readme += "- `meta-data/ui/` — screen descriptions\n"
-    readme += "- `deployment/db-design/` — database SQL schema\n"
+    readme += "- `deployment/db-design/` — SQL files (one per table)\n"
     readme += "- `deployment/html/` — generated HTML screens\n"
     readme += "- `deployment/API/` — generated REST API code\n"
     readme += f"- `deployment/common-library/` — entity/validation code ({project.language})\n\n"
@@ -100,19 +100,42 @@ def build_push_files(project) -> tuple:
     if project.validation_code:
         files[f"deployment/common-library/validation.{ext}"] = project.validation_code
 
-    # deployment/db-design/ — SQL schema from entities
+    # meta-data/schema/ — one XML per database table (entity structure)
+    # deployment/db-design/ — one SQL file per table
     if project.entities:
         try:
             entities = json.loads(project.entities)
-            sql_lines = ["-- Auto-generated SQL schema\n"]
             for table in entities.get("tables", []):
+                tname = table["name"]
+
+                # Entity XML
+                xml_lines = [f'<?xml version="1.0" encoding="UTF-8"?>',
+                             f'<entity name="{tname}">',
+                             '  <columns>']
+                for col in table.get("columns", []):
+                    pk = str(col.get("pk", False)).lower()
+                    fk = col.get("fk") or "null"
+                    xml_lines.append(
+                        f'    <column name="{col["name"]}" type="{col.get("type","VARCHAR")}" pk="{pk}" fk="{fk}"/>'
+                    )
+                xml_lines += ['  </columns>', '</entity>']
+                files[f"meta-data/schema/{tname}.xml"] = "\n".join(xml_lines)
+
+                # Individual SQL file
                 cols = []
+                fk_constraints = []
                 for col in table.get("columns", []):
                     col_type = col.get("type", "VARCHAR(255)")
                     pk = " PRIMARY KEY" if col.get("pk") else ""
                     cols.append(f"  {col['name']} {col_type}{pk}")
-                sql_lines.append(f"CREATE TABLE IF NOT EXISTS {table['name']} (\n" + ",\n".join(cols) + "\n);\n")
-            files["deployment/db-design/schema.sql"] = "\n".join(sql_lines)
+                    if col.get("fk"):
+                        ref_table, ref_col = (col["fk"].split(".") + ["id"])[:2]
+                        fk_constraints.append(
+                            f"  FOREIGN KEY ({col['name']}) REFERENCES {ref_table}({ref_col})"
+                        )
+                all_cols = cols + fk_constraints
+                sql = f"-- {tname} table\nCREATE TABLE IF NOT EXISTS {tname} (\n" + ",\n".join(all_cols) + "\n);\n"
+                files[f"deployment/db-design/{tname}.sql"] = sql
         except Exception:
             pass
 
@@ -125,13 +148,9 @@ def build_push_files(project) -> tuple:
                 slug = re.sub(r"[^a-zA-Z0-9_\-]", "_", screen.get("name", "screen"))
                 screen_names.append(screen.get("name", slug))
 
-                # meta-data/schema/ — XML definition
+                # meta-data/ui/ — screen XML definition
                 if screen.get("xml"):
-                    files[f"meta-data/schema/{slug}.xml"] = screen["xml"]
-
-                # meta-data/ui/ — screen description
-                if screen.get("description"):
-                    files[f"meta-data/ui/{slug}.md"] = f"# {screen.get('name', slug)}\n\n{screen['description']}\n"
+                    files[f"meta-data/ui/{slug}.xml"] = screen["xml"]
 
                 # deployment/html/
                 if screen.get("html"):

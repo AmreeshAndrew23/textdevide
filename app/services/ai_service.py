@@ -166,8 +166,15 @@ Generate a well-structured XML that defines the entire screen. Include:
 
 3. <header> — title, subtitle, breadcrumb
 
-4. <form> with <fieldset> groups containing fields:
-   - <field type="text|number|date|select|textarea"> with id, label, binding, required, maxLength
+4. <form> with <fieldset> groups containing fields. Use the CORRECT type for each field:
+   - type="select"   → dropdown. Add dataSource="EntityName" valueField="id" displayField="name". Renders as <select> with options.
+   - type="lookup"   → text input WITH a lookup/search button beside it. Add lookupEntity="EntityName" lookupField="field". Clicking the button opens a search. Use when user says "lookup", "search button", or "with a button".
+   - type="text"     → plain text input
+   - type="number"   → numeric input
+   - type="date"     → date picker
+   - type="textarea" → multi-line text
+   - Add readonly="true" on fields that auto-populate from another field (e.g. name filled after selecting a code). These render as disabled/greyed inputs.
+   - Add autoFill="from:fieldId" to indicate which field triggers the auto-population.
    - <rule> children for validation (required, pattern, unique, maxLength, minValue, maxValue)
    - <hint> for helper text
    - NEVER generate radio buttons. Use <select> for choices.
@@ -258,6 +265,11 @@ CRITICAL LAYOUT RULE: This is a DESKTOP WEB APPLICATION. The layout must be FULL
      * ID/code inputs: font-family monospace, letter-spacing 0.05em
      * Focus: border-color var(--clr-primary), box-shadow 0 0 0 3px rgba(var(--clr-primary-rgb),0.12)
      * Error message: 12px color var(--clr-danger), margin-top 4px, hidden by default
+   - FIELD TYPE RENDERING RULES (critical — follow exactly):
+     * type="select" → render as <select> dropdown with realistic sample <option> values from sampleData or inferred from domain. NEVER render as <input type="text">.
+     * type="lookup" → render as a row with: text <input> (flex:1) + adjacent "🔍 Lookup" button (background var(--clr-primary), color white, border-radius 6px, padding 8px 14px, no border, cursor pointer, margin-left 8px). Clicking shows an alert or inline modal stub.
+     * readonly="true" → render as <input disabled> with background #F1F5F9, color #6B7280, cursor not-allowed. Label shows "(auto)" in muted text.
+     * autoFill fields → add JS so selecting/entering the source field updates the readonly target field with a realistic value.
    - Fieldset: HTML <fieldset> + <legend> uppercase 10.5px letter-spacing 0.08em color #9CA3AF, margin-bottom 20px
 
 4. LIST/GRID CARD (same card style as form card, margin: 20px 40px 0)
@@ -390,7 +402,7 @@ Generate the following files:
 Return ONLY code with === FILENAME: === separators, no explanations."""
 
 
-async def _call_openai(messages: list, use_json: bool = False) -> str:
+async def _call_openai(messages: list, use_json: bool = False, timeout: int = 60) -> str:
     if not OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY not configured. Add it to your .env file.")
 
@@ -401,7 +413,7 @@ async def _call_openai(messages: list, use_json: bool = False) -> str:
     if use_json:
         body["response_format"] = {"type": "json_object"}
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
             "https://api.openai.com/v1/chat/completions",
             headers={
@@ -573,7 +585,7 @@ async def generate_html_from_xml(xml: str, frontend_lang: str = "HTML/CSS") -> s
     return await _call_openai([
         {"role": "system", "content": f"You are a senior {frontend_lang} frontend developer. Return ONLY the complete output file for the chosen framework. No markdown fences."},
         {"role": "user", "content": prompt},
-    ])
+    ], timeout=180)
 
 
 async def generate_api_from_xml(xml: str, backend_lang: str = "Python", frontend_lang: str = "React") -> str:
@@ -581,7 +593,7 @@ async def generate_api_from_xml(xml: str, backend_lang: str = "Python", frontend
     return await _call_openai([
         {"role": "system", "content": f"You are a full-stack developer. Generate {backend_lang} backend + {frontend_lang} frontend code. Use === FILENAME: name.ext === to separate files. Return ONLY code."},
         {"role": "user", "content": prompt},
-    ])
+    ], timeout=180)
 
 
 async def generate_er_diagram(entities: dict) -> str:
