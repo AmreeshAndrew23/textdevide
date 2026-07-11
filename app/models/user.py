@@ -14,4 +14,7 @@ class User(Base):
     auth_provider = Column(String, default="email")
     is_active = Column(Boolean, default=True)
     github_token = Column(String, nullable=True)
+    # User configuration
+    date_format = Column(String, nullable=True, default="YYYY-MM-DD")
+    language = Column(String, nullable=True, default="en")
     created_at = Column(DateTime(timezone=True), server_default=func.now())

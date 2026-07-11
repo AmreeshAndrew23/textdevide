@@ -28,11 +28,27 @@ async def create_repo(token: str, name: str, description: str = "") -> dict:
             json={"name": slug, "description": description, "private": True, "auto_init": True},
         )
         if res.status_code == 422:
-            # Repo already exists — fetch it
+            # Usually means the repo already exists — try to fetch it.
             me = await client.get(f"{GITHUB_API}/user", headers=_headers(token))
-            username = me.json()["login"]
+            if me.status_code != 200:
+                raise RuntimeError(f"Invalid GitHub token ({me.status_code}). Check the token in Settings.")
+            username = me.json().get("login")
             existing = await client.get(f"{GITHUB_API}/repos/{username}/{slug}", headers=_headers(token))
-            return {"name": slug, "html_url": existing.json()["html_url"], "full_name": existing.json()["full_name"]}
+            if existing.status_code == 200:
+                data = existing.json()
+                return {"name": slug, "html_url": data["html_url"], "full_name": data["full_name"]}
+            # 422 for some other reason — surface GitHub's message.
+            msg = res.json().get("message", res.text)
+            raise RuntimeError(f"Could not create repo '{slug}': {msg}")
+        if res.status_code in (401, 403, 404):
+            try:
+                msg = res.json().get("message", res.text)
+            except Exception:
+                msg = res.text
+            raise RuntimeError(
+                f"GitHub rejected the token ({res.status_code}: {msg}). "
+                "Make sure it is a valid Personal Access Token with 'repo' scope."
+            )
         res.raise_for_status()
         data = res.json()
         return {"name": slug, "html_url": data["html_url"], "full_name": data["full_name"]}
@@ -40,6 +56,7 @@ async def create_repo(token: str, name: str, description: str = "") -> dict:
 
 async def push_files(token: str, full_name: str, files: dict, commit_message: str = "Update from Text Dev IDE") -> None:
     """Push multiple files to a repo. files = {path: content_str}"""
+    errors = []
     async with httpx.AsyncClient(timeout=30) as client:
         for path, content in files.items():
             encoded = base64.b64encode(content.encode()).decode()
@@ -49,11 +66,21 @@ async def push_files(token: str, full_name: str, files: dict, commit_message: st
             payload = {"message": commit_message, "content": encoded}
             if sha:
                 payload["sha"] = sha
-            await client.put(
+            res = await client.put(
                 f"{GITHUB_API}/repos/{full_name}/contents/{path}",
                 headers=_headers(token),
                 json=payload,
             )
+            if res.status_code not in (200, 201):
+                try:
+                    detail = res.json().get("message", res.text)
+                except Exception:
+                    detail = res.text
+                errors.append(f"{path} ({res.status_code}: {detail})")
+
+    if errors:
+        # Surface the real GitHub failure instead of silently reporting success.
+        raise RuntimeError("GitHub rejected some files: " + "; ".join(errors[:5]))
 
 
 def build_push_files(project) -> tuple:

@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
 
 
@@ -18,6 +18,11 @@ class GoogleTokenRequest(BaseModel):
     credential: str
 
 
+class GithubCodeRequest(BaseModel):
+    code: str
+    redirect_uri: Optional[str] = None
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -31,6 +36,18 @@ class UserResponse(BaseModel):
     picture: Optional[str] = None
     auth_provider: str
     github_token: Optional[str] = None
+    date_format: str = "YYYY-MM-DD"
+    language: str = "en"
+
+    @field_validator("date_format", mode="before")
+    @classmethod
+    def _default_date_format(cls, v):
+        return v or "YYYY-MM-DD"
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _default_language(cls, v):
+        return v or "en"
 
     class Config:
         from_attributes = True
@@ -39,6 +56,13 @@ class UserResponse(BaseModel):
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     github_token: Optional[str] = None
+    date_format: Optional[str] = None
+    language: Optional[str] = None
+
+
+class ConfigOptionsResponse(BaseModel):
+    date_formats: list[str]
+    languages: list[dict]
 
 
 class ProjectCreate(BaseModel):

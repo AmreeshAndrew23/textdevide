@@ -12,7 +12,9 @@ Return ONLY valid JSON in this exact format:
       "columns": [
         {"name": "id", "type": "INT", "pk": true, "fk": null},
         {"name": "user_id", "type": "INT", "pk": false, "fk": "Users.id"},
-        {"name": "email", "type": "VARCHAR", "pk": false, "fk": null}
+        {"name": "full_name", "type": "VARCHAR(100)", "pk": false, "fk": null},
+        {"name": "email", "type": "VARCHAR(255)", "pk": false, "fk": null},
+        {"name": "date_of_birth", "type": "DATE", "pk": false, "fk": null}
       ]
     }
   ]
@@ -20,7 +22,14 @@ Return ONLY valid JSON in this exact format:
 
 Rules:
 - Every table must have an "id" column as primary key
-- Use proper data types: INT, VARCHAR, TEXT, BOOLEAN, DECIMAL, DATE, TIMESTAMP
+- Use proper data types: INT, VARCHAR(n), TEXT, BOOLEAN, DECIMAL, DATE, TIMESTAMP
+- For every VARCHAR column, ALWAYS include a suggested length, e.g. VARCHAR(50). Choose a sensible length for the field's purpose:
+    - short codes / status / country: VARCHAR(20)
+    - names / titles / cities: VARCHAR(100)
+    - email / URL / file paths: VARCHAR(255)
+    - long free text with no clear limit: use TEXT instead of VARCHAR
+- Use the DATE type for calendar dates such as date_of_birth, joined_date, or start_date (do NOT store dates as VARCHAR)
+- Use TIMESTAMP for created_at / updated_at style audit fields
 - Mark foreign keys with the referenced "Table.column"
 - Name tables in PascalCase
 - Name columns in snake_case"""
@@ -54,6 +63,8 @@ Current schema:
 {entities}
 
 User's instruction: {instruction}
+
+Keep VARCHAR columns with an explicit suggested length (e.g. VARCHAR(100)) and use DATE for calendar fields such as date_of_birth.
 
 Return ONLY the updated valid JSON in the same format (with "tables" array containing table objects with "name" and "columns")."""
 
