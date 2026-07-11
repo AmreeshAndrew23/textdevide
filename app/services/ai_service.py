@@ -64,7 +64,14 @@ Current schema:
 
 User's instruction: {instruction}
 
-Keep VARCHAR columns with an explicit suggested length (e.g. VARCHAR(100)) and use DATE for calendar fields such as date_of_birth.
+Rules:
+- For every VARCHAR column, ALWAYS include a suggested length, e.g. VARCHAR(50). Choose a sensible length for the field's purpose:
+    - short codes / status / country: VARCHAR(20)
+    - names / titles / cities: VARCHAR(100)
+    - email / URL / file paths: VARCHAR(255)
+    - long free text with no clear limit: use TEXT instead of VARCHAR
+- Use the DATE type for calendar dates such as date_of_birth, joined_date, or start_date (do NOT store dates as VARCHAR), e.g. {{"name": "date_of_birth", "type": "DATE", "pk": false, "fk": null}}
+- Use TIMESTAMP for created_at / updated_at style audit fields
 
 Return ONLY the updated valid JSON in the same format (with "tables" array containing table objects with "name" and "columns")."""
 
@@ -159,6 +166,26 @@ Generate clean, well-structured UI code. If the language is:
 - HTML: generate plain HTML forms with CSS
 
 Return ONLY the code with file separators, no explanations or markdown fences."""
+
+SCREEN_INTENT_PROMPT = """You are a UI/UX architect analyzing a screen request. The description below may describe ONE screen, or it may describe MULTIPLE distinct screens (e.g. "one screen for X, another screen for Y", "also add a screen to...", or a list of separate unrelated forms/pages).
+
+Description:
+{description}
+
+Split the description into one entry per distinct screen it implies. If it only describes a single screen, return exactly one entry.
+
+Return ONLY valid JSON in this exact format:
+{{
+  "screens": [
+    {{"name": "Short Screen Name", "description": "Self-contained description of what THIS screen alone should contain — rewritten so it makes sense without referencing the other screens."}}
+  ]
+}}
+
+Rules:
+- Keep each "name" short (2-5 words), Title Case
+- Each "description" must stand alone and preserve every relevant detail from the original text for that screen — do not drop information, just split it correctly
+- Do not invent screens that are not implied by the text
+- Return ONLY the JSON, no explanations or markdown fences"""
 
 UI_XML_PROMPT = """You are a UI/UX architect. Given a screen description and database schema, generate a complete XML UI definition.
 
@@ -578,6 +605,18 @@ async def generate_ui_code(description: str, entities: dict | None, language: st
         {"role": "system", "content": f"You are a UI code generator for {language}. Return ONLY code."},
         {"role": "user", "content": prompt},
     ])
+
+
+async def detect_screen_intents(description: str) -> dict:
+    prompt = SCREEN_INTENT_PROMPT.format(description=description)
+    text = await _call_openai([
+        {"role": "system", "content": "You are a UI/UX architect. Return ONLY valid JSON."},
+        {"role": "user", "content": prompt},
+    ], use_json=True)
+    data = json.loads(text.strip())
+    if not data.get("screens"):
+        data["screens"] = [{"name": description[:40].strip(), "description": description}]
+    return data
 
 
 async def generate_ui_xml(description: str, entities: dict | None) -> str:

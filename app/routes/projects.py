@@ -17,7 +17,7 @@ from app.services.ai_service import (
     extract_entities, refine_entities, generate_sql,
     generate_entity_code, edit_validation_code, generate_ui_code,
     generate_ui_xml, generate_html_from_xml, generate_api_from_xml,
-    generate_er_diagram,
+    generate_er_diagram, detect_screen_intents,
 )
 from app.services.github_service import create_repo, push_files, build_push_files, build_commit_message
 
@@ -285,6 +285,15 @@ def _find_screen(screens: list, screen_id: str):
         if s.get("id") == screen_id:
             return i, s
     return -1, None
+
+
+@router.post("/{project_id}/screens/detect-intents")
+async def detect_screens(project_id: int, body: GenerateUIXmlRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    await _get_project(project_id, user, db)
+    try:
+        return await detect_screen_intents(body.description)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Screen intent detection failed: {e}")
 
 
 @router.post("/{project_id}/screens", response_model=ProjectResponse)
