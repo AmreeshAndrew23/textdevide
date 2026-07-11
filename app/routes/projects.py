@@ -7,10 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.project import Project
+from app.models.prompt_log import PromptLog
 from app.models.schemas import (
     ProjectCreate, ProjectUpdate, ProjectResponse, ProjectListResponse,
     ExtractRequest, RefineRequest, GenerateValidationRequest, GenerateUIRequest,
     GenerateUIXmlRequest, GenerateFromXmlRequest, ScreenCreate, ScreenUpdate,
+    PromptLogResponse,
 )
 from app.services.auth_service import get_current_user
 from app.services.ai_service import (
@@ -37,6 +39,11 @@ async def _get_project(project_id: int, user, db: AsyncSession) -> Project:
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
+
+async def _log_prompt(db: AsyncSession, user_id: int, project_id: int, kind: str, prompt: str, response: str):
+    db.add(PromptLog(user_id=user_id, project_id=project_id, kind=kind, prompt=prompt, response=response))
+    await db.commit()
 
 
 @router.get("", response_model=list[ProjectListResponse])
@@ -103,6 +110,8 @@ async def extract_project_entities(project_id: int, body: ExtractRequest, user=D
         entities = await extract_entities(body.description, body.features)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI extraction failed: {e}")
+    await _log_prompt(db, user.id, project.id, "extract_entities",
+                       f"Description: {body.description}\n\nFeatures: {body.features}", json.dumps(entities))
 
     try:
         entity_code = await generate_entity_code(entities, project.language or "Python")
@@ -127,6 +136,7 @@ async def refine_project_entities(project_id: int, body: RefineRequest, user=Dep
         entities = await refine_entities(body.entities, body.instruction)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI refinement failed: {e}")
+    await _log_prompt(db, user.id, project.id, "refine_entities", body.instruction, json.dumps(entities))
 
     project.entities = json.dumps(entities)
     project.status = "draft"
@@ -174,6 +184,16 @@ async def download_json(project_id: int, user=Depends(_get_user), db: AsyncSessi
     filename = f"{project.name.lower().replace(' ', '_')}_schema.json"
     return Response(content=formatted, media_type="application/json",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@router.get("/{project_id}/prompt-logs", response_model=list[PromptLogResponse])
+async def list_prompt_logs(project_id: int, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    await _get_project(project_id, user, db)
+    result = await db.execute(
+        select(PromptLog).where(PromptLog.project_id == project_id, PromptLog.user_id == user.id)
+        .order_by(PromptLog.created_at.desc())
+    )
+    return [PromptLogResponse.model_validate(p) for p in result.scalars().all()]
 
 
 @router.post("/{project_id}/generate-validation", response_model=ProjectResponse)
@@ -348,6 +368,7 @@ async def gen_screen_xml(project_id: int, screen_id: str, body: GenerateUIXmlReq
         xml = await generate_ui_xml(description=body.description, entities=entities)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"XML generation failed: {e}")
+    await _log_prompt(db, user.id, project.id, "screen_generate_xml", body.description, xml)
     screen["description"] = body.description
     screen["xml"] = xml
     screen["html"] = ""
@@ -370,6 +391,7 @@ async def gen_screen_html(project_id: int, screen_id: str, body: GenerateFromXml
         html = await generate_html_from_xml(xml=body.xml, frontend_lang=body.frontend_lang)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"HTML generation failed: {e}")
+    await _log_prompt(db, user.id, project.id, "screen_generate_html", body.xml, html)
     screen["html"] = html
     screens[idx] = screen
     _save_screens(project, screens)
@@ -389,6 +411,7 @@ async def gen_screen_api(project_id: int, screen_id: str, body: GenerateFromXmlR
         api_code = await generate_api_from_xml(xml=body.xml, backend_lang=project.language or "Python", frontend_lang=project.frontend_language or "React")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"API generation failed: {e}")
+    await _log_prompt(db, user.id, project.id, "screen_generate_api", body.xml, api_code)
     screen["api"] = api_code
     screens[idx] = screen
     _save_screens(project, screens)

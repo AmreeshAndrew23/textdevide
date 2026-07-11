@@ -171,3 +171,15 @@ class ScreenCreate(BaseModel):
 class ScreenUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+
+
+class PromptLogResponse(BaseModel):
+    id: int
+    project_id: Optional[int] = None
+    kind: str
+    prompt: str
+    response: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

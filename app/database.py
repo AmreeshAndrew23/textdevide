@@ -42,6 +42,7 @@ def _add_missing_columns(conn):
 async def init_db():
     from app.models.user import User  # noqa: F401
     from app.models.project import Project  # noqa: F401
+    from app.models.prompt_log import PromptLog  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_add_missing_columns)
