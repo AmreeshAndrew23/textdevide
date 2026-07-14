@@ -2,7 +2,7 @@ import json
 import uuid
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import select, delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -12,14 +12,15 @@ from app.models.schemas import (
     ProjectCreate, ProjectUpdate, ProjectResponse, ProjectListResponse,
     ExtractRequest, RefineRequest, GenerateValidationRequest, GenerateUIRequest,
     GenerateUIXmlRequest, GenerateFromXmlRequest, ScreenCreate, ScreenUpdate,
-    PromptLogResponse,
+    PromptLogResponse, WorkbenchInterpretRequest, WorkbenchInterpretResponse,
+    WorkbenchConfirmRequest,
 )
 from app.services.auth_service import get_current_user
 from app.services.ai_service import (
     extract_entities, refine_entities, generate_sql,
     generate_entity_code, edit_validation_code, generate_ui_code,
     generate_ui_xml, generate_html_from_xml, generate_api_from_xml,
-    generate_er_diagram, detect_screen_intents,
+    generate_er_diagram, detect_screen_intents, interpret_requirement,
 )
 from app.services.github_service import create_repo, push_files, build_push_files, build_commit_message
 
@@ -99,6 +100,7 @@ async def update_project(project_id: int, body: ProjectUpdate, user=Depends(_get
 @router.delete("/{project_id}", status_code=204)
 async def delete_project(project_id: int, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
     project = await _get_project(project_id, user, db)
+    await db.execute(sa_delete(PromptLog).where(PromptLog.project_id == project_id))
     await db.delete(project)
     await db.commit()
 
@@ -140,6 +142,92 @@ async def refine_project_entities(project_id: int, body: RefineRequest, user=Dep
 
     project.entities = json.dumps(entities)
     project.status = "draft"
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+@router.post("/{project_id}/workbench/interpret", response_model=WorkbenchInterpretResponse)
+async def workbench_interpret(project_id: int, body: WorkbenchInterpretRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+
+    # A follow-up refinement call passes back the current (unsaved) draft so nothing
+    # is persisted until the user confirms; the first call in a session falls back
+    # to whatever is already saved on the project.
+    if body.current_entities is not None or body.current_screens is not None or body.current_validation_rules is not None:
+        entities = body.current_entities
+        screens = body.current_screens
+        validation_rules = body.current_validation_rules
+    else:
+        entities = json.loads(project.entities) if project.entities else None
+        screens = _get_screens(project)
+        validation_rules = project.validation_rules
+
+    try:
+        result = await interpret_requirement(body.requirement, entities, screens, validation_rules)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Requirement interpretation failed: {e}")
+
+    await _log_prompt(db, user.id, project.id, "workbench_interpret", body.requirement, json.dumps(result))
+    return WorkbenchInterpretResponse(**result)
+
+
+@router.post("/{project_id}/workbench/confirm", response_model=ProjectResponse)
+async def workbench_confirm(project_id: int, body: WorkbenchConfirmRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    entities = body.entities
+
+    project.entities = json.dumps(entities)
+    project.status = "draft"
+
+    try:
+        entity_code = await generate_entity_code(entities, project.language or "Python")
+    except Exception:
+        entity_code = None
+
+    validation_code = entity_code
+    if body.validation_rules and body.validation_rules.strip():
+        try:
+            validation_code = await edit_validation_code(
+                instruction=body.validation_rules,
+                existing_code=entity_code or "",
+                entities=entities,
+                language=project.language or "Python",
+            )
+            await _log_prompt(db, user.id, project.id, "workbench_validation_code", body.validation_rules, validation_code)
+        except Exception:
+            pass  # fall back to the plain entity code if rule-layering fails
+
+    project.validation_rules = body.validation_rules
+    if validation_code:
+        project.validation_code = validation_code
+
+    existing_screens = _get_screens(project)
+    by_name = {s.get("name", "").strip().lower(): s for s in existing_screens}
+    new_screens = []
+    for item in body.screens:
+        name = (item.get("name") or "Screen").strip()
+        desc = item.get("description") or ""
+        prior = by_name.get(name.lower())
+        screen_id = prior["id"] if prior else str(uuid.uuid4())[:8]
+
+        try:
+            xml = await generate_ui_xml(description=desc, entities=entities)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"XML generation failed for screen '{name}': {e}")
+        await _log_prompt(db, user.id, project.id, "workbench_screen_xml", desc, xml)
+
+        try:
+            html = await generate_html_from_xml(xml=xml, frontend_lang=project.frontend_language or "React")
+        except Exception:
+            html = ""
+        if html:
+            await _log_prompt(db, user.id, project.id, "workbench_screen_html", xml, html)
+
+        new_screens.append({"id": screen_id, "name": name, "description": desc, "xml": xml, "html": html, "api": ""})
+
+    _save_screens(project, new_screens)
+
     await db.commit()
     await db.refresh(project)
     return ProjectResponse.model_validate(project)
@@ -428,7 +516,7 @@ async def gen_er_diagram(project_id: int, user=Depends(_get_user), db: AsyncSess
 
     try:
         entities = json.loads(project.entities)
-        diagram = await generate_er_diagram(entities)
+        diagram = generate_er_diagram(entities)
     except HTTPException:
         raise
     except Exception as e:

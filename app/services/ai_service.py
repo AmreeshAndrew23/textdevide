@@ -2,6 +2,20 @@ import json
 import httpx
 from app.config import OPENAI_API_KEY
 
+# Shared across every prompt that emits database schema JSON, so type/length/naming
+# conventions can't drift between extract/refine/workbench like they did before.
+COLUMN_TYPE_RULES = """- Every table must have an "id" column as primary key
+- For every VARCHAR column, ALWAYS include a suggested length, e.g. VARCHAR(50). Choose a sensible length for the field's purpose:
+    - short codes / status / country: VARCHAR(20)
+    - names / titles / cities: VARCHAR(100)
+    - email / URL / file paths: VARCHAR(255)
+    - long free text with no clear limit: use TEXT instead of VARCHAR
+- Use the DATE type for calendar dates such as date_of_birth, joined_date, or start_date (do NOT store dates as VARCHAR)
+- Use TIMESTAMP for created_at / updated_at style audit fields
+- Mark foreign keys with the referenced "Table.column"
+- Name tables in PascalCase
+- Name columns in snake_case"""
+
 EXTRACT_PROMPT = """You are a database architect. Given the project description and features, extract all database entities (tables) with their columns, primary keys, and foreign keys.
 
 Return ONLY valid JSON in this exact format:
@@ -21,59 +35,49 @@ Return ONLY valid JSON in this exact format:
 }
 
 Rules:
-- Every table must have an "id" column as primary key
-- Use proper data types: INT, VARCHAR(n), TEXT, BOOLEAN, DECIMAL, DATE, TIMESTAMP
-- For every VARCHAR column, ALWAYS include a suggested length, e.g. VARCHAR(50). Choose a sensible length for the field's purpose:
-    - short codes / status / country: VARCHAR(20)
-    - names / titles / cities: VARCHAR(100)
-    - email / URL / file paths: VARCHAR(255)
-    - long free text with no clear limit: use TEXT instead of VARCHAR
-- Use the DATE type for calendar dates such as date_of_birth, joined_date, or start_date (do NOT store dates as VARCHAR)
-- Use TIMESTAMP for created_at / updated_at style audit fields
-- Mark foreign keys with the referenced "Table.column"
-- Name tables in PascalCase
-- Name columns in snake_case"""
-
-ER_DIAGRAM_PROMPT = """You are a database architect creating an entity-relationship diagram. Given the database schema below, generate a Mermaid.js erDiagram definition.
-
-Database Schema:
-{entities}
-
-Rules:
-- Start with "erDiagram"
-- Declare each table as an entity block with its columns and types, e.g.:
-    Student {{
-        int id PK
-        int parent_id FK
-        string name
-    }}
-- Mark primary keys with "PK" and foreign keys with "FK" after the column name
-- Declare relationships between tables using crow's-foot notation based on foreign keys, e.g.:
-    Parent ||--o{{ Student : "has"
-- Use one relationship line per foreign key
-- Choose a short, meaningful verb phrase for each relationship label (e.g. "has", "places", "contains")
-- Keep table and column names exactly as given in the schema
-- Do NOT include markdown fences, explanations, or any text outside the Mermaid syntax
-
-Return ONLY the Mermaid erDiagram definition."""
+""" + COLUMN_TYPE_RULES
 
 REFINE_PROMPT = """You are a database architect. Given the current schema and the user's instruction, update the schema accordingly.
 
 Current schema:
+<current_schema>
 {entities}
+</current_schema>
 
-User's instruction: {instruction}
+User's instruction:
+<user_instruction>
+{instruction}
+</user_instruction>
 
 Rules:
-- For every VARCHAR column, ALWAYS include a suggested length, e.g. VARCHAR(50). Choose a sensible length for the field's purpose:
-    - short codes / status / country: VARCHAR(20)
-    - names / titles / cities: VARCHAR(100)
-    - email / URL / file paths: VARCHAR(255)
-    - long free text with no clear limit: use TEXT instead of VARCHAR
-- Use the DATE type for calendar dates such as date_of_birth, joined_date, or start_date (do NOT store dates as VARCHAR), e.g. {{"name": "date_of_birth", "type": "DATE", "pk": false, "fk": null}}
-- Use TIMESTAMP for created_at / updated_at style audit fields
+""" + COLUMN_TYPE_RULES + """
 
 Return ONLY the updated valid JSON in the same format (with "tables" array containing table objects with "name" and "columns")."""
+
+ARCHITECT_WORKBENCH_PROMPT = """You are a senior software architect helping translate a plain-language requirement into concrete implementation impacts for an application: database schema, UI screens, and business validation rules.
+
+You will be given the CURRENT state of the project (schema, screens, validation rules — any of which may be empty) and a NEW requirement in plain language. Determine the FULL resulting project state after applying the requirement, plus a human-readable summary of what changed.
+
+Return ONLY valid JSON in exactly this shape:
+{
+  "changes": {
+    "db_schema_changes": [{"action_type": "add|modify|remove", "entity_name": "...", "column_name": "..."}],
+    "table_catalog": [{"entity_name": "...", "description": "one-line description of what this table stores, used for query routing"}],
+    "ui_screens": [{"screen_name": "...", "ui_field_name": "...", "action": "what to do, e.g. 'add text input field for user name, required'"}],
+    "business_rules": [{"rule_name": "...", "rule_description": "...", "action": "add|modify|remove"}]
+  },
+  "entities": {"tables": [{"name": "TableName", "columns": [{"name": "id", "type": "INT", "pk": true, "fk": null}]}]},
+  "screens": [{"name": "Short Screen Name", "description": "self-contained description of everything this screen should contain"}],
+  "validation_rules": "plain-language description of ALL business rules (existing + new) combined into one readable block of text"
+}
+
+Rules:
+- "changes" lists ONLY what is new or different because of this specific requirement — a diff for the user to review, not the entire project
+- "entities", "screens", and "validation_rules" must reflect the FULL resulting project state (existing state merged with this requirement), not just the diff
+""" + COLUMN_TYPE_RULES + """
+- Keep each screen's "description" self-contained — it must make sense without referencing other screens
+- If a category has no impact, return an empty array for it (but never drop existing entities/screens/rules that the new requirement doesn't touch)
+- Return ONLY the JSON, no explanations or markdown fences"""
 
 ENTITY_PROMPT = """You MUST generate SEPARATE files for each entity. Each file MUST start with exactly this separator on its own line:
 
@@ -123,13 +127,19 @@ VALIDATION_EDIT_PROMPT = """You are a code generator. You have existing code fil
 Target Language: {language}
 
 Database Schema:
+<current_schema>
 {entities}
+</current_schema>
 
 Existing Code:
+<existing_code>
 {existing_code}
+</existing_code>
 
 User Instruction:
+<user_instruction>
 {instruction}
+</user_instruction>
 
 IMPORTANT RULES:
 1. Separate each file with: === FILENAME: filename.ext ===
@@ -145,10 +155,14 @@ UI_PROMPT = """You are a UI code generator. Given database entities, a descripti
 Target Language: {language}
 
 Database Schema:
+<current_schema>
 {entities}
+</current_schema>
 
 UI Description:
+<ui_description>
 {description}
+</ui_description>
 
 IMPORTANT: Separate each file/component with a line like: === FILENAME: filename.ext ===
 Generate separate files for each form or component.
@@ -170,7 +184,9 @@ Return ONLY the code with file separators, no explanations or markdown fences.""
 SCREEN_INTENT_PROMPT = """You are a UI/UX architect analyzing a screen request. The description below may describe ONE screen, or it may describe MULTIPLE distinct screens (e.g. "one screen for X, another screen for Y", "also add a screen to...", or a list of separate unrelated forms/pages).
 
 Description:
+<screen_request>
 {description}
+</screen_request>
 
 Split the description into one entry per distinct screen it implies. If it only describes a single screen, return exactly one entry.
 
@@ -190,10 +206,14 @@ Rules:
 UI_XML_PROMPT = """You are a UI/UX architect. Given a screen description and database schema, generate a complete XML UI definition.
 
 Database Schema:
+<database_schema>
 {entities}
+</database_schema>
 
 Screen Description:
+<screen_description>
 {description}
+</screen_description>
 
 Generate a well-structured XML that defines the entire screen. Include:
 
@@ -265,11 +285,34 @@ STRICT RULES — NEVER VIOLATE THESE:
 - The page must include a one-line purpose statement pulled from the XML purpose attribute, shown in muted text directly below the page title.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-XML UI Definition:
-{xml}
+VISUAL IDENTITY — pick ONE archetype below that best fits this specific screen's module/title/purpose text, then commit to it fully (color family AND typography AND corner roundedness AND shadow depth all come from the same archetype — don't mix them). Read the actual domain words in the XML closely and choose deliberately; do not default to the same archetype every time out of habit — two different screens should usually end up looking different unless their domains are genuinely similar.
 
-COLOR PALETTE: If colors are specified in the XML use them. Otherwise choose a professional palette matching the domain (blue for HR/admin, green for finance, teal for healthcare, indigo for tech). Define everything as CSS custom properties:
---clr-primary, --clr-primary-dark, --clr-primary-light, --clr-danger, --clr-border, --clr-bg, --clr-surface, --clr-text, --clr-muted, --clr-header-bg
+The hex codes below are only illustrative of each hue FAMILY, not fixed values — pick your own specific shade within that family (vary saturation/lightness) rather than reusing these exact codes. Every generation should land on a slightly different exact hex even within the same archetype.
+
+1. MODERN SAAS — general business tools, dashboards, internal tools: primary hue somewhere in the indigo/violet family, roughly #4F46E5-#8B5CF6-#6D28D9; font 'Inter', system-ui; card radius 10-12px; soft diffused shadows (0 1px 3px rgba(0,0,0,0.08)); spacious padding.
+2. ENTERPRISE CONSOLE — ERP, ops, admin, procurement, logistics: primary hue somewhere in the steel-blue/slate family, roughly #1E3A5F-#334155-#0F4C75; font 'Roboto', 'Segoe UI', system-ui; sharper card radius 4-6px; flatter/tighter shadows; denser padding.
+3. CLINICAL — healthcare, patient records, labs, clinics: primary hue somewhere in the teal/cyan family, roughly #0D9488-#0891B2-#0E7490; font 'Inter', 'Source Sans Pro'; card radius 8px; crisp light shadows; high contrast, generous whitespace.
+4. FINTECH PRECISION — banking, accounting, billing, payments, audits: primary hue somewhere in the deep emerald/navy family, roughly #065F46-#14532D-#1E3A5F; font 'IBM Plex Sans', 'Inter'; card radius 6px; monospace for all currency/numeric values; tight, precise spacing.
+5. WARM CONSUMER — hospitality, booking, retail, food, community, anything customer-facing and friendly: primary hue somewhere in the coral/amber/warm-orange family, roughly #F97316-#EA580C-#DC2626-#D97706; font 'Poppins', 'Nunito', system-ui; rounder card radius 14-16px; soft warm shadows; generous friendly spacing.
+6. EDITORIAL BOLD — creative, media, marketing, content/portfolio tools: primary hue somewhere in the deep purple/magenta family, roughly #7C3AED-#A21CAF-#BE185D; font 'Poppins', 'Manrope'; card radius 12px; bold high-contrast headers; slightly asymmetric shadow depth.
+
+If colors ARE specified in the XML, use those exact color values for --clr-primary and derive the rest of the palette from them, but still pick the archetype's typography/radius/shadow personality that best matches the domain.
+
+Derive EVERY other color from your chosen --clr-primary — nothing below is a fixed value:
+- --clr-bg: a very light, barely-tinted neutral leaning toward --clr-primary's hue (NOT a fixed gray — e.g. a warm archetype gets a warm-tinted off-white, a cool archetype gets a cool-tinted off-white)
+- --clr-header-bg: a dark, deeply saturated shade of --clr-primary itself (not an unrelated dark blue) — this is what makes the header visually match the rest of the identity
+- --clr-surface, --clr-border, --clr-text, --clr-muted: neutral tones consistent with the chosen hue family's temperature (warm hues get warm-leaning neutrals, cool hues get cool-leaning neutrals)
+- --clr-danger stays a clear red regardless of archetype, for universal recognizability
+
+Define the full palette and chosen typography/radius as CSS custom properties so the rest of the page can reference them consistently:
+--clr-primary, --clr-primary-dark, --clr-primary-light, --clr-danger, --clr-border, --clr-bg, --clr-surface, --clr-text, --clr-muted, --clr-header-bg, --font-family, --radius-card
+
+POLISH — avoid a bare/generic look. Within the archetype you picked, add tasteful touches that make this feel like a real, distinct product rather than a wireframe:
+- Header band: a subtle gradient from --clr-header-bg to a slightly darker or lighter tone of the same hue (pick the direction), not a flat single color
+- A small icon or monogram mark next to the module name in the header, colored to match the palette
+- Buttons and the active sort arrow get a brief hover/transition treatment consistent with the archetype's personality (crisp and fast for Enterprise Console, slightly softer/springier for Warm Consumer, etc.)
+- Card header bars may carry a thin 3px left accent border in --clr-primary instead of being perfectly flat, if it fits the archetype
+These are additive polish only — they must never violate the STRICT RULES above (no radio buttons, no extra buttons, grids stay read-only, etc.).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 LAYOUT STRUCTURE (follow exactly in this order):
@@ -278,21 +321,21 @@ LAYOUT STRUCTURE (follow exactly in this order):
 CRITICAL LAYOUT RULE: This is a DESKTOP WEB APPLICATION. The layout must be FULL WIDTH — do NOT use max-width containers, do NOT center content. It must fill the entire browser window like enterprise software (SAP, Oracle, Salesforce). Think 1440px monitor, not mobile.
 
 1. PAGE WRAPPER
-   - background: var(--clr-bg) (#F1F5F9)
+   - background: var(--clr-bg) — the tinted off-white you derived above, NOT a fixed gray
    - min-height: 100vh
    - width: 100%
-   - font-family: 'Inter', system-ui, sans-serif
+   - font-family: var(--font-family) (from the archetype you picked above)
    - NO max-width. NO margin: auto centering. Content fills the full viewport width.
    - Padding: 0 0 80px 0 (bottom only for toolbar clearance)
 
 2. TOP HEADER BAND (full-width)
-   - width: 100%, background: var(--clr-header-bg) — dark rich color (e.g. #0F3460, #1E3A5F)
+   - width: 100%, background: var(--clr-header-bg) — the dark saturated shade of --clr-primary you derived above
    - padding: 20px 40px
    - Module name: 11px uppercase letter-spacing 0.1em color: rgba(255,255,255,0.55)
    - Page title: 24px font-weight 700 color: white, margin-top 4px
    - Purpose line: 13px italic color: rgba(255,255,255,0.5), margin-top 4px (from XML purpose attribute)
 
-3. FORM CARD (white, border-radius 10px, box-shadow 0 1px 4px rgba(0,0,0,0.08), border 1px solid var(--clr-border), margin: 24px 40px 0)
+3. FORM CARD (white, border-radius var(--radius-card), box-shadow matching the archetype's shadow depth, border 1px solid var(--clr-border), margin: 24px 40px 0)
    - Card header bar: background #F8FAFC, padding 12px 20px, border-bottom 1px solid var(--clr-border)
      * Title only — plain bold 14px text, no icons, no radio buttons, no decorative elements
    - Card body: padding 24px 28px
@@ -375,12 +418,14 @@ FINAL CHECKS before returning:
 - Sample data rows are realistic (8-10 rows)
 - All XML fields, buttons, and grid columns are mapped
 
+XML UI Definition:
+<xml_ui_definition>
+{xml}
+</xml_ui_definition>
+
 Return ONLY the complete output file for the chosen framework, with all styles and logic included. No explanations, no markdown fences."""
 
 XML_TO_API_PROMPT = """You are a senior full-stack developer. Generate complete REST API code from this XML UI definition.
-
-XML UI Definition:
-{xml}
 
 Backend Language: {backend_lang}
 Frontend Language: {frontend_lang}
@@ -437,16 +482,22 @@ Generate the following files:
    - Include loading states, error handling, success messages
    - Include confirmation dialogs for destructive actions
 
+XML UI Definition:
+<xml_ui_definition>
+{xml}
+</xml_ui_definition>
+
 Return ONLY code with === FILENAME: === separators, no explanations."""
 
 
-async def _call_openai(messages: list, use_json: bool = False, timeout: int = 60) -> str:
+async def _call_openai(messages: list, use_json: bool = False, timeout: int = 60, temperature: float = 0) -> str:
     if not OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY not configured. Add it to your .env file.")
 
     body = {
         "model": "gpt-4o-mini",
         "messages": messages,
+        "temperature": temperature,
     }
     if use_json:
         body["response_format"] = {"type": "json_object"}
@@ -462,13 +513,20 @@ async def _call_openai(messages: list, use_json: bool = False, timeout: int = 60
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        if choice.get("finish_reason") == "length":
+            raise ValueError("The AI response was cut off before finishing (hit the token limit) — try a shorter or simpler request.")
+        return choice["message"]["content"]
 
 
 async def extract_entities(description: str, features: str) -> dict:
+    user_message = (
+        f"<project_description>\n{description}\n</project_description>\n\n"
+        f"<detailed_features>\n{features}\n</detailed_features>"
+    )
     text = await _call_openai([
         {"role": "system", "content": EXTRACT_PROMPT},
-        {"role": "user", "content": f"Project Description: {description}\n\nDetailed Features: {features}"},
+        {"role": "user", "content": user_message},
     ], use_json=True)
     return json.loads(text.strip())
 
@@ -480,6 +538,42 @@ async def refine_entities(entities: str, instruction: str) -> dict:
         {"role": "user", "content": prompt},
     ], use_json=True)
     return json.loads(text.strip())
+
+
+def _workbench_context(entities: dict | None, screens: list | None, validation_rules: str | None) -> str:
+    parts = []
+    if entities and entities.get("tables"):
+        parts.append(f"Current database schema:\n{json.dumps(entities, indent=2)}")
+    else:
+        parts.append("Current database schema: none yet.")
+    if screens:
+        screen_lines = "\n".join(f"- {s.get('name', '')}: {s.get('description', '')}" for s in screens)
+        parts.append(f"Current screens:\n{screen_lines}")
+    else:
+        parts.append("Current screens: none yet.")
+    parts.append(f"Current validation rules:\n{validation_rules}" if validation_rules else "Current validation rules: none yet.")
+    return "\n\n".join(parts)
+
+
+async def interpret_requirement(requirement: str, entities: dict | None, screens: list | None, validation_rules: str | None) -> dict:
+    context = _workbench_context(entities, screens, validation_rules)
+    user_message = f"<current_project_state>\n{context}\n</current_project_state>\n\n<new_requirement>\n{requirement}\n</new_requirement>"
+    text = await _call_openai([
+        {"role": "system", "content": ARCHITECT_WORKBENCH_PROMPT},
+        {"role": "user", "content": user_message},
+    ], use_json=True, timeout=90)
+    data = json.loads(text.strip())
+    changes = data.get("changes") or {}
+    data["changes"] = {
+        "db_schema_changes": changes.get("db_schema_changes") or [],
+        "table_catalog": changes.get("table_catalog") or [],
+        "ui_screens": changes.get("ui_screens") or [],
+        "business_rules": changes.get("business_rules") or [],
+    }
+    data["entities"] = data.get("entities") or (entities or {"tables": []})
+    data["screens"] = data.get("screens") or (screens or [])
+    data["validation_rules"] = data.get("validation_rules") or (validation_rules or "")
+    return data
 
 
 def generate_sql(entities: dict) -> str:
@@ -633,9 +727,9 @@ async def generate_ui_xml(description: str, entities: dict | None) -> str:
 async def generate_html_from_xml(xml: str, frontend_lang: str = "HTML/CSS") -> str:
     prompt = XML_TO_HTML_PROMPT.format(xml=xml, frontend_lang=frontend_lang)
     return await _call_openai([
-        {"role": "system", "content": f"You are a senior {frontend_lang} frontend developer. Return ONLY the complete output file for the chosen framework. No markdown fences."},
+        {"role": "system", "content": f"You are a senior UI/UX product designer who also writes production {frontend_lang} code. Design first — commit to a distinct visual identity (color, type, spacing, shape) before you touch markup — then implement it precisely and correctly. Return ONLY the complete output file for the chosen framework. No markdown fences."},
         {"role": "user", "content": prompt},
-    ], timeout=180)
+    ], timeout=180, temperature=0.9)  # visual/creative output — temperature=0 made every design collapse to the same "safest" choice
 
 
 async def generate_api_from_xml(xml: str, backend_lang: str = "Python", frontend_lang: str = "React") -> str:
@@ -646,16 +740,33 @@ async def generate_api_from_xml(xml: str, backend_lang: str = "Python", frontend
     ], timeout=180)
 
 
-async def generate_er_diagram(entities: dict) -> str:
-    prompt = ER_DIAGRAM_PROMPT.format(entities=json.dumps(entities, indent=2))
-    text = await _call_openai([
-        {"role": "system", "content": "You are a database architect. Return ONLY Mermaid erDiagram syntax, no markdown fences."},
-        {"role": "user", "content": prompt},
-    ])
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.lower().startswith("mermaid"):
-            text = text[len("mermaid"):]
-        text = text.strip()
-    return text
+def generate_er_diagram(entities: dict) -> str:
+    """Deterministic Mermaid erDiagram — the schema is already fully known, so there's
+    no need to ask the AI to reconstruct it (removes an API call and a failure mode)."""
+    type_map = {
+        "INT": "int", "INTEGER": "int", "TEXT": "string", "BOOLEAN": "bool",
+        "DATE": "date", "TIMESTAMP": "timestamp", "DECIMAL": "decimal",
+    }
+    lines = ["erDiagram"]
+    for table in entities.get("tables", []):
+        lines.append(f"    {table['name']} {{")
+        for col in table.get("columns", []):
+            base_type = col.get("type", "VARCHAR").split("(")[0].upper()
+            mermaid_type = type_map.get(base_type, "string")
+            flag = " PK" if col.get("pk") else (" FK" if col.get("fk") else "")
+            lines.append(f"        {mermaid_type} {col['name']}{flag}")
+        lines.append("    }")
+
+    seen_rels = set()
+    for table in entities.get("tables", []):
+        for col in table.get("columns", []):
+            fk = col.get("fk")
+            if not fk or "." not in fk:
+                continue
+            ref_table = fk.split(".")[0]
+            key = (ref_table, table["name"])
+            if ref_table != table["name"] and key not in seen_rels:
+                seen_rels.add(key)
+                lines.append(f'    {ref_table} ||--o{{ {table["name"]} : "has"')
+
+    return "\n".join(lines)

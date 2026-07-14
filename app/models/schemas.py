@@ -183,3 +183,26 @@ class PromptLogResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class WorkbenchInterpretRequest(BaseModel):
+    requirement: str
+    current_entities: Optional[dict] = None
+    current_screens: Optional[list] = None
+    current_validation_rules: Optional[str] = None
+
+
+class WorkbenchInterpretResponse(BaseModel):
+    changes: dict
+    entities: dict
+    screens: list
+    validation_rules: str
+
+
+class WorkbenchConfirmRequest(BaseModel):
+    entities: dict
+    screens: list
+    validation_rules: str
+
+    class Config:
+        from_attributes = True
