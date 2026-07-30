@@ -70,6 +70,7 @@ class ProjectCreate(BaseModel):
     description: Optional[str] = None
     features: Optional[str] = None
     language: str = "Python"
+    frontend_language: str = "React"
 
 
 class ProjectUpdate(BaseModel):
@@ -111,8 +112,13 @@ class ProjectResponse(BaseModel):
     ui_screens: Optional[str] = None
     github_repo: Optional[str] = None
     github_repo_url: Optional[str] = None
+    github_frontend_repo: Optional[str] = None
+    github_frontend_repo_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # Transient — only populated in the response right after an extract/refine call that hit
+    # genuine ambiguity; never persisted, so it's absent (empty) on every other fetch of the project.
+    unresolved: list = []
 
     class Config:
         from_attributes = True
@@ -142,6 +148,18 @@ class RefineRequest(BaseModel):
     instruction: str
 
 
+class SchemaAssistantRequest(BaseModel):
+    instruction: str
+
+
+class SchemaAssistantResponse(BaseModel):
+    table: dict
+    summary: str
+    suggestions: list[str]
+    entities: str  # the project's full updated entities JSON, so the client can refresh in one round trip
+    unresolved: list = []
+
+
 class GenerateValidationRequest(BaseModel):
     rules: str
 
@@ -159,6 +177,10 @@ class GenerateFromXmlRequest(BaseModel):
     frontend_lang: str = "HTML/CSS"
 
 
+class RefineUIRequest(BaseModel):
+    instruction: str
+
+
 class PushToGithubRequest(BaseModel):
     commit_message: str = "Update from Text Dev IDE"
 
@@ -166,11 +188,17 @@ class PushToGithubRequest(BaseModel):
 class ScreenCreate(BaseModel):
     name: str
     description: str = ""
+    primary_entity: Optional[str] = None  # deprecated, use primary_entities
+    primary_entities: Optional[list[str]] = None
+    joined_entities: Optional[list[str]] = None
 
 
 class ScreenUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    primary_entity: Optional[str] = None  # deprecated, use primary_entities
+    primary_entities: Optional[list[str]] = None
+    joined_entities: Optional[list[str]] = None
 
 
 class PromptLogResponse(BaseModel):
@@ -193,10 +221,13 @@ class WorkbenchInterpretRequest(BaseModel):
 
 
 class WorkbenchInterpretResponse(BaseModel):
+    summary: str
+    summary_detail: str
     changes: dict
     entities: dict
     screens: list
     validation_rules: str
+    suggestions: list[str]
 
 
 class WorkbenchConfirmRequest(BaseModel):
