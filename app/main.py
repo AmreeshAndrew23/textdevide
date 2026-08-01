@@ -17,10 +17,15 @@ app = FastAPI(title="Text Dev IDE", version="1.0.0", lifespan=lifespan)
 
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
 
+# allow_credentials=True is incompatible with allow_origins=["*"] (CORS spec).
+# This app uses Authorization header tokens (not cookies) so credentials=False
+# is safe with wildcard; for specific origins credentials=True is fine.
+_wildcard = ALLOWED_ORIGINS == ["*"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=not _wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )
