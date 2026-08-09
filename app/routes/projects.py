@@ -14,6 +14,7 @@ from app.models.schemas import (
     GenerateUIXmlRequest, GenerateFromXmlRequest, ScreenCreate, ScreenUpdate,
     PromptLogResponse, WorkbenchInterpretRequest, WorkbenchInterpretResponse,
     WorkbenchConfirmRequest, RefineUIRequest, SchemaAssistantRequest, SchemaAssistantResponse,
+    PreviewRowsRequest,
 )
 from app.services.auth_service import get_current_user
 from app.services.ai_service import (
@@ -24,6 +25,7 @@ from app.services.ai_service import (
     refine_ui_xml, schema_assistant_edit_table,
 )
 from app.services.github_service import create_repo, push_files, build_push_files, build_commit_message
+from app.services import preview_db_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -723,3 +725,54 @@ async def push_to_github(project_id: int, user=Depends(_get_user), db: AsyncSess
         "repo_url": project.github_repo_url,
         "frontend_repo_url": project.github_frontend_repo_url,
     }
+
+
+@router.post("/{project_id}/preview-db/sync-schema")
+async def sync_preview_schema(project_id: int, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    """Creates/updates real tables in this project's own Postgres schema (proj_<id>) to
+    match project.entities, so the Studio's UI Preview can read/write real data instead of
+    fake sampleData — see app/services/preview_db_service.py."""
+    project = await _get_project(project_id, user, db)
+    if not project.entities:
+        raise HTTPException(status_code=400, detail="No schema yet — extract entities first")
+    entities = json.loads(project.entities)
+    try:
+        await preview_db_service.sync_schema(db, project_id, entities)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Schema sync failed: {e}")
+    return {"message": "Preview database schema synced.", "schema": preview_db_service.schema_name(project_id)}
+
+
+@router.get("/{project_id}/preview-db/{entity}")
+async def get_preview_rows(project_id: int, entity: str, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    project = await _get_project(project_id, user, db)
+    if not project.entities:
+        return {"rows": []}
+    entities = json.loads(project.entities)
+    try:
+        rows = await preview_db_service.list_rows(db, project_id, entities, entity)
+    except Exception:
+        await db.rollback()
+        rows = []
+    return {"rows": rows}
+
+
+@router.put("/{project_id}/preview-db/{entity}")
+async def put_preview_rows(project_id: int, entity: str, body: PreviewRowsRequest, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    """Replaces all rows for this entity in the project's real preview schema — called
+    whenever a screen's preview broadcasts a data change. Simple "replace all" rather than
+    incremental insert/update/delete: good enough for a single-user testing/preview aid."""
+    project = await _get_project(project_id, user, db)
+    if not project.entities:
+        raise HTTPException(status_code=400, detail="No schema yet")
+    entities = json.loads(project.entities)
+    try:
+        await preview_db_service.sync_schema(db, project_id, entities)
+        await preview_db_service.replace_all_rows(db, project_id, entities, entity, body.rows)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Preview data sync failed: {e}")
+    return {"message": "ok"}

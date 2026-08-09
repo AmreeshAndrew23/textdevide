@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import httpx
 from app.config import OPENAI_API_KEY
 
@@ -36,12 +37,23 @@ EXTENDED_SCHEMA_RULES = """Column object shape — every column has these keys (
     "step_number": "integer, default 1",
     "stop_number": "integer, default 9999 (or 10^leading_zeroes - 1)",
     "reset": {{"type": "never|on_stop|yearly|monthly|daily|field_based", "field": "column name driving field_based reset, else null"}}
+  }},
+  "formula": null or {{
+    "expression": "the computation using other column names, e.g. internal_marks + external_marks",
+    "inputs": ["array of column names this reads from, e.g. [\\"internal_marks\\", \\"external_marks\\"]"]
   }}
 }}
 - Only give a column an "autonumber" object when the user actually describes an auto-generated
   sequential/formatted identifier (invoice number, ticket code, employee code...). A plain
   surrogate "id" primary key is NOT an autonumber — leave its autonumber as null.
 - An autonumbered column is always nullable:false, and usually also unique:true unless it's already the pk.
+- Give a column a "formula" when the user describes it as computed/derived from other columns in
+  the SAME table (a total, a sum, a difference, a percentage, a concatenation). Use plain arithmetic
+  operators (+ - * /) and real column names from this same table in "expression". A formula column
+  is always readonly (never directly entered by a user) — set its own "default" to null and
+  "nullable" to true (it's computed, not stored input). Cross-table aggregates (e.g. "sum of all
+  line items") aren't supported by this shape — add a non-blocking "unresolved" note instead of
+  forcing a formula that can't actually be computed from this table's own columns.
 - nullable defaults to true, EXCEPT: pk columns, autonumbered columns, and columns the user calls
   mandatory/required, which are false.
 
@@ -308,6 +320,10 @@ UI_XML_VOCABULARY_RULES = """1. <screen> root with id, title, module, purpose at
    - Fields with binding="hidden" are omitted from the rendered form entirely (e.g. a foreign surrogate key never shown to the user) — still declare them so downstream code knows the field exists, but the HTML/API generators must not render an input for them.
    - Add readonly="true" on fields that auto-populate from another field (e.g. name filled after selecting a code). These render as disabled/greyed inputs.
    - Add autoFill="from:fieldId" to indicate which field triggers the auto-population.
+   - A column with a schema-level "formula" (e.g. total = internal_marks + external_marks) is a
+     computed field: type="number", readonly="true", and formula="internal_marks + external_marks"
+     (the expression verbatim, referencing other fields on this SAME screen by their field name).
+     It recalculates live whenever any input field it depends on changes — never user-typed directly.
    - Related fields that form one logical composite concept (an address' line1/line2/city/state/zip, a person's first/middle/last name, a start/end date pair, an amount+currency pair) go inside their own <fieldset legend="..."> so they're visually grouped as one unit, even though each sub-field is still its own <field> element — this format has no single "composite control" element, grouping is expressed purely via <fieldset>.
    - <rule> children for validation (required, pattern, unique, maxLength, minValue, maxValue)
    - <hint> for helper text
@@ -410,6 +426,42 @@ a bug. Concretely, in plain HTML/CSS/vanilla JS (no framework, no build step):
   never leave a button with no handler at all.
 - select/dropdown fields with dataSource MUST be populated with real <option> entries derived from
   that entity's sample rows, not left empty.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CROSS-SCREEN DATA SYNC (REQUIRED) — this preview does not run alone. Other screens generated for
+this same project may be previewing the SAME entities, and edits made in one screen's preview must
+be visible in another screen's preview when the user switches between them — like a real app backed
+by one shared database, not isolated fake data per screen. This works via postMessage with the
+parent page. Add this exact pattern, adapted to your actual variable/function names:
+
+1. Work out entity names from the XML: PRIMARY_ENTITY = the <metadata><entity> value. Also collect
+   every distinct dataSource="X" and lookupEntity="X" value used anywhere in the XML as LOOKUP
+   entities (reference data this screen reads but doesn't primarily own).
+
+2. On page load, request current shared data and listen for it:
+   const PRIMARY_ENTITY = "Student"; // replace with the real entity name from <metadata><entity>
+   const LOOKUP_ENTITIES = ["Course"]; // replace with real dataSource/lookupEntity values found, [] if none
+   window.addEventListener('message', function(event) {{
+     if (!event.data || event.data.type !== 'TDIDE_INIT_DATA') return;
+     const shared = event.data.data || {{}};
+     if (shared[PRIMARY_ENTITY]) {{
+       sampleData.length = 0;
+       sampleData.push.apply(sampleData, shared[PRIMARY_ENTITY]);
+     }}
+     LOOKUP_ENTITIES.forEach(function(name) {{
+       if (shared[name]) {{ /* use shared[name] to populate that entity's dropdown/lookup options instead of the hardcoded ones */ }}
+     }});
+     renderTable(); // call whatever this screen's own render/refresh function is actually named
+   }});
+   window.parent.postMessage({{ type: 'TDIDE_READY', entities: [PRIMARY_ENTITY].concat(LOOKUP_ENTITIES) }}, '*');
+   (If no reply arrives — this screen opened standalone — the page just keeps its own generated
+   sample data as a starting point, so it still works fine on its own.)
+
+3. After EVERY successful create/update/delete of a PRIMARY_ENTITY row (save button, delete
+   confirm, etc.) — right after you update the local sampleData/dataStore array and re-render —
+   also broadcast the change so other screens pick it up:
+   window.parent.postMessage({{ type: 'TDIDE_DATA_CHANGE', entity: PRIMARY_ENTITY, rows: sampleData }}, '*');
+   Only ever broadcast PRIMARY_ENTITY changes (what this screen actually owns/edits) — never
+   broadcast a LOOKUP_ENTITY as if this screen edited it, since it's only reading that data here.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 VISUAL IDENTITY — pick ONE archetype below that best fits this specific screen's module/title/purpose text, then commit to it fully (color family AND typography AND corner roundedness AND shadow depth all come from the same archetype — don't mix them). Read the actual domain words in the XML closely and choose deliberately; do not default to the same archetype every time out of habit — two different screens should usually end up looking different unless their domains are genuinely similar.
@@ -535,6 +587,10 @@ FIELD TYPE RENDERING RULES (apply regardless of density):
   every autoFill target) for every lookup field, with names adapted to that field's real id.
 - readonly="true" → render as <input disabled> with background #F1F5F9, color #6B7280, cursor not-allowed. Label shows "(auto)" in muted text.
 - autoFill fields → add JS so selecting/entering the source field updates the readonly target field with a realistic value.
+- formula fields → add a real JS function that evaluates the formula attribute's expression using the CURRENT
+  values of its input fields (parse numbers with parseFloat, treat blank/NaN inputs as 0), and writes the
+  result into the readonly formula field. Attach this recalculation to the input/change event of every field
+  the formula references, so it updates live as the user types — never a static/hardcoded value.
 
 ──────────────────────────────
 <navigation> RENDERING (landing/hub screens only — replaces the form+grid layout entirely):
@@ -565,12 +621,33 @@ JAVASCRIPT/FRAMEWORK BEHAVIOUR:
 - Form validation on submit: check required, maxLength, pattern; show inline error messages
 - Blur validation: validate each field when user leaves it
 - Grid sorting: clicking a column header sorts the data by that column, toggles asc/desc
-- Grid search: typing filters rows in real-time across all columns; count badge updates
+- Grid search: typing filters rows in real-time across all columns; count badge updates. Keep ONE
+  master data array (the same one Save/Delete/TDIDE_INIT_DATA mutate) and derive the filtered view
+  from it on every keystroke WITHOUT reassigning/overwriting the master array — e.g. `renderTable(
+  masterData.filter(...))` passing the filtered list straight into the render function, never
+  `masterData = masterData.filter(...)` or filtering from a separate original/seed array. Search
+  must never be the thing that discards a saved row or data loaded from TDIDE_INIT_DATA.
 - Pagination: slice data per page; clicking page number re-renders rows
 - Ctrl+S keyboard shortcut triggers save (where applicable in framework)
 - Delete button opens confirmation modal; confirm triggers delete logic + shows toast
 - Clear button resets all form fields
+- Save button logic MUST actually mutate the underlying data before rendering/broadcasting anything:
+  read every form field's current value, then either (a) CREATE — no existing row is selected for
+  edit — build a new row object from those values (generate/increment an ID client-side if the PK
+  isn't a user-entered field) and push it into the data array, or (b) EDIT — a row is selected —
+  find that row in the data array by its ID and overwrite its fields in place. Re-render the grid
+  from the updated data array, THEN broadcast TDIDE_DATA_CHANGE with that same updated array. A
+  Save handler that only shows a success toast and re-broadcasts the data array unchanged is
+  broken — the new/edited row must actually appear in the grid and in the broadcast, not just a
+  fake success message.
 - Toast shows on save success/failure; auto-dismisses after 3 seconds
+- On page load: postMessage {{type:'TDIDE_READY', entities:[...]}} to window.parent, and if a
+  {{type:'TDIDE_INIT_DATA'}} reply arrives, replace the local sample data with it before first
+  render — this is how the screen picks up live data from other screens (exact pattern under
+  CROSS-SCREEN DATA SYNC above)
+- After every save/delete of the primary entity: postMessage {{type:'TDIDE_DATA_CHANGE', entity,
+  rows}} to window.parent so other screens previewing the same entity see the change too (exact
+  pattern under CROSS-SCREEN DATA SYNC above) — do this for every single generation, it is not optional
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FINAL CHECKS before returning:
@@ -583,6 +660,10 @@ FINAL CHECKS before returning:
 - Purpose sentence appears below the title
 - Sample data rows are realistic (8-10 rows)
 - All XML fields, buttons, and grid columns are mapped
+- The CROSS-SCREEN DATA SYNC block is included, verbatim in spirit: the window.addEventListener('message', ...)
+  handler, the window.parent.postMessage({{type:'TDIDE_READY', ...}}) call on load, and a
+  window.parent.postMessage({{type:'TDIDE_DATA_CHANGE', ...}}) call after every save/delete of the primary
+  entity. This is not optional — a screen missing it is an incomplete generation.
 {extra_instructions_section}
 XML UI Definition:
 <xml_ui_definition>
@@ -619,6 +700,10 @@ Generate the following files:
      * Unique validation check -> GET /exists endpoint
      * Any dropdown/select data source -> GET endpoint for lookup data
    - Include proper error handling, status codes, request validation
+   - Any field the XML marks readonly="true" with a formula attribute (e.g. a total computed from
+     other fields) MUST be computed server-side from the other submitted/stored values on every
+     create and update — never persist or trust a client-submitted value for that field, even if
+     the request body happens to include one.
 
 2. MODELS/SCHEMAS FILE (models.ext) — request/response models in {backend_lang}:
    - Define all DTOs/Pydantic models/interfaces
@@ -673,6 +758,7 @@ this is not a CRUD screen — do not invent CRUD endpoints for it.
 
 STRUCTURAL CONVENTIONS — follow these exactly. A separate assembler places your files into a real runnable project (entrypoint, dependency manifest, folder layout) by relying on these exact names/exports — deviating breaks the build:
 {backend_conventions}
+{frontend_conventions}
 
 XML UI Definition:
 <xml_ui_definition>
@@ -724,6 +810,25 @@ BACKEND_CONVENTIONS = {
     "PHP": (
         "- routes.ext MUST return a single callable (`return function ($router) { ... };`) that registers "
         "every endpoint on the given router, so the file can be `require`-d and immediately invoked."
+    ),
+}
+
+# Same reasoning as BACKEND_CONVENTIONS, but for the frontend files (api_service.ext /
+# page_component.ext), and only where it's actually needed. React/Vue/Svelte/Next.js all use a
+# plain `export default` for the component — the assembler can import that under any alias
+# regardless of what the AI names it, so no convention is needed there. Angular and Flutter have
+# no such name-agnostic import (Dart has no reflection in AOT/web builds; the assembler wires
+# Angular's router by a typed import, not a default export), so those two need the class name
+# itself to be predictable. Every other frontend_lang gets "" here — zero behavior change.
+FRONTEND_CONVENTIONS = {
+    "Angular": (
+        "- page_component.ext: the component class MUST be named exactly `ScreenPageComponent` "
+        "(standalone component, `@Component({{ standalone: true, ... }})`).\n"
+        "- api_service.ext: the injectable service class MUST be named exactly `ScreenApiService` "
+        "(`@Injectable({{ providedIn: 'root' }})`)."
+    ),
+    "Flutter": (
+        "- page_component.ext: the top-level widget class MUST be named exactly `ScreenPage`."
     ),
 }
 
@@ -1173,22 +1278,86 @@ def _humanize(name: str) -> str:
     return " ".join(w.capitalize() for w in name.replace("-", "_").split("_"))
 
 
-def _metadata_to_form_xml(metadata: dict, fk_targets: dict | None = None) -> str:
+def _fuzzy_col_key(table: str, column: str) -> tuple[str, str]:
+    # The metadata generator normalizes table names on its own (lowercases, sometimes
+    # singularizes) independent of our real table names, e.g. "Students" -> "student" —
+    # match loosely by column name + a fuzzy table match instead of an exact string.
+    return (table.rstrip("s").lower(), column.lower())
+
+
+_VARCHAR_LEN_RE = re.compile(r"VARCHAR\s*\(\s*(\d+)\s*\)", re.IGNORECASE)
+
+
+def _xml_attr_escape(value: str) -> str:
+    return (str(value).replace("&", "&amp;").replace('"', "&quot;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _entity_validation_maps(entities: dict | None, table_names: list[str]) -> tuple[dict, dict]:
+    """Keyed by _fuzzy_col_key(table, column) so _metadata_to_form_xml can look up the REAL
+    schema's nullable/type/unique/validations for a field the metadata generator produced —
+    letting a deterministic <rule> get attached without depending on the AI to remember the
+    schema's constraints on its own."""
+    columns_by_key, validations_by_key = {}, {}
+    for tname in table_names:
+        table = next((t for t in (entities or {}).get("tables", []) if t["name"] == tname), None)
+        if not table:
+            continue
+        for c in table.get("columns", []):
+            columns_by_key[_fuzzy_col_key(tname, c["name"])] = c
+        for v in table.get("validations", []) or []:
+            if v.get("column"):
+                validations_by_key.setdefault(_fuzzy_col_key(tname, v["column"]), []).append(v)
+    return columns_by_key, validations_by_key
+
+
+def _rule_element_for(column: dict | None, validations: list[dict]) -> str:
+    """Builds a single <rule .../> from the real schema's nullable/type/unique plus any
+    structured "validations" entries (required/unique/pattern/minValue/maxValue/maxLength) —
+    forms generated via the prebuilt-metadata path otherwise carry NO validation at all, since
+    the metadata generator's JSON schema has no slot for it (only control/label)."""
+    attrs = {}
+    # An autonumbered column (e.g. deptid formatted like "d0009") is never typed by the user —
+    # it's generated by the system — so it must never be marked required no matter what the
+    # column's own nullable/validations say about the STORED value being mandatory. Required
+    # would otherwise block every save on a field the user has no way to fill in themselves.
+    is_autonumber = bool(column is not None and column.get("autonumber"))
+    if column is not None and not column.get("nullable", True) and not is_autonumber:
+        attrs["required"] = "true"
+    if column is not None and column.get("unique"):
+        attrs["unique"] = "true"
+    if column is not None:
+        m = _VARCHAR_LEN_RE.search(column.get("type") or "")
+        if m:
+            attrs["maxLength"] = m.group(1)
+    for v in validations:
+        vtype, detail = v.get("type"), v.get("detail")
+        if vtype == "required":
+            if not is_autonumber:
+                attrs["required"] = "true"
+        elif vtype == "unique":
+            attrs["unique"] = "true"
+        elif vtype in ("pattern", "maxLength", "minValue", "maxValue") and detail not in (None, ""):
+            attrs[vtype] = detail
+    if not attrs:
+        return ""
+    attr_str = " ".join(f'{k}="{_xml_attr_escape(v)}"' for k, v in attrs.items())
+    return f"\n      <rule {attr_str}/>"
+
+
+def _metadata_to_form_xml(metadata: dict, fk_targets: dict | None = None,
+                           columns_by_key: dict | None = None, validations_by_key: dict | None = None) -> str:
     """Deterministic, non-AI conversion of the metadata generator's fields+layout JSON into
     <fieldset>/<field> XML matching this app's screen vocabulary — hidden fields are dropped,
     composite fields become one <fieldset> grouping their sub-columns, section order/grouping
     from "layout" is preserved as fieldset order. fk_targets maps "table.column" -> the real
-    referenced table name, for the subset of "select" fields that are genuine FK lookups."""
-    def _norm_key(table, column):
-        # The metadata generator normalizes table names on its own (lowercases, sometimes
-        # singularizes) independent of our real table names, e.g. "Students" -> "student" —
-        # match loosely by column name + a fuzzy table match instead of an exact string.
-        return (table.rstrip("s").lower(), column.lower())
-
+    referenced table name, for the subset of "select" fields that are genuine FK lookups.
+    columns_by_key/validations_by_key (see _entity_validation_maps) drive the <rule> child each
+    field gets, from the entity's actual nullable/type/unique/validations — not the AI's guess."""
     fk_targets_norm = {}
     for key, target in (fk_targets or {}).items():
         tbl, col = key.rsplit(".", 1)
-        fk_targets_norm[_norm_key(tbl, col)] = target
+        fk_targets_norm[_fuzzy_col_key(tbl, col)] = target
 
     fields_by_id = {f["id"]: f for f in metadata.get("fields", [])}
     lines = ["<form>"]
@@ -1201,11 +1370,20 @@ def _metadata_to_form_xml(metadata: dict, fk_targets: dict | None = None) -> str
 
         def _simple_field_line(table, column, control, label, indent="    "):
             ftype = _METADATA_CONTROL_TO_FIELD_TYPE.get(control, "text")
+            key = _fuzzy_col_key(table, column)
             # "select" catches both true FK lookups (rule 2) and plain status/category/_code
             # dropdowns (rule 13) — only the former has a real table to point dataSource at.
-            fk_target = fk_targets_norm.get(_norm_key(table, column))
+            fk_target = fk_targets_norm.get(key)
+            col_info = (columns_by_key or {}).get(key)
             extra = f' dataSource="{fk_target}" valueField="id" displayField="name"' if ftype == "select" and fk_target else ""
-            return f'{indent}<field name="{column}" label="{label or _humanize(column)}" type="{ftype}"{extra}/>'
+            # Same reasoning as _rule_element_for's required-skip: the user never types this in,
+            # the system assigns it — render it readonly (like the vocabulary's existing
+            # auto-populated-field convention) rather than a normal editable input.
+            if col_info and col_info.get("autonumber"):
+                extra += ' readonly="true"'
+            rule = _rule_element_for(col_info, (validations_by_key or {}).get(key, []))
+            open_tag = f'{indent}<field name="{column}" label="{label or _humanize(column)}" type="{ftype}"{extra}'
+            return f'{open_tag}/>' if not rule else f'{open_tag}>{rule}\n{indent}</field>'
 
         for fid in field_ids_in_section:
             f = fields_by_id.get(fid)
@@ -1282,7 +1460,8 @@ async def generate_ui_xml(description: str, entities: dict | None, existing_scre
         if table_blocks:
             try:
                 metadata = await generate_ui_metadata(screen_name or "Screen", table_blocks)
-                form_xml = _metadata_to_form_xml(metadata, fk_targets)
+                columns_by_key, validations_by_key = _entity_validation_maps(entities, screen_entities)
+                form_xml = _metadata_to_form_xml(metadata, fk_targets, columns_by_key, validations_by_key)
                 prebuilt_form_section = (
                     "\nA <form> section has already been designed for this screen using richer "
                     "field-control inference than you'd do alone (proper email/phone/url/color/file "
@@ -1311,6 +1490,208 @@ async def generate_ui_xml(description: str, entities: dict | None, existing_scre
     ])
 
 
+def _inject_cross_screen_sync(html: str, xml: str) -> str:
+    """Deterministically injects the cross-screen data sync script into generated HTML.
+    Asking the model to write this itself (via the prompt) proved unreliable across repeated
+    attempts — this reads/writes the rendered <table> generically, so it works regardless of
+    what internal JS variable names the model happened to use, with zero dependence on the
+    model actually following that part of the prompt.
+
+    Rows are keyed by each <column>'s real "binding" attribute (the actual field/column name,
+    always present per the grid vocabulary rules), NOT by rendered header text — a header like
+    "DOB" has no reliable reverse mapping to the real column "date_of_birth", but binding= does,
+    which matters once this data needs to round-trip through a real database, not just memory."""
+    entity_match = re.search(r"<entity>([^<]+)</entity>", xml)
+    entity = entity_match.group(1).strip() if entity_match else None
+    if not entity:
+        return html
+    lookups = sorted(set(re.findall(r'(?:dataSource|lookupEntity)="([^"]+)"', xml)) - {entity})
+    bindings = re.findall(r'<column\b[^>]*\bbinding="([^"]+)"', xml)
+    # The XML's <rule required="true"/> is the schema's actual source of truth for what's
+    # mandatory, but whether the generated page's Save handler actually CHECKS it before saving
+    # is up to the model — same reliability problem as the sync protocol itself. Extracting and
+    # enforcing this deterministically means a required field can never silently "save
+    # successfully" empty, regardless of what the generated JS does or doesn't check.
+    required_fields = []
+    for m in re.finditer(r'<field\s+([^>]*)>(.*?)</field>', xml, re.S):
+        open_attrs, inner = m.group(1), m.group(2)
+        if 'readonly="true"' in open_attrs:
+            continue  # system/auto-populated (e.g. an autonumber) — never user-entered
+        name_m = re.search(r'name="([^"]+)"', open_attrs)
+        if name_m and re.search(r'<rule\b[^>]*\brequired="true"', inner):
+            required_fields.append(name_m.group(1))
+    # Fields the user never types into (readonly — an autonumber, or auto-populated from
+    # another field) must be excluded when a new row gets deterministically built from the
+    # form below, same reasoning as excluding them from required_fields above.
+    readonly_fields = set()
+    for m in re.finditer(r"<field\b([^>]*)>", xml):
+        attrs = m.group(1)
+        if 'readonly="true"' not in attrs:
+            continue
+        name_m = re.search(r'name="([^"]+)"', attrs)
+        if name_m:
+            readonly_fields.add(name_m.group(1))
+    script = f"""
+<script>
+(function() {{
+  var TDIDE_ENTITY = {json.dumps(entity)};
+  var TDIDE_LOOKUPS = {json.dumps(lookups)};
+  var TDIDE_BINDINGS = {json.dumps(bindings)};
+  var TDIDE_REQUIRED = {json.dumps(required_fields)};
+  var TDIDE_READONLY = {json.dumps(sorted(readonly_fields))};
+  var tdideObserver = null;
+  // A grid re-render isn't always a real save — the page's own initial render from its
+  // hardcoded sample data, a Refresh/Sort/Search click, or a simulated async-fetch delay (some
+  // generations re-render from sample data ~500ms after load to fake a loading state) all fire
+  // the same DOM mutations a genuine Save/Delete does. Gating on ANY click still let Refresh-type
+  // clicks through, which reset the grid back to fake sample data and broadcast THAT. Only a
+  // click on something that actually reads as a save/delete action should count.
+  var tdideLastInteraction = 0;
+  document.addEventListener("click", function(e) {{
+    var el = e.target.closest("button, [role='button'], input[type='submit'], input[type='button'], a");
+    if (!el) return;
+    var text = (el.textContent || el.value || el.id || el.className || "").toLowerCase();
+    if (!/save|delete|submit/.test(text)) return;
+    tdideLastInteraction = Date.now();
+    if (!/save|submit/.test(text)) return;  // Delete just needs the timing gate above, not this
+    // The XML's required-field rules are the schema's actual source of truth — whether the
+    // generated page's own Save handler checks them before claiming success is inconsistent
+    // across generations. Block the click here, before the page's own handler runs, if a
+    // required field is empty — so a "saved successfully" toast can never lie about a row that
+    // was actually rejected (or silently missing data) because a mandatory field was blank.
+    var missing = TDIDE_REQUIRED.filter(function(name) {{
+      var field = document.getElementById(name);
+      return field && !field.value;
+    }});
+    if (missing.length) {{
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      alert("Please fill in required field(s): " + missing.join(", "));
+      tdideLastInteraction = 0;
+      return;
+    }}
+    // The generated page's own Save handler is inconsistently reliable about actually
+    // constructing a new row from the form — sometimes it just re-broadcasts whatever
+    // sampleData already was, unchanged. Build and apply the new row deterministically here
+    // instead (from TDIDE_BINDINGS -> matching form field by id, skipping readonly/system
+    // fields like an autonumber), and block the page's own handler from running at all so it
+    // can't immediately clobber this with stale data. This only handles CREATE (appending a
+    // new row) — an in-place edit still depends on the page's own logic, which this does not
+    // intercept for non-save-labeled interactions.
+    var table = tdideFindGrid();
+    if (table) {{
+      var newRow = {{}};
+      TDIDE_BINDINGS.forEach(function(binding) {{
+        if (TDIDE_READONLY.indexOf(binding) !== -1) return;
+        var field = document.getElementById(binding);
+        if (field) newRow[binding] = field.value;
+      }});
+      var rows = tdideTableToRows(table).concat([newRow]);
+      tdideApplyRows(table, rows);
+      try {{
+        window.parent.postMessage({{ type: "TDIDE_DATA_CHANGE", entity: TDIDE_ENTITY, rows: rows }}, "*");
+      }} catch (err) {{}}
+    }}
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }}, true);
+
+  function tdideFindGrid() {{
+    var tables = document.querySelectorAll("table");
+    for (var i = 0; i < tables.length; i++) {{
+      if (tables[i].querySelector("tbody")) return tables[i];
+    }}
+    return null;
+  }}
+  function tdideHeaders(table) {{
+    // Real column names (from the XML's binding= attrs) when available and the count lines up
+    // with what actually rendered; otherwise fall back to rendered header text positionally.
+    var thCount = table.querySelectorAll("thead th").length;
+    if (TDIDE_BINDINGS.length === thCount) return TDIDE_BINDINGS.slice();
+    var out = [];
+    table.querySelectorAll("thead th").forEach(function(th) {{
+      out.push(th.textContent.replace(/[\\u2191\\u2193\\u25b2\\u25bc]/g, "").trim());
+    }});
+    return out;
+  }}
+  function tdideTableToRows(table) {{
+    var headers = tdideHeaders(table);
+    var rows = [];
+    table.querySelectorAll("tbody tr").forEach(function(tr) {{
+      var obj = {{}};
+      tr.querySelectorAll("td").forEach(function(td, i) {{ obj[headers[i] || ("col" + i)] = td.textContent.trim(); }});
+      rows.push(obj);
+    }});
+    return rows;
+  }}
+  function tdideBroadcast() {{
+    if (Date.now() - tdideLastInteraction > 2000) return;  // not user-driven — likely a passive/simulated re-render
+    var table = tdideFindGrid();
+    if (!table) return;
+    try {{
+      window.parent.postMessage({{ type: "TDIDE_DATA_CHANGE", entity: TDIDE_ENTITY, rows: tdideTableToRows(table) }}, "*");
+    }} catch (e) {{}}
+  }}
+  function tdideApplyRows(table, rows) {{
+    var headers = tdideHeaders(table);
+    var tbody = table.querySelector("tbody");
+    if (!tbody || !rows) return;
+    if (tdideObserver) tdideObserver.disconnect();
+    // An empty array is real, meaningful information (this table genuinely has no rows yet) —
+    // it must still clear out whatever fake sample rows the page rendered on its own, not be
+    // treated as "nothing to apply." Leaving fake rows in place is exactly what let them get
+    // silently persisted alongside a user's first genuine save on an empty table.
+    var out = "";
+    rows.forEach(function(row) {{
+      out += "<tr>";
+      headers.forEach(function(h) {{
+        var v = row[h];
+        out += "<td>" + (v != null ? String(v).replace(/</g, "&lt;") : "") + "</td>";
+      }});
+      out += "</tr>";
+    }});
+    tbody.innerHTML = out;
+    if (tdideObserver) tdideObserver.observe(tbody, {{ childList: true, subtree: true, characterData: true }});
+  }}
+
+  window.addEventListener("message", function(event) {{
+    var msg = event.data;
+    if (!msg || msg.type !== "TDIDE_INIT_DATA") return;
+    var rows = msg.data && msg.data[TDIDE_ENTITY];
+    if (!Array.isArray(rows)) return;
+    // Some generated pages simulate an async data load (e.g. a fake fetch delay) that
+    // re-renders the grid from its own hardcoded sample data shortly after page load,
+    // which would silently overwrite this if applied only once. Re-apply a few times
+    // over the following second so this update is the one that actually sticks.
+    var applyNow = function() {{
+      var table = tdideFindGrid();
+      if (table) tdideApplyRows(table, rows);
+    }};
+    applyNow();
+    setTimeout(applyNow, 400);
+    setTimeout(applyNow, 900);
+    setTimeout(applyNow, 1500);
+  }});
+
+  window.addEventListener("load", function() {{
+    try {{
+      window.parent.postMessage({{ type: "TDIDE_READY", entities: [TDIDE_ENTITY].concat(TDIDE_LOOKUPS) }}, "*");
+    }} catch (e) {{}}
+    var table = tdideFindGrid();
+    var tbody = table && table.querySelector("tbody");
+    if (tbody) {{
+      tdideObserver = new MutationObserver(function() {{ tdideBroadcast(); }});
+      tdideObserver.observe(tbody, {{ childList: true, subtree: true, characterData: true }});
+    }}
+  }});
+}})();
+</script>
+"""
+    if "</body>" in html:
+        return html.replace("</body>", script + "</body>", 1)
+    return html + script
+
+
 async def generate_html_from_xml(xml: str, frontend_lang: str = "HTML/CSS", extra_instructions: list[str] | None = None) -> str:
     if extra_instructions:
         notes = "\n".join(f"- {n}" for n in extra_instructions)
@@ -1324,15 +1705,20 @@ async def generate_html_from_xml(xml: str, frontend_lang: str = "HTML/CSS", extr
     else:
         extra_section = ""
     prompt = XML_TO_HTML_PROMPT.format(xml=xml, frontend_lang=frontend_lang, extra_instructions_section=extra_section)
-    return await _call_openai([
+    html = await _call_openai([
         {"role": "system", "content": f"You are a senior UI/UX product designer who also writes production {frontend_lang} code. Design first — commit to a distinct visual identity (color, type, spacing, shape) before you touch markup — then implement it precisely and correctly. Return ONLY the complete output file for the chosen framework. No markdown fences."},
         {"role": "user", "content": prompt},
     ], timeout=180, temperature=0.9)  # visual/creative output — temperature=0 made every design collapse to the same "safest" choice
+    if frontend_lang == "HTML/CSS":
+        html = _inject_cross_screen_sync(html, xml)
+    return html
 
 
 async def generate_api_from_xml(xml: str, backend_lang: str = "Python", frontend_lang: str = "React") -> str:
     conventions = BACKEND_CONVENTIONS.get(backend_lang, "- Use idiomatic file/module naming for this language.")
-    prompt = XML_TO_API_PROMPT.format(xml=xml, backend_lang=backend_lang, frontend_lang=frontend_lang, backend_conventions=conventions)
+    frontend_conventions = FRONTEND_CONVENTIONS.get(frontend_lang, "")
+    prompt = XML_TO_API_PROMPT.format(xml=xml, backend_lang=backend_lang, frontend_lang=frontend_lang,
+                                       backend_conventions=conventions, frontend_conventions=frontend_conventions)
     return await _call_openai([
         {"role": "system", "content": f"You are a full-stack developer. Generate {backend_lang} backend + {frontend_lang} frontend code. Use === FILENAME: name.ext === to separate files. Return ONLY code — never wrap any file in markdown code fences (```)."},
         {"role": "user", "content": prompt},

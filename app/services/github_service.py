@@ -8,6 +8,69 @@ GITHUB_API = "https://api.github.com"
 EXT = {"Python": "py", "Java": "java", "JavaScript": "js", "TypeScript": "ts",
        "C#": "cs", "Go": "go", "Ruby": "rb", "PHP": "php"}
 
+# Forced pushed-filename extension per frontend_language, for the two AI-generated files
+# (api_service / page_component) — mirrors EXT/_backend_file_path's role for the backend.
+# The AI is unreliable about substituting a real extension for the prompt's literal
+# "page_component.ext" placeholder, so the pushed filename is never taken from the AI.
+_FRONTEND_EXT = {
+    "React":    {"api_service": "js", "page_component": "jsx"},
+    "Next.js":  {"api_service": "js", "page_component": "jsx"},
+    "Vue":      {"api_service": "js", "page_component": "vue"},
+    "Svelte":   {"api_service": "js", "page_component": "svelte"},
+    "Angular":  {"api_service": "service.ts", "page_component": "component.ts"},
+    "Flutter":  {"api_service": "dart", "page_component": "dart"},
+    "HTML/CSS": {"api_service": "js", "page_component": "html"},
+}
+
+
+def _frontend_file_path(frontend_lang: str, category: str, slug: str) -> str:
+    """Where an api_service/page_component file lands in the frontend repo. category
+    is 'api_service' or 'page_component'. Mirrors _backend_file_path's reasoning:
+    the pushed filename is forced, never taken from the AI's own (unreliable) choice."""
+    exts = _FRONTEND_EXT.get(frontend_lang) or _FRONTEND_EXT["React"]
+    return f"{slug}/{category}.{exts[category]}"
+
+
+_FRONTEND_RUN_INSTRUCTIONS = {
+    "React": (
+        "```\nnpm install\nnpm run dev      # http://localhost:5173 — /api is proxied to "
+        "http://localhost:8000, so start the backend first\nnpm run build    # production build -> dist/\n```"
+    ),
+    "Next.js": (
+        "```\nnpm install\nnpm run dev      # http://localhost:3000 — /api is rewritten to "
+        "http://localhost:8000, so start the backend first\nnpm run build && npm start\n```"
+    ),
+    "Vue": (
+        "```\nnpm install\nnpm run dev      # http://localhost:5173 — /api is proxied to "
+        "http://localhost:8000, so start the backend first\nnpm run build\n```"
+    ),
+    "Svelte": (
+        "```\nnpm install\nnpm run dev      # http://localhost:5173 — /api is proxied to "
+        "http://localhost:8000, so start the backend first\nnpm run build\n```"
+    ),
+    "Angular": (
+        "```\nnpm install\nnpm start        # ng serve --proxy-config proxy.conf.json, "
+        "http://localhost:4200 — start the backend first\nnpm run build\n```\n\n"
+        "**Known limitation:** this scaffold targets Angular 16 (`@angular/cli` ^16.2.4) — "
+        "if `ng` reports your Node version as unsupported, use Node 18 LTS, or bump the "
+        "Angular dependency versions in `package.json` to a release that supports your Node version."
+    ),
+    "Flutter": (
+        "```\nflutter pub get\nflutter run -d chrome\n```\n\n"
+        "**Known limitation:** unlike the JS frameworks above, there is no dev-server proxy "
+        "for `/api` calls — `{slug}/api_service.dart` needs an absolute backend URL "
+        "(e.g. `http://localhost:8000/api`) to reach the backend from a Flutter web/mobile "
+        "build. The backend already allows all origins (`allow_origins=[\"*\"]`), so this is "
+        "just a matter of setting the URL — it won't work with the relative `/api/...` path "
+        "as generated."
+    ),
+    "HTML/CSS": (
+        "Open `index.html` directly in a browser, or serve statically (e.g. `npx serve .`) "
+        "and browse to any screen listed there. Each screen under `preview/` is already a "
+        "complete, standalone page — no build step needed."
+    ),
+}
+
 
 def _headers(token: str) -> dict:
     return {
@@ -424,6 +487,601 @@ def _backend_scaffold(project, screen_slugs: list[str]) -> dict:
     return _python_scaffold(project, screen_slugs)
 
 
+def _frontend_import_alias(slug: str) -> str:
+    """Deterministic, import-safe identifier for a screen's module — doesn't need to
+    match the AI's own unpredictable default-exported name (see _FRONTEND_EXT's docstring)."""
+    return f"Screen_{_safe_ident(slug)}"
+
+
+def _react_scaffold(project, screens: list[dict]) -> dict:
+    """Deterministic (non-AI) package manifest + Vite config + entry point + a router
+    that wires every screen's page_component into real navigation — the frontend
+    equivalent of _backend_scaffold, generated once per push."""
+    aliases = [(_frontend_import_alias(s["slug"]), s["slug"], s["name"]) for s in screens]
+    imports = "\n".join(f"import {a} from '../{slug}/page_component.jsx';" for a, slug, _ in aliases)
+    entries = ",\n  ".join(
+        f'{{ slug: {json.dumps(slug)}, name: {json.dumps(name)}, Component: {a} }}'
+        for a, slug, name in aliases
+    )
+    default_path = f"/{aliases[0][1]}" if aliases else "/"
+
+    if aliases:
+        app_jsx = (
+            "import { Routes, Route, Link, Navigate } from 'react-router-dom';\n"
+            + imports + "\n\n"
+            "const SCREENS = [\n"
+            "  " + entries + "\n"
+            "];\n\n"
+            "export default function App() {\n"
+            "  return (\n"
+            "    <div>\n"
+            "      <nav>\n"
+            "        <ul>\n"
+            "          {SCREENS.map((s) => (\n"
+            "            <li key={s.slug}><Link to={`/${s.slug}`}>{s.name}</Link></li>\n"
+            "          ))}\n"
+            "        </ul>\n"
+            "      </nav>\n"
+            "      <Routes>\n"
+            '        <Route path="/" element={<Navigate to="' + default_path + '" replace />} />\n'
+            "        {SCREENS.map(({ slug, Component }) => (\n"
+            "          <Route key={slug} path={`/${slug}`} element={<Component />} />\n"
+            "        ))}\n"
+            "      </Routes>\n"
+            "    </div>\n"
+            "  );\n"
+            "}\n"
+        )
+    else:
+        app_jsx = (
+            "export default function App() {\n"
+            "  return <div>No screens generated yet — build one in Text Dev IDE, then push again.</div>;\n"
+            "}\n"
+        )
+
+    main_jsx = (
+        "import { StrictMode } from 'react';\n"
+        "import { createRoot } from 'react-dom/client';\n"
+        "import { BrowserRouter } from 'react-router-dom';\n"
+        "import App from './App.jsx';\n\n"
+        "createRoot(document.getElementById('root')).render(\n"
+        "  <StrictMode>\n"
+        "    <BrowserRouter>\n"
+        "      <App />\n"
+        "    </BrowserRouter>\n"
+        "  </StrictMode>,\n"
+        ");\n"
+    )
+
+    index_html = (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "  <head>\n"
+        '    <meta charset="UTF-8" />\n'
+        "    <title>" + project.name + "</title>\n"
+        "  </head>\n"
+        "  <body>\n"
+        '    <div id="root"></div>\n'
+        '    <script type="module" src="/src/main.jsx"></script>\n'
+        "  </body>\n"
+        "</html>\n"
+    )
+
+    vite_config = (
+        "import { defineConfig } from 'vite';\n"
+        "import react from '@vitejs/plugin-react';\n\n"
+        "export default defineConfig({\n"
+        "  plugins: [react()],\n"
+        "  server: {\n"
+        "    proxy: {\n"
+        "      '/api': { target: 'http://localhost:8000', changeOrigin: true },\n"
+        "    },\n"
+        "  },\n"
+        "});\n"
+    )
+
+    package_json = json.dumps({
+        "name": f"{_slugify(project.name).lower()}-frontend",
+        "private": True,
+        "version": "1.0.0",
+        "type": "module",
+        "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
+        "dependencies": {
+            "react": "^19.2.6", "react-dom": "^19.2.6",
+            "react-router-dom": "^7.18.0", "axios": "^1.18.1",
+        },
+        "devDependencies": {"@vitejs/plugin-react": "^6.0.1", "vite": "^8.0.12"},
+    }, indent=2) + "\n"
+
+    return {
+        "package.json": package_json,
+        "vite.config.js": vite_config,
+        "index.html": index_html,
+        "src/main.jsx": main_jsx,
+        "src/App.jsx": app_jsx,
+        ".gitignore": "node_modules/\ndist/\n",
+    }
+
+
+def _nextjs_scaffold(project, screens: list[dict]) -> dict:
+    """Next.js needs page files under pages/ to get automatic routing — rather than
+    special-case where page_component.jsx itself lives (every other framework keeps it
+    in {slug}/, consistently), each screen gets a thin pages/{slug}.jsx wrapper that
+    just re-exports the real component from its normal location."""
+    files = {}
+    nav_items = "\n".join(
+        '          <li key="' + s["slug"] + '"><Link href="/' + s["slug"] + '">' + s["name"] + "</Link></li>"
+        for s in screens
+    )
+    index_js = (
+        "import Link from 'next/link';\n\n"
+        "export default function Home() {\n"
+        "  return (\n"
+        "    <div>\n"
+        "      <h1>" + project.name + "</h1>\n"
+        "      <ul>\n"
+        + nav_items + "\n"
+        "      </ul>\n"
+        "    </div>\n"
+        "  );\n"
+        "}\n"
+    )
+    app_js = (
+        "export default function App({ Component, pageProps }) {\n"
+        "  return <Component {...pageProps} />;\n"
+        "}\n"
+    )
+    next_config = (
+        "/** @type {import('next').NextConfig} */\n"
+        "module.exports = {\n"
+        "  async rewrites() {\n"
+        "    return [{ source: '/api/:path*', destination: 'http://localhost:8000/api/:path*' }];\n"
+        "  },\n"
+        "};\n"
+    )
+    package_json = json.dumps({
+        "name": f"{_slugify(project.name).lower()}-frontend",
+        "private": True,
+        "version": "1.0.0",
+        "scripts": {"dev": "next dev", "build": "next build", "start": "next start"},
+        "dependencies": {"next": "^15.0.0", "react": "^19.2.6", "react-dom": "^19.2.6", "axios": "^1.18.1"},
+    }, indent=2) + "\n"
+
+    files["package.json"] = package_json
+    files["next.config.js"] = next_config
+    files["pages/_app.js"] = app_js
+    files["pages/index.js"] = index_js
+    files[".gitignore"] = "node_modules/\n.next/\n"
+    for s in screens:
+        files["pages/" + s["slug"] + ".jsx"] = "export { default } from '../" + s["slug"] + "/page_component';\n"
+    return files
+
+
+def _vue_scaffold(project, screens: list[dict]) -> dict:
+    aliases = [(_frontend_import_alias(s["slug"]), s["slug"], s["name"]) for s in screens]
+    imports = "\n".join("import " + a + " from '../" + slug + "/page_component.vue';" for a, slug, _ in aliases)
+    route_entries = ",\n  ".join(
+        '{ path: "/' + slug + '", name: ' + json.dumps(name) + ', component: ' + a + ' }'
+        for a, slug, name in aliases
+    )
+    nav_entries = ",\n  ".join(
+        '{ slug: "' + slug + '", name: ' + json.dumps(name) + ' }' for _, slug, name in aliases
+    )
+    default_path = "/" + aliases[0][1] if aliases else "/"
+
+    router_js = (
+        "import { createRouter, createWebHistory } from 'vue-router';\n"
+        + imports + "\n\n"
+        "const routes = [\n"
+        "  { path: '/', redirect: '" + default_path + "' },\n"
+        "  " + route_entries + "\n"
+        "];\n\n"
+        "export default createRouter({\n"
+        "  history: createWebHistory(),\n"
+        "  routes,\n"
+        "});\n"
+    )
+    main_js = (
+        "import { createApp } from 'vue';\n"
+        "import App from './App.vue';\n"
+        "import router from './router.js';\n\n"
+        "createApp(App).use(router).mount('#app');\n"
+    )
+    app_vue = (
+        "<template>\n"
+        "  <nav>\n"
+        "    <ul>\n"
+        '      <li v-for="s in screens" :key="s.slug">\n'
+        "        <router-link :to=\"'/' + s.slug\">{{ s.name }}</router-link>\n"
+        "      </li>\n"
+        "    </ul>\n"
+        "  </nav>\n"
+        "  <router-view />\n"
+        "</template>\n\n"
+        "<script setup>\n"
+        "const screens = [\n"
+        "  " + nav_entries + "\n"
+        "];\n"
+        "</script>\n"
+    )
+    vite_config = (
+        "import { defineConfig } from 'vite';\n"
+        "import vue from '@vitejs/plugin-vue';\n\n"
+        "export default defineConfig({\n"
+        "  plugins: [vue()],\n"
+        "  server: {\n"
+        "    proxy: {\n"
+        "      '/api': { target: 'http://localhost:8000', changeOrigin: true },\n"
+        "    },\n"
+        "  },\n"
+        "});\n"
+    )
+    index_html = (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "  <head>\n"
+        '    <meta charset="UTF-8" />\n'
+        "    <title>" + project.name + "</title>\n"
+        "  </head>\n"
+        "  <body>\n"
+        '    <div id="app"></div>\n'
+        '    <script type="module" src="/src/main.js"></script>\n'
+        "  </body>\n"
+        "</html>\n"
+    )
+    package_json = json.dumps({
+        "name": f"{_slugify(project.name).lower()}-frontend",
+        "private": True,
+        "version": "1.0.0",
+        "type": "module",
+        "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
+        "dependencies": {"vue": "^3.5.0", "vue-router": "^4.4.0", "axios": "^1.18.1"},
+        "devDependencies": {"@vitejs/plugin-vue": "^6.0.0", "vite": "^8.0.12"},
+    }, indent=2) + "\n"
+
+    return {
+        "package.json": package_json,
+        "vite.config.js": vite_config,
+        "index.html": index_html,
+        "src/main.js": main_js,
+        "src/App.vue": app_vue,
+        "src/router.js": router_js,
+        ".gitignore": "node_modules/\ndist/\n",
+    }
+
+
+def _svelte_scaffold(project, screens: list[dict]) -> dict:
+    aliases = [(_frontend_import_alias(s["slug"]), s["slug"], s["name"]) for s in screens]
+    imports = "\n".join("  import " + a + " from '../" + slug + "/page_component.svelte';" for a, slug, _ in aliases)
+    nav_entries = ",\n    ".join(
+        '{ slug: "' + slug + '", name: ' + json.dumps(name) + ' }' for _, slug, name in aliases
+    )
+    routes = "\n  ".join("<Route path=\"" + slug + "\" component={" + a + "} />" for a, slug, _ in aliases)
+
+    main_js = (
+        "import { mount } from 'svelte';\n"
+        "import App from './App.svelte';\n\n"
+        "const app = mount(App, { target: document.getElementById('app') });\n\n"
+        "export default app;\n"
+    )
+    app_svelte = (
+        "<script>\n"
+        "  import { Router, Link, Route } from 'svelte-routing';\n"
+        + imports + "\n\n"
+        "  const screens = [\n"
+        "    " + nav_entries + "\n"
+        "  ];\n"
+        "</script>\n\n"
+        "<Router>\n"
+        "  <nav>\n"
+        "    <ul>\n"
+        "      {#each screens as s (s.slug)}\n"
+        "        <li><Link to={s.slug}>{s.name}</Link></li>\n"
+        "      {/each}\n"
+        "    </ul>\n"
+        "  </nav>\n"
+        "  " + routes + "\n"
+        "</Router>\n"
+    )
+    vite_config = (
+        "import { defineConfig } from 'vite';\n"
+        "import { svelte } from '@sveltejs/vite-plugin-svelte';\n\n"
+        "export default defineConfig({\n"
+        "  plugins: [svelte()],\n"
+        "  server: {\n"
+        "    proxy: {\n"
+        "      '/api': { target: 'http://localhost:8000', changeOrigin: true },\n"
+        "    },\n"
+        "  },\n"
+        "});\n"
+    )
+    index_html = (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "  <head>\n"
+        '    <meta charset="UTF-8" />\n'
+        "    <title>" + project.name + "</title>\n"
+        "  </head>\n"
+        "  <body>\n"
+        '    <div id="app"></div>\n'
+        '    <script type="module" src="/src/main.js"></script>\n'
+        "  </body>\n"
+        "</html>\n"
+    )
+    package_json = json.dumps({
+        "name": f"{_slugify(project.name).lower()}-frontend",
+        "private": True,
+        "version": "1.0.0",
+        "type": "module",
+        "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
+        "dependencies": {"svelte-routing": "^2.13.0", "axios": "^1.18.1"},
+        "devDependencies": {"svelte": "^5.0.0", "@sveltejs/vite-plugin-svelte": "^7.0.0", "vite": "^8.0.12"},
+    }, indent=2) + "\n"
+
+    return {
+        "package.json": package_json,
+        "vite.config.js": vite_config,
+        "index.html": index_html,
+        "src/main.js": main_js,
+        "src/App.svelte": app_svelte,
+        ".gitignore": "node_modules/\ndist/\n",
+    }
+
+
+def _angular_scaffold(project, screens: list[dict]) -> dict:
+    """Standalone components + loadComponent routing (Angular 14+, stable on 16). Each
+    screen's page_component.ext class name is forced to ScreenPageComponent via
+    FRONTEND_CONVENTIONS (ai_service.py), so this can import it by a real, typed name —
+    no runtime name-sniffing needed, unlike React/Vue/Svelte's default-export trick,
+    because a dynamic import()'s module namespace has no reliable "the one export"."""
+    route_entries = ",\n  ".join(
+        '{ path: "' + s["slug"] + '", loadComponent: () => '
+        "import('../../" + s["slug"] + "/page_component.component').then(m => m.ScreenPageComponent) }"
+        for s in screens
+    )
+    default_path = screens[0]["slug"] if screens else ""
+    nav_entries = ",\n    ".join(
+        '{ slug: "' + s["slug"] + '", name: ' + json.dumps(s["name"]) + ' }' for s in screens
+    )
+
+    routes_ts = (
+        "import { Routes } from '@angular/router';\n\n"
+        "export const routes: Routes = [\n"
+        "  { path: '', redirectTo: '" + default_path + "', pathMatch: 'full' },\n"
+        "  " + route_entries + "\n"
+        "];\n"
+    )
+    main_ts = (
+        "import { bootstrapApplication } from '@angular/platform-browser';\n"
+        "import { provideRouter } from '@angular/router';\n"
+        "import { provideHttpClient } from '@angular/common/http';\n"
+        "import { AppComponent } from './app/app.component';\n"
+        "import { routes } from './app/app.routes';\n\n"
+        "bootstrapApplication(AppComponent, {\n"
+        "  providers: [provideRouter(routes), provideHttpClient()],\n"
+        "}).catch((err) => console.error(err));\n"
+    )
+    app_component_ts = (
+        "import { Component } from '@angular/core';\n"
+        "import { RouterOutlet, RouterLink } from '@angular/router';\n"
+        "import { NgFor } from '@angular/common';\n\n"
+        "@Component({\n"
+        "  selector: 'app-root',\n"
+        "  standalone: true,\n"
+        "  imports: [RouterOutlet, RouterLink, NgFor],\n"
+        "  template: `\n"
+        "    <nav>\n"
+        "      <ul>\n"
+        "        <li *ngFor=\"let s of screens\"><a [routerLink]=\"'/' + s.slug\">{{ s.name }}</a></li>\n"
+        "      </ul>\n"
+        "    </nav>\n"
+        "    <router-outlet></router-outlet>\n"
+        "  `,\n"
+        "})\n"
+        "export class AppComponent {\n"
+        "  screens = [\n"
+        "    " + nav_entries + "\n"
+        "  ];\n"
+        "}\n"
+    )
+    index_html = (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '  <meta charset="UTF-8">\n'
+        "  <title>" + project.name + "</title>\n"
+        '  <base href="/">\n'
+        "</head>\n"
+        "<body>\n"
+        "  <app-root></app-root>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+    proxy_conf = json.dumps({"/api": {"target": "http://localhost:8000", "secure": False}}, indent=2) + "\n"
+    angular_json = json.dumps({
+        "$schema": "./node_modules/@angular/cli/lib/config/schema.json",
+        "version": 1,
+        "projects": {
+            "app": {
+                "projectType": "application",
+                "root": "",
+                "sourceRoot": "src",
+                "architect": {
+                    "build": {
+                        "builder": "@angular-devkit/build-angular:application",
+                        "options": {
+                            "outputPath": "dist",
+                            "index": "src/index.html",
+                            "browser": "src/main.ts",
+                            "tsConfig": "tsconfig.json",
+                        },
+                    },
+                    "serve": {"builder": "@angular-devkit/build-angular:dev-server"},
+                },
+            },
+        },
+    }, indent=2) + "\n"
+    tsconfig = json.dumps({
+        "compilerOptions": {
+            "target": "ES2022", "module": "ES2022", "moduleResolution": "bundler",
+            "strict": True, "experimentalDecorators": True, "skipLibCheck": True,
+        },
+    }, indent=2) + "\n"
+    package_json = json.dumps({
+        "name": f"{_slugify(project.name).lower()}-frontend",
+        "private": True,
+        "version": "1.0.0",
+        "scripts": {"start": "ng serve --proxy-config proxy.conf.json", "build": "ng build"},
+        "dependencies": {
+            "@angular/core": "^16.2.0", "@angular/common": "^16.2.0",
+            "@angular/platform-browser": "^16.2.0", "@angular/platform-browser-dynamic": "^16.2.0",
+            "@angular/router": "^16.2.0", "@angular/forms": "^16.2.0", "@angular/compiler": "^16.2.0",
+            "rxjs": "^7.8.0", "zone.js": "~0.13.0",
+        },
+        "devDependencies": {
+            "@angular/cli": "^16.2.4", "@angular/compiler-cli": "^16.2.4",
+            "@angular-devkit/build-angular": "^16.2.4", "typescript": "~5.1.0",
+        },
+    }, indent=2) + "\n"
+
+    return {
+        "package.json": package_json,
+        "angular.json": angular_json,
+        "tsconfig.json": tsconfig,
+        "proxy.conf.json": proxy_conf,
+        "src/index.html": index_html,
+        "src/main.ts": main_ts,
+        "src/app/app.component.ts": app_component_ts,
+        "src/app/app.routes.ts": routes_ts,
+        ".gitignore": "node_modules/\ndist/\n",
+    }
+
+
+def _flutter_scaffold(project, screens: list[dict]) -> dict:
+    """Structural scaffold only — no dart/flutter SDK available in this environment to
+    compile-test it. Each screen's page_component.ext widget class is forced to
+    ScreenPage via FRONTEND_CONVENTIONS (ai_service.py) so main.dart can reference it by
+    a known name; every screen imports its own file under its own alias (Dart namespaces
+    by library/file), so the identical class name across screens causes no collisions.
+    Unlike the JS frameworks, there's no dev-proxy equivalent for /api calls — see the
+    README caveat in _FRONTEND_RUN_INSTRUCTIONS."""
+    imports = "\n".join(
+        "import '../" + s["slug"] + "/page_component.dart' as " + _frontend_import_alias(s["slug"]) + ";"
+        for s in screens
+    )
+    routes = ",\n        ".join(
+        "'/" + s["slug"] + "': (context) => " + _frontend_import_alias(s["slug"]) + ".ScreenPage()"
+        for s in screens
+    )
+    nav_buttons = "\n            ".join(
+        "ElevatedButton(onPressed: () => Navigator.pushNamed(context, '/" + s["slug"] + "'), "
+        "child: Text(" + json.dumps(s["name"]) + ")),"
+        for s in screens
+    )
+
+    main_dart = (
+        "import 'package:flutter/material.dart';\n"
+        + imports + "\n\n"
+        "void main() {\n"
+        "  runApp(const MyApp());\n"
+        "}\n\n"
+        "class MyApp extends StatelessWidget {\n"
+        "  const MyApp({super.key});\n\n"
+        "  @override\n"
+        "  Widget build(BuildContext context) {\n"
+        "    return MaterialApp(\n"
+        "      title: " + json.dumps(project.name) + ",\n"
+        "      initialRoute: '/',\n"
+        "      routes: {\n"
+        "        '/': (context) => const HomePage(),\n"
+        "        " + routes + "\n"
+        "      },\n"
+        "    );\n"
+        "  }\n"
+        "}\n\n"
+        "class HomePage extends StatelessWidget {\n"
+        "  const HomePage({super.key});\n\n"
+        "  @override\n"
+        "  Widget build(BuildContext context) {\n"
+        "    return Scaffold(\n"
+        "      appBar: AppBar(title: Text(" + json.dumps(project.name) + ")),\n"
+        "      body: Center(\n"
+        "        child: Column(\n"
+        "          mainAxisSize: MainAxisSize.min,\n"
+        "          children: [\n"
+        "            " + nav_buttons + "\n"
+        "          ],\n"
+        "        ),\n"
+        "      ),\n"
+        "    );\n"
+        "  }\n"
+        "}\n"
+    )
+    pubspec = (
+        "name: " + _slugify(project.name).lower().replace("-", "_") + "\n"
+        "description: Generated by Text Dev IDE.\n"
+        "publish_to: 'none'\n"
+        "version: 1.0.0+1\n\n"
+        "environment:\n"
+        "  sdk: '>=3.0.0 <4.0.0'\n\n"
+        "dependencies:\n"
+        "  flutter:\n"
+        "    sdk: flutter\n"
+        "  http: ^1.2.0\n\n"
+        "dev_dependencies:\n"
+        "  flutter_test:\n"
+        "    sdk: flutter\n\n"
+        "flutter:\n"
+        "  uses-material-design: true\n"
+    )
+    return {
+        "pubspec.yaml": pubspec,
+        "lib/main.dart": main_dart,
+        ".gitignore": ".dart_tool/\nbuild/\n",
+    }
+
+
+def _html_scaffold(project, screens: list[dict]) -> dict:
+    """No build tooling needed — preview/{slug}.html files (already pushed by the
+    per-screen loop in build_push_files) are already complete, standalone, runnable
+    pages. This is just a directory page over them."""
+    links = "\n".join(
+        '    <li><a href="preview/' + s["slug"] + '.html">' + s["name"] + "</a></li>" for s in screens
+    )
+    index_html = (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "<head><meta charset=\"UTF-8\"><title>" + project.name + "</title></head>\n"
+        "<body>\n"
+        "  <h1>" + project.name + "</h1>\n"
+        "  <ul>\n"
+        + links + "\n"
+        "  </ul>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+    return {"index.html": index_html}
+
+
+def _frontend_scaffold(project, frontend_screens: list[dict]) -> dict:
+    """Deterministic (non-AI) package manifest + build config + entry point + a router
+    wiring every screen's page_component into real navigation — the frontend equivalent
+    of _backend_scaffold, generated once per push. frontend_screens: [{"slug", "name",
+    "has_page_component", "has_preview"}, ...] accumulated in build_push_files()."""
+    lang = project.frontend_language or "React"
+    if lang == "HTML/CSS":
+        return _html_scaffold(project, [s for s in frontend_screens if s["has_preview"]])
+    screens = [s for s in frontend_screens if s["has_page_component"]]
+    dispatch = {
+        "Next.js": _nextjs_scaffold,
+        "Vue": _vue_scaffold,
+        "Angular": _angular_scaffold,
+        "Flutter": _flutter_scaffold,
+        "Svelte": _svelte_scaffold,
+    }
+    return dispatch.get(lang, _react_scaffold)(project, screens)
+
+
 async def create_repo(token: str, name: str, description: str = "") -> dict:
     slug = _slugify(name)
     async with httpx.AsyncClient(timeout=20) as client:
@@ -526,11 +1184,20 @@ def build_push_files(project) -> tuple:
     backend_readme += "- an entrypoint (main.py / Application.java / index.js / Program.cs / main.go / app.rb / index.php) and dependency manifest are generated so this repo runs as-is\n\n"
     backend_readme += "_Generated by [Text Dev IDE](https://textdevide.netlify.app)_\n"
 
-    frontend_readme += f"**Framework:** {project.frontend_language or 'React'}\n\n"
+    frontend_lang = project.frontend_language or "React"
+    frontend_readme += f"**Framework:** {frontend_lang}\n\n"
     frontend_readme += "## Structure\n"
     frontend_readme += "- `ui/` — screen XML definitions (one per screen)\n"
     frontend_readme += "- `preview/` — reference preview HTML (not the runnable app)\n"
-    frontend_readme += f"- `{{screen}}/` — runnable frontend code (API service + page component) per screen\n\n"
+    frontend_readme += f"- `{{screen}}/` — API service + page component per screen, wired together by the scaffold below\n"
+    if frontend_lang == "HTML/CSS":
+        frontend_readme += "- `index.html` — links to every screen under `preview/`\n\n"
+    else:
+        frontend_readme += (
+            "- a dependency manifest, build config, entry point, and a router/nav wiring "
+            "every screen together are generated so this repo runs as-is\n\n"
+        )
+    frontend_readme += f"## Run\n{_FRONTEND_RUN_INSTRUCTIONS.get(frontend_lang, _FRONTEND_RUN_INSTRUCTIONS['React'])}\n\n"
     frontend_readme += "_Generated by [Text Dev IDE](https://textdevide.netlify.app)_\n"
 
     backend_files["README.md"] = backend_readme
@@ -583,12 +1250,14 @@ def build_push_files(project) -> tuple:
     # screens
     screen_names = []
     backend_screen_slugs = []  # screens that actually got a routes file placed — feeds the entrypoint wiring
+    frontend_screens = []      # [{"slug", "name", "has_page_component", "has_preview"}, ...] — feeds the frontend scaffold's router wiring
     if project.ui_screens:
         try:
             screens = json.loads(project.ui_screens)
             for screen in screens:
                 slug = _safe_ident(screen.get("name", "screen"))
                 screen_names.append(screen.get("name", slug))
+                got_page_component = False
 
                 if screen.get("xml"):
                     frontend_files[f"ui/{slug}.xml"] = screen["xml"]
@@ -608,7 +1277,10 @@ def build_push_files(project) -> tuple:
                         if _CONTRACTS_FILE_RE.search(name):
                             backend_files[f"api-contracts/{slug}.json"] = code
                         elif _FRONTEND_FILE_RE.match(name):
-                            frontend_files[f"{slug}/{name}"] = code
+                            category = "page_component" if low.startswith("page_component") else "api_service"
+                            frontend_files[_frontend_file_path(project.frontend_language, category, slug)] = code
+                            if category == "page_component":
+                                got_page_component = True
                         elif _BACKEND_FILE_RE.match(name):
                             category = "routes" if low.startswith("routes") else "models"
                             backend_files[_backend_file_path(project.language, category, slug, name)] = code
@@ -620,15 +1292,26 @@ def build_push_files(project) -> tuple:
                         elif idx == _POSITION_BACKEND_MODELS:
                             backend_files[_backend_file_path(project.language, "models", slug, name)] = code
                         elif idx in (_POSITION_FRONTEND_API_SERVICE, _POSITION_FRONTEND_PAGE_COMPONENT):
-                            frontend_files[f"{slug}/{name}"] = code
+                            category = "page_component" if idx == _POSITION_FRONTEND_PAGE_COMPONENT else "api_service"
+                            frontend_files[_frontend_file_path(project.frontend_language, category, slug)] = code
+                            if category == "page_component":
+                                got_page_component = True
                         else:
                             backend_files[f"{slug}/{name}"] = code
                     if got_routes:
                         backend_screen_slugs.append(slug)
+
+                frontend_screens.append({
+                    "slug": slug,
+                    "name": screen.get("name", slug),
+                    "has_page_component": got_page_component,
+                    "has_preview": bool(screen.get("html")),
+                })
         except Exception:
             pass
 
     backend_files.update(_backend_scaffold(project, backend_screen_slugs))
+    frontend_files.update(_frontend_scaffold(project, frontend_screens))
 
     return backend_files, frontend_files, screen_names
 

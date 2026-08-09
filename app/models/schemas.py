@@ -152,6 +152,10 @@ class SchemaAssistantRequest(BaseModel):
     instruction: str
 
 
+class PreviewRowsRequest(BaseModel):
+    rows: list[dict]
+
+
 class SchemaAssistantResponse(BaseModel):
     table: dict
     summary: str
