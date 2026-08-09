@@ -1531,13 +1531,53 @@ def _inject_cross_screen_sync(html: str, xml: str) -> str:
         name_m = re.search(r'name="([^"]+)"', attrs)
         if name_m:
             readonly_fields.add(name_m.group(1))
+    # A hub/landing screen's <navItem> buttons are real routing code in the actual generated
+    # frontend deliverable (React Router Link, etc. — see XML_TO_HTML_PROMPT), but the
+    # STANDALONE HTML preview has no router at all — it's one isolated iframe per screen, so
+    # the AI is told to render a toast/stub there instead of pretending to navigate. That
+    # means clicking a nav card in the Studio's live preview visibly does nothing. Fix this
+    # deterministically: extract the real targetScreen/label pairs from the XML and have the
+    # parent (Dashboard.jsx) actually switch the Studio to that screen on click, the same way
+    # cross-screen data sync doesn't depend on the AI writing the wiring itself.
+    nav_items = [
+        {"targetScreen": m.group("target"), "label": m.group("label")}
+        for m in re.finditer(r'<navItem\s+[^>]*\btargetScreen="(?P<target>[^"]+)"[^>]*\blabel="(?P<label>[^"]+)"', xml)
+    ] or [
+        {"targetScreen": m.group("target"), "label": m.group("label")}
+        for m in re.finditer(r'<navItem\s+[^>]*\blabel="(?P<label>[^"]+)"[^>]*\btargetScreen="(?P<target>[^"]+)"', xml)
+    ]
     script = f"""
+<!-- TDIDE_SYNC_SCRIPT_START -->
 <script>
 (function() {{
   var TDIDE_ENTITY = {json.dumps(entity)};
   var TDIDE_LOOKUPS = {json.dumps(lookups)};
   var TDIDE_BINDINGS = {json.dumps(bindings)};
   var TDIDE_REQUIRED = {json.dumps(required_fields)};
+  var TDIDE_NAV_ITEMS = {json.dumps(nav_items)};
+  if (TDIDE_NAV_ITEMS.length) {{
+    document.addEventListener("click", function(e) {{
+      var el = e.target;
+      for (var depth = 0; el && depth < 6; depth++, el = el.parentElement) {{
+        var onclickAttr = el.getAttribute && el.getAttribute("onclick");
+        for (var i = 0; i < TDIDE_NAV_ITEMS.length; i++) {{
+          var item = TDIDE_NAV_ITEMS[i];
+          // The AI's own stub usually still mentions the real target screen name inside its
+          // onclick (e.g. showToast("Navigate to: X")) even though it doesn't act on it —
+          // that's a more reliable signal than text-matching, so check it first. Fall back to
+          // "this small-ish element's text starts with the nav item's label" (a nav card
+          // typically shows the label as its own heading) for generations that don't.
+          var matchesOnclick = onclickAttr && onclickAttr.indexOf(item.targetScreen) !== -1;
+          var matchesText = !matchesOnclick && el.children && el.children.length <= 8 &&
+            el.textContent && el.textContent.trim().indexOf(item.label) === 0;
+          if (matchesOnclick || matchesText) {{
+            try {{ window.parent.postMessage({{ type: "TDIDE_NAVIGATE", targetScreen: item.targetScreen }}, "*"); }} catch (err) {{}}
+            return;
+          }}
+        }}
+      }}
+    }}, true);
+  }}
   var TDIDE_READONLY = {json.dumps(sorted(readonly_fields))};
   var tdideObserver = null;
   // A grid re-render isn't always a real save — the page's own initial render from its
@@ -1686,7 +1726,13 @@ def _inject_cross_screen_sync(html: str, xml: str) -> str:
   }});
 }})();
 </script>
+<!-- TDIDE_SYNC_SCRIPT_END -->
 """
+    # Idempotent: strip out any previously-injected copy first (identified by the marker
+    # comments) so this can be safely re-run on already-generated HTML to pick up a fix to
+    # the injected script itself — e.g. after a bug fix here — without a fresh AI call and
+    # without accumulating duplicate <script> blocks each time it's re-applied.
+    html = re.sub(r"\n?<!-- TDIDE_SYNC_SCRIPT_START -->.*?<!-- TDIDE_SYNC_SCRIPT_END -->\n?", "", html, flags=re.S)
     if "</body>" in html:
         return html.replace("</body>", script + "</body>", 1)
     return html + script

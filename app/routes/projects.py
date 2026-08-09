@@ -22,7 +22,7 @@ from app.services.ai_service import (
     generate_entity_code, edit_validation_code, generate_ui_code,
     generate_ui_xml, generate_html_from_xml, generate_api_from_xml,
     generate_er_diagram, detect_screen_intents, interpret_requirement,
-    refine_ui_xml, schema_assistant_edit_table,
+    refine_ui_xml, schema_assistant_edit_table, _inject_cross_screen_sync,
 )
 from app.services.github_service import create_repo, push_files, build_push_files, build_commit_message
 from app.services import preview_db_service
@@ -596,6 +596,27 @@ async def gen_screen_html(project_id: int, screen_id: str, body: GenerateFromXml
         raise HTTPException(status_code=500, detail=f"HTML generation failed: {e}")
     await _log_prompt(db, user.id, project.id, "screen_generate_html", body.xml, html)
     screen["html"] = html
+    screens[idx] = screen
+    _save_screens(project, screens)
+    await db.commit()
+    await db.refresh(project)
+    return ProjectResponse.model_validate(project)
+
+
+@router.post("/{project_id}/screens/{screen_id}/resync-preview", response_model=ProjectResponse)
+async def resync_screen_preview(project_id: int, screen_id: str, user=Depends(_get_user), db: AsyncSession = Depends(get_db)):
+    """Re-applies _inject_cross_screen_sync to this screen's already-generated HTML, using
+    its already-generated XML — no OpenAI call, so it's free and instant. Lets a fix to the
+    injected script itself (cross-screen sync, required-field enforcement, hub-screen
+    navigation, ...) reach every existing screen without burning a regenerate on each one."""
+    project = await _get_project(project_id, user, db)
+    screens = _get_screens(project)
+    idx, screen = _find_screen(screens, screen_id)
+    if screen is None:
+        raise HTTPException(status_code=404, detail="Screen not found")
+    if not screen.get("html") or not screen.get("xml"):
+        raise HTTPException(status_code=400, detail="This screen has no generated preview yet")
+    screen["html"] = _inject_cross_screen_sync(screen["html"], screen["xml"])
     screens[idx] = screen
     _save_screens(project, screens)
     await db.commit()
