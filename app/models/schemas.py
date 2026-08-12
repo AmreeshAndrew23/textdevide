@@ -241,3 +241,12 @@ class WorkbenchConfirmRequest(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class GenerateFromTemplateRequest(BaseModel):
+    template: str
+
+
+class GenerateFromTemplateResponse(BaseModel):
+    xml: str
+    html: str
