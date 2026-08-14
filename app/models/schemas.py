@@ -179,6 +179,7 @@ class GenerateUIXmlRequest(BaseModel):
 class GenerateFromXmlRequest(BaseModel):
     xml: str
     frontend_lang: str = "HTML/CSS"
+    reference_image: Optional[str] = None  # data URL, e.g. "data:image/png;base64,..."
 
 
 class RefineUIRequest(BaseModel):
@@ -195,6 +196,7 @@ class ScreenCreate(BaseModel):
     primary_entity: Optional[str] = None  # deprecated, use primary_entities
     primary_entities: Optional[list[str]] = None
     joined_entities: Optional[list[str]] = None
+    reference_image: Optional[str] = None  # data URL, e.g. "data:image/png;base64,..."
 
 
 class ScreenUpdate(BaseModel):
@@ -203,6 +205,7 @@ class ScreenUpdate(BaseModel):
     primary_entity: Optional[str] = None  # deprecated, use primary_entities
     primary_entities: Optional[list[str]] = None
     joined_entities: Optional[list[str]] = None
+    reference_image: Optional[str] = None  # data URL; empty string clears it, omitted/None leaves untouched
 
 
 class PromptLogResponse(BaseModel):

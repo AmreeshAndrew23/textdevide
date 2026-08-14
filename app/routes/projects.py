@@ -491,6 +491,7 @@ async def create_screen(project_id: int, body: ScreenCreate, user=Depends(_get_u
     screens.append({
         "id": str(uuid.uuid4())[:8], "name": body.name, "description": body.description, "xml": "", "html": "", "api": "",
         "primary_entities": primary_entities, "joined_entities": body.joined_entities or [],
+        "reference_image": body.reference_image,
     })
     _save_screens(project, screens)
     await db.commit()
@@ -515,6 +516,8 @@ async def update_screen(project_id: int, screen_id: str, body: ScreenUpdate, use
         screen["primary_entities"] = [body.primary_entity] if body.primary_entity else []
     if body.joined_entities is not None:
         screen["joined_entities"] = body.joined_entities
+    if body.reference_image is not None:
+        screen["reference_image"] = body.reference_image or None
     screens[idx] = screen
     _save_screens(project, screens)
     await db.commit()
@@ -591,7 +594,8 @@ async def gen_screen_html(project_id: int, screen_id: str, body: GenerateFromXml
         # so browsers render it correctly even with minor imperfections. The actual
         # framework-specific deliverable code lives separately in the Frontend Code
         # tab (generate_api_from_xml's page_component file) and is unaffected by this.
-        html = await generate_html_from_xml(xml=body.xml, frontend_lang="HTML/CSS", extra_instructions=screen.get("ui_notes"))
+        html = await generate_html_from_xml(xml=body.xml, frontend_lang="HTML/CSS", extra_instructions=screen.get("ui_notes"),
+                                             reference_image=body.reference_image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"HTML generation failed: {e}")
     await _log_prompt(db, user.id, project.id, "screen_generate_html", body.xml, html)

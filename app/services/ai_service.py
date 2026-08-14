@@ -665,12 +665,36 @@ FINAL CHECKS before returning:
   window.parent.postMessage({{type:'TDIDE_DATA_CHANGE', ...}}) call after every save/delete of the primary
   entity. This is not optional — a screen missing it is an incomplete generation.
 {extra_instructions_section}
+{image_reference_section}
 XML UI Definition:
 <xml_ui_definition>
 {xml}
 </xml_ui_definition>
 
 Return ONLY the complete output file for the chosen framework, with all styles and logic included. No explanations, no markdown fences."""
+
+IMAGE_REFERENCE_SECTION = """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+AN IMAGE IS ATTACHED — THIS OVERRIDES THE DESIGN-SYSTEM RULES ABOVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Ignore the archetype/color-derivation system, the CLEAN vs DENSE choice, and every specific
+color/spacing/pixel value given earlier in this prompt — none of that applies to this generation.
+Instead, look at the attached image and copy what you actually see in it:
+- --clr-primary, --clr-bg, --clr-header-bg, and every other color: read the ACTUAL colors visible in
+  the image (background, accents, text, borders) and use those literal colors, not a derived palette
+  from an archetype. If the image has a bright pink sidebar, the output has a bright pink sidebar —
+  do not tone it down or substitute a "safer" color.
+- Layout: replicate the image's actual arrangement — sidebar vs top-nav, column count, section order,
+  spacing density, border/shadow style — instead of the CLEAN/DENSE templates described above.
+- Typography and shape language (rounded vs sharp corners, border weight, etc.): match what's in the
+  image.
+This is a hard override, not a suggestion to blend with the rules above — when the image and the
+earlier design-system instructions disagree, the image wins every time.
+The XML is still the source of truth for WHAT controls and data actually exist (fields, grid columns,
+buttons) and for all the FUNCTIONAL requirements above (working search/sort/save/etc.) — only the
+VISUAL styling and layout come from the image. If the XML requires a field the image doesn't show, add
+it styled consistently with the image rather than omitting it.
+"""
 
 XML_TO_API_PROMPT = """You are a senior full-stack developer. Generate complete REST API code from this XML UI definition.
 
@@ -1738,7 +1762,8 @@ def _inject_cross_screen_sync(html: str, xml: str) -> str:
     return html + script
 
 
-async def generate_html_from_xml(xml: str, frontend_lang: str = "HTML/CSS", extra_instructions: list[str] | None = None) -> str:
+async def generate_html_from_xml(xml: str, frontend_lang: str = "HTML/CSS", extra_instructions: list[str] | None = None,
+                                  reference_image: str | None = None) -> str:
     if extra_instructions:
         notes = "\n".join(f"- {n}" for n in extra_instructions)
         extra_section = (
@@ -1750,10 +1775,19 @@ async def generate_html_from_xml(xml: str, frontend_lang: str = "HTML/CSS", extr
         )
     else:
         extra_section = ""
-    prompt = XML_TO_HTML_PROMPT.format(xml=xml, frontend_lang=frontend_lang, extra_instructions_section=extra_section)
+    image_section = IMAGE_REFERENCE_SECTION if reference_image else ""
+    prompt = XML_TO_HTML_PROMPT.format(xml=xml, frontend_lang=frontend_lang, extra_instructions_section=extra_section,
+                                        image_reference_section=image_section)
+    # A reference image (wireframe/screenshot) turns the user message into a multimodal content
+    # list per OpenAI's standard image_url block — _call_openai passes messages straight through
+    # with no transformation, so this needs no changes there.
+    user_content = prompt if not reference_image else [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": reference_image}},
+    ]
     html = await _call_openai([
         {"role": "system", "content": f"You are a senior UI/UX product designer who also writes production {frontend_lang} code. Design first — commit to a distinct visual identity (color, type, spacing, shape) before you touch markup — then implement it precisely and correctly. Return ONLY the complete output file for the chosen framework. No markdown fences."},
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": user_content},
     ], timeout=180, temperature=0.9)  # visual/creative output — temperature=0 made every design collapse to the same "safest" choice
     if frontend_lang == "HTML/CSS":
         html = _inject_cross_screen_sync(html, xml)
