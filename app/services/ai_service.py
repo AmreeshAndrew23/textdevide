@@ -101,6 +101,8 @@ on the question:
 
 EXTRACT_PROMPT = """You are a database architect. Given the project description and features, extract all database entities (tables) with their columns, primary keys, foreign keys, and any auditing/history/autonumber/validation behavior the user describes.
 
+Think about the actual domain being described, not just the literal words used. If the description names a broader feature or application (a bug tracker, a booking system, an inventory manager, ...) rather than a single simple lookup/reference table, identify and create EVERY table a complete, working implementation of that domain would reasonably need, correctly related via foreign keys — e.g. "a bug tracking application" isn't one Bug table, it's Bug + Project + User + Status + Priority + Comment (+ Label if tags are implied), each a real table with its own columns. Don't under-scope just because the request was short.
+
 Return ONLY valid JSON in this exact format:
 {{
   "tables": [ ...table objects, see shape below... ],
@@ -113,6 +115,8 @@ Rules:
 """ + COLUMN_TYPE_RULES
 
 REFINE_PROMPT = """You are a database architect. Given the current schema and the user's instruction, update the schema accordingly. Keep every table and column the instruction doesn't touch exactly as it already is, including any nullable/default/unique/autonumber/audit_enabled/history_enabled/validations fields already present — never strip or reset them just because a table happened to pass through this step.
+
+If the instruction names a broader feature or application (a bug tracker, a booking system, an inventory manager, ...) rather than a single simple lookup/reference table, add EVERY table a complete, working implementation of that domain would reasonably need, correctly related via foreign keys to each other and to the existing schema — e.g. "add tables for a bug tracking application" isn't one Bug table, it's Bug + Project + User + Status + Priority + Comment (+ Label if tags are implied), each a real table with its own columns. Don't under-scope just because the instruction was short or phrased as a single "entity."
 
 Current schema:
 <current_schema>
