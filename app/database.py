@@ -46,3 +46,27 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_add_missing_columns)
+
+
+async def sync_superusers():
+    """Grant-only bootstrap: any User whose email is in SUPERUSER_EMAILS gets is_superuser=True
+    if it isn't already. Never revokes — a blank/misconfigured env var is a no-op, not a
+    lockout or a demotion. Runs once per startup, so promoting a new admin is just adding
+    their email to the env var and redeploying."""
+    from sqlalchemy import select, func
+    from app.config import SUPERUSER_EMAILS
+    from app.models.user import User
+
+    if not SUPERUSER_EMAILS:
+        return
+    async with async_session() as session:
+        # SUPERUSER_EMAILS is lowercased in config.py; stored emails aren't normalized on
+        # registration, so match case-insensitively rather than risk a silent mismatch.
+        result = await session.execute(select(User).where(func.lower(User.email).in_(SUPERUSER_EMAILS)))
+        changed = False
+        for user in result.scalars().all():
+            if not user.is_superuser:
+                user.is_superuser = True
+                changed = True
+        if changed:
+            await session.commit()

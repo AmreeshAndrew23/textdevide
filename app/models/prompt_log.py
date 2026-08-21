@@ -12,4 +12,8 @@ class PromptLog(Base):
     kind = Column(String, nullable=False)
     prompt = Column(Text, nullable=False)
     response = Column(Text, nullable=True)
+    model = Column(String, nullable=True)
+    prompt_tokens = Column(Integer, nullable=True)
+    completion_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

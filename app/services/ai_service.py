@@ -215,6 +215,78 @@ Rules:
 
 Return ONLY code with === FILENAME: === separators. No explanations. No markdown."""
 
+AUTH_MODULE_PROMPT = """You are a senior backend developer. Generate a single, real, working authentication
+utility module for this project — password hashing, JWT issue/verify, and a reusable "require a valid
+token" dependency/middleware that every other endpoint in the project will use. This is shared
+infrastructure generated once for the whole project, not tied to any one screen.
+
+Backend Language: {backend_lang}
+
+The "{user_entity}" table is the real user/account table this auth module authenticates against:
+{user_entity_schema}
+
+Conventions to follow exactly — a separate assembler places this file at a fixed path other
+generated files import it from, so deviating breaks every other screen's build:
+{auth_conventions}
+
+Requirements:
+- Real password hashing (never store or compare plaintext passwords).
+- A real JWT (or equivalent) access token, signed with a secret, with a reasonable expiry.
+- The token payload must carry enough to look the user back up (their id, at minimum).
+- The "require a valid token" function/middleware must reject (401/unauthorized) any request with a
+  missing, malformed, or expired/invalid token, and otherwise make the authenticated user available
+  to the calling endpoint.
+- No placeholders, no TODOs, no "implement this later" — this must be real, correct, runnable code.
+
+Return ONLY the complete file's code. No explanations, no markdown fences, no === FILENAME: === marker
+(the caller already knows the filename from the conventions above)."""
+
+DB_MODULE_PROMPT = """You are a senior backend developer. Generate a single, real, working database
+connection/ORM-setup module for this project — every other generated screen's routes will import
+and query through this. This is shared infrastructure generated once for the whole project, not
+tied to any one screen.
+
+Backend Language: {backend_lang}
+
+Use a real embedded SQLite database (a local file, e.g. app.db) so the generated project runs
+immediately with nothing external to stand up — read the connection string from an environment
+variable if one is conventionally used for this language/framework's DB config, defaulting to the
+local SQLite file when unset.
+
+Conventions to follow exactly — a separate assembler places this file at a fixed path other
+generated files import it from, so deviating breaks every other screen's build:
+{db_conventions}
+
+Requirements:
+- A real, working connection/session/ORM-context setup — whatever this language's idiomatic data
+  access pattern is (a session factory, a DbContext, a connection pool, an ORM base class).
+- Tables should be created automatically on startup if they don't already exist.
+- No placeholders, no TODOs, no "implement this later" — this must be real, correct, runnable code.
+
+Return ONLY the complete file's code. No explanations, no markdown fences, no === FILENAME: === marker
+(the caller already knows the filename from the conventions above)."""
+
+EMAIL_MODULE_PROMPT = """You are a senior backend developer. Generate a single, real, working email-sending
+utility module for this project — every other generated screen whose job includes sending an email
+will import and call through this. This is shared infrastructure generated once for the whole
+project, not tied to any one screen.
+
+Backend Language: {backend_lang}
+
+Conventions to follow exactly — a separate assembler places this file at a fixed path other
+generated files import it from, so deviating breaks every other screen's build:
+{email_conventions}
+
+Requirements:
+- A real SMTP-based send function/method taking at minimum a recipient, subject, and body, reading
+  SMTP host/port/username/password/from-address from environment variables.
+- If the SMTP environment variables aren't configured, raise/throw a real, clear error explaining
+  which env vars to set — never silently no-op or pretend an email was sent.
+- No placeholders, no TODOs, no "implement this later" — this must be real, correct, runnable code.
+
+Return ONLY the complete file's code. No explanations, no markdown fences, no === FILENAME: === marker
+(the caller already knows the filename from the conventions above)."""
+
 VALIDATION_EDIT_PROMPT = """You are a code generator. You have existing code files and a new instruction from the user. Edit the existing files or create new files as needed.
 
 Target Language: {language}
@@ -274,26 +346,51 @@ Generate clean, well-structured UI code. If the language is:
 
 Return ONLY the code with file separators, no explanations or markdown fences."""
 
-SCREEN_INTENT_PROMPT = """You are a UI/UX architect analyzing a screen request. The description below may describe ONE screen, or it may describe MULTIPLE distinct screens (e.g. "one screen for X, another screen for Y", "also add a screen to...", or a list of separate unrelated forms/pages).
+SCREEN_INTENT_PROMPT = """You are a UI/UX architect analyzing a screen request. The description below may name ONE
+specific screen, may already read as MULTIPLE distinct screens (e.g. "one screen for X, another screen for Y",
+"also add a screen to...", a list of separate unrelated forms/pages), or may describe a broader feature/application
+as a whole (e.g. "build a personal finance app with expense tracking, budgets, goals, and reports") without
+enumerating screens at all.
 
 Description:
 <screen_request>
 {description}
 </screen_request>
 
-Split the description into one entry per distinct screen it implies. If it only describes a single screen, return exactly one entry.
+Think about what's actually being asked, not just literal phrasing:
+- If it clearly names or describes one specific screen, return exactly that one entry — do not pad it out with
+  extra screens it didn't ask for.
+- If it already reads as an explicit list of screens, split it into one entry per screen.
+- If it describes a broader feature or application rather than one screen, infer the FULL set of screens a
+  complete, working implementation of that domain would reasonably need — e.g. a personal finance app isn't one
+  "Finance" screen, it's an Expense Entry/List screen, a Budget Planner screen, a Goals screen, a Reports screen,
+  etc., each a real screen with its own purpose. Don't under-scope just because the request was short or generic.
+- When you infer 3 or more screens this way, ALSO append one final landing/dashboard screen (name it "Dashboard"
+  unless a better module-specific name fits) whose description says it's a navigation hub routing to the other
+  screens by name — and it MUST be the LAST entry in "screens" when present, since the caller treats the last
+  entry specially. Do not add a dashboard screen for a single screen or an explicit short list — only when you
+  yourself inferred a broader multi-screen set.
 
 Return ONLY valid JSON in this exact format:
 {{
   "screens": [
     {{"name": "Short Screen Name", "description": "Self-contained description of what THIS screen alone should contain — rewritten so it makes sense without referencing the other screens."}}
-  ]
+  ],
+  "unresolved": [ ...see shape below, [] when nothing is ambiguous... ]
 }}
+
+If it's genuinely unclear how to split the app into screens in a way that would change the result (e.g. "reports"
+could reasonably be one screen or several, and the description gives no hint which) — do not silently guess.
+Instead add an entry to "unresolved" and still fill in your best-effort screen list around it so nothing is
+blocked on the question:
+  {{"unresolved": [{{"blocking": true|false, "question": "what's unclear and why it matters"}}]}}
+- blocking:true = you had to guess at something that could produce the wrong screen set.
+- blocking:false = a minor assumption worth flagging but not worth stopping for.
+- Only use this for real ambiguity — most requests are clear enough that "unresolved" stays empty.
 
 Rules:
 - Keep each "name" short (2-5 words), Title Case
 - Each "description" must stand alone and preserve every relevant detail from the original text for that screen — do not drop information, just split it correctly
-- Do not invent screens that are not implied by the text
 - Return ONLY the JSON, no explanations or markdown fences"""
 
 # Shared with REFINE_UI_XML_PROMPT so chat-based edits can't invent elements the HTML
@@ -343,7 +440,9 @@ UI_XML_VOCABULARY_RULES = """1. <screen> root with id, title, module, purpose at
 
 6. <toolbar position="bottom"> with action buttons (save, clear, delete, cancel only)
    - Include type, label, style (primary|secondary|danger|ghost), shortcut, confirmation attributes
-   - ONLY include buttons explicitly needed — no extra buttons
+   - Whenever the screen has a <form>, this toolbar MUST include both a save and a cancel button —
+     these two are never optional, regardless of what the description asked for. clear/delete are
+     still only included when actually needed.
 
 7. <dataBindings> — entity bindings with allowed operations (SELECT, INSERT, UPDATE, DELETE)
 
@@ -356,6 +455,22 @@ UI_XML_VOCABULARY_RULES = """1. <screen> root with id, title, module, purpose at
    (a short keyword like "users", "reports", "settings" — not an emoji/SVG, just a hint word).
    Use this element instead of a <form>/<grid> when the screen description signals it's a
    navigation hub / landing page / dashboard that links out to other screens.
+
+10. <auth entity="EntityName"> — ONLY for a sign up / registration / log in / sign in screen. Use
+    this instead of a <form>/<grid>/bottom <toolbar> entirely — an auth screen never shows a grid
+    of other users' data and never has a delete action. entity="..." names the real user/account
+    entity from the schema (usually "User"). Contains:
+    - <signup> — one <field> per signup input, using the same <field>/<rule> shape as a normal
+      <form> field (rule 4 above). Bind name/email-style fields to the entity's REAL columns when
+      they exist (e.g. a "username" or "email" column). Always include a password field
+      (type="password", rule required="true" minLength="8") and a confirmPassword field
+      (name="confirmPassword", type="password", required="true") even though confirmPassword has
+      no matching database column — it's a client-side-only check.
+    - <login> — exactly two <field>s: the entity's real identifying column (email or username,
+      type="email" or "text") and a password field (type="password", required="true"). No
+      confirmPassword here.
+    Do not add a <grid>, <toolbar>, or <dataBindings> sibling when <auth> is present — it replaces
+    the whole form+grid+toolbar shape, not just the form.
 
 These are the ONLY element/attribute types this format supports. Never introduce a new element or
 attribute name beyond what's listed above, even if a request seems to call for one — find the closest
@@ -375,6 +490,24 @@ Screen Description:
 {description}
 </screen_description>
 {existing_screens_section}
+Before choosing this screen's shape, identify what it's actually FOR — do not default to a generic
+create/edit form + grid + full CRUD toolbar just because that's the common case. Consider which of
+these the description actually describes, and build ONLY the parts that fit:
+- Browsing/managing records of an entity → the usual <form>+<grid>+<toolbar> (still the most common
+  case — use it when that's genuinely what's being asked for).
+- Sign up / registration / log in / sign in / authentication → <auth>, never a <form>+<grid> for this
+  (see its own rules below) — a login screen must never show a grid of other users' data.
+- A navigation/landing/hub screen that routes to other screens → <navigation>, not a data screen.
+- A read-only report/summary (nothing is created or edited here) → <grid> alone (or a stats-only
+  layout). Do NOT emit a <form> element at all in this case — a <form> exists to capture input for
+  create/edit, which a pure report never does. Since there is no <form>, the mandatory-save/cancel
+  rule below (rule 6) never applies either: with no <form> on the screen, omit the bottom
+  <toolbar> entirely rather than adding one with save/cancel buttons that have nothing to save.
+- A pure search/filter/lookup screen with no persistence implied → <grid> with its own filter/search
+  toolbar, no <form>.
+Match the XML to the real purpose. Forcing every request into the same CRUD template — including
+onto screens that clearly aren't that — is the wrong default.
+
 Generate a well-structured XML that defines the entire screen. Include:
 
 """ + UI_XML_VOCABULARY_RULES + """
@@ -405,7 +538,7 @@ STRICT RULES — NEVER VIOLATE THESE:
 - NEVER render radio buttons or checkboxes as section/panel icons or decorative elements.
 - NEVER add section icons that look like radio buttons. Panel titles are plain text only.
 - NEVER add buttons not present in the XML toolbar.
-- ID/code columns in grids MUST be rendered as clickable links/hyperlinks.
+- ID/code columns in grids MUST be rendered as clickable links/hyperlinks, styled `color: var(--clr-primary); text-decoration: none;` (underline on hover) via a real CSS rule — never left to default browser link-blue, and never a hardcoded hex.
 - Grids are ALWAYS read-only (no inline editing).
 - Every grid column marked sortable="true" MUST have a clickable sort header with ↑↓ arrows.
 - The page must include a one-line purpose statement pulled from the XML purpose attribute, shown in muted text directly below the page title.
@@ -424,10 +557,11 @@ a bug. Concretely, in plain HTML/CSS/vanilla JS (no framework, no build step):
 - Export-csv MUST actually trigger a client-side CSV download (Blob + temporary <a download>) of
   the currently visible rows.
 - Pagination controls, if pageSize is set, MUST actually page through the sample rows.
-- Every form/bottom-toolbar button (save, clear, delete, cancel) MUST have a real onclick handler:
-  since there's no backend, simulate the effect against local state (e.g. clear empties the form,
-  delete removes/greys the row and shows a brief confirmation, save shows a success message) —
-  never leave a button with no handler at all.
+- Every form MUST have a Save button AND a Cancel button, whether or not the XML toolbar lists
+  them — these two are never optional. Every form/bottom-toolbar button (save, cancel, clear,
+  delete, ...) MUST have a real onclick handler: since there's no backend, simulate the effect
+  against local state (e.g. clear/cancel empties the form, delete removes/greys the row and shows
+  a brief confirmation, save shows a success message) — never leave a button with no handler at all.
 - select/dropdown fields with dataSource MUST be populated with real <option> entries derived from
   that entity's sample rows, not left empty.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -468,9 +602,19 @@ parent page. Add this exact pattern, adapted to your actual variable/function na
    broadcast a LOOKUP_ENTITY as if this screen edited it, since it's only reading that data here.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VISUAL IDENTITY — pick ONE archetype below that best fits this specific screen's module/title/purpose text, then commit to it fully (color family AND typography AND corner roundedness AND shadow depth all come from the same archetype — don't mix them). Read the actual domain words in the XML closely and choose deliberately; do not default to the same archetype every time out of habit — two different screens should usually end up looking different unless their domains are genuinely similar.
+VISUAL IDENTITY — pick ONE archetype below that best fits this APPLICATION's overall domain (read the
+project/module context, not just this one screen's title in isolation), then commit to it fully (color
+family AND typography AND corner roundedness AND shadow depth all come from the same archetype — don't
+mix them). This decision represents the whole application's visual identity, not just one page — every
+screen belonging to the same application should land on the SAME archetype and the SAME exact hex shades,
+not a different one per screen. (If a PROJECT THEME override appears later in this prompt, it takes full
+precedence over everything in this section — that means a theme was already established by an earlier
+screen in this app and must be reused exactly, not re-derived.)
 
-The hex codes below are only illustrative of each hue FAMILY, not fixed values — pick your own specific shade within that family (vary saturation/lightness) rather than reusing these exact codes. Every generation should land on a slightly different exact hex even within the same archetype.
+The hex codes below are only illustrative of each hue FAMILY, not fixed values — pick your own specific
+shade within that family. Commit to a confident, specific, premium-feeling shade the way real enterprise
+products do (Stripe, Linear, Salesforce, Notion) — never a flat, washed-out, low-saturation, or generic
+"default blue" choice; a dumb/average-looking palette is a failure here, not a safe choice.
 
 1. MODERN SAAS — general business tools, dashboards, internal tools: primary hue somewhere in the indigo/violet family, roughly #4F46E5-#8B5CF6-#6D28D9; font 'Inter', system-ui; card radius 10-12px; soft diffused shadows (0 1px 3px rgba(0,0,0,0.08)); spacious padding.
 2. ENTERPRISE CONSOLE — ERP, ops, admin, procurement, logistics: primary hue somewhere in the steel-blue/slate family, roughly #1E3A5F-#334155-#0F4C75; font 'Roboto', 'Segoe UI', system-ui; sharper card radius 4-6px; flatter/tighter shadows; denser padding.
@@ -481,14 +625,22 @@ The hex codes below are only illustrative of each hue FAMILY, not fixed values �
 
 If colors ARE specified in the XML, use those exact color values for --clr-primary and derive the rest of the palette from them, but still pick the archetype's typography/radius/shadow personality that best matches the domain.
 
-Derive EVERY other color from your chosen --clr-primary — nothing below is a fixed value:
+Also pick --clr-secondary: a second accent hue, analogous or complementary to --clr-primary —
+NOT just a darker/lighter shade of it, a genuinely different hue (e.g. primary indigo + secondary
+teal, or primary emerald + secondary amber) — so the page reads as a deliberate two-tone palette,
+not one hue used everywhere. Use it for the header/nav band and any secondary badges, highlighted
+counts, or secondary-emphasis accents.
+
+Derive EVERY other color from --clr-primary and --clr-secondary — nothing below is a fixed value:
 - --clr-bg: a very light, barely-tinted neutral leaning toward --clr-primary's hue (NOT a fixed gray — e.g. a warm archetype gets a warm-tinted off-white, a cool archetype gets a cool-tinted off-white)
-- --clr-header-bg: a dark, deeply saturated shade of --clr-primary itself (not an unrelated dark blue) — this is what makes the header visually match the rest of the identity
+- --clr-header-bg: a dark, deeply saturated shade of --clr-secondary (not primary) — this is what makes the header read as the second color in the palette rather than a repeat of the primary
 - --clr-surface, --clr-border, --clr-text, --clr-muted: neutral tones consistent with the chosen hue family's temperature (warm hues get warm-leaning neutrals, cool hues get cool-leaning neutrals)
 - --clr-danger stays a clear red regardless of archetype, for universal recognizability
 
 Define the full palette and chosen typography/radius as CSS custom properties so the rest of the page can reference them consistently:
---clr-primary, --clr-primary-dark, --clr-primary-light, --clr-danger, --clr-border, --clr-bg, --clr-surface, --clr-text, --clr-muted, --clr-header-bg, --font-family, --radius-card
+--clr-primary, --clr-primary-dark, --clr-primary-light, --clr-secondary, --clr-secondary-dark, --clr-danger, --clr-border, --clr-bg, --clr-surface, --clr-text, --clr-muted, --clr-header-bg, --font-family, --radius-card
+
+EVERY downstream CSS rule — backgrounds, borders, focus/hover glows, shadows tinted with the primary hue, link colors — MUST reference these custom properties (var(--clr-primary), rgba equivalents built from them, etc), never repeat a literal hex/rgb value that duplicates one of the above. This page's colors need to stay changeable later by swapping only the :root values, so a hardcoded color anywhere outside :root is a bug.
 
 POLISH — avoid a bare/generic look. Within the archetype you picked, add tasteful touches that make this feel like a real, distinct product rather than a wireframe:
 - Header band: a subtle gradient from --clr-header-bg to a slightly darker or lighter tone of the same hue (pick the direction), not a flat single color
@@ -523,9 +675,10 @@ IF CLEAN:
    - Input: full width, border 1px solid var(--clr-border), border-radius 8px, padding 10px 14px, font-size 14px, placeholder shows a realistic example value
    - Focus: border-color var(--clr-primary), subtle glow shadow
    - The primary action button ("Add X" / "Save") sits directly below the fields, INSIDE the card, left-aligned, normal size (padding 10px 20px) — NOT a page-level sticky bottom toolbar
+   - A Cancel button sits directly beside Save (ghost/secondary style, same size) — every form gets both, regardless of what the XML toolbar lists
 
 5. LIST CARD — separate white card below the form card, same soft style, margin-top 20px.
-   - Header row inside the card: bold 14-15px title + a light count pill
+   - Header row inside the card: bold 14-15px title + a count pill styled with var(--clr-secondary) (light tint background, --clr-secondary text) — this is what makes --clr-secondary visible on CLEAN screens too, not just the DENSE header band
    - Body: a clean simple table — light/no-fill header row, generous 12-14px vertical row padding, subtle 1px row dividers, comfortable 14px font
    - ID/code column values are still clickable links in var(--clr-primary); sortable columns still show ↑↓ arrows; a simple inline search input in the card header — no heavy toolbar bar
    - Empty state: centered muted italic text, generous vertical padding
@@ -547,11 +700,11 @@ CRITICAL: full width — do NOT use max-width containers, do NOT center content.
    - Fieldset: <fieldset> + <legend> uppercase 10.5px letter-spacing 0.08em #9CA3AF
 
 4. LIST/GRID CARD (same card style, margin 20px 40px 0)
-   - Header: bold 14px title + count pill; search input + "Export CSV" ghost button on the right
+   - Header: bold 14px title + count pill styled with var(--clr-secondary) (light tint background, --clr-secondary text); search input + "Export CSV" ghost button on the right
    - Table fills edge to edge: sticky #F8FAFC thead, uppercase 11px/600 #6B7280 th, sortable columns show ↑↓ arrows, td padding 10px 16px, ID column renders as a monospace link, zebra rows, row hover #EEF4FF
    - Pagination row: "Showing X to Y of Z entries" + page pills
 
-5. STICKY BOTTOM ACTION TOOLBAR — position fixed bottom 0, white bg, top border, shadow; buttons padding 8px 20px/600/radius 6px. Save = primary bg white text + <kbd>Ctrl+S</kbd> pill; Clear = white/bordered; Delete = #DC2626; Cancel = margin-left auto, transparent. ONLY render buttons present in the XML toolbar.
+5. STICKY BOTTOM ACTION TOOLBAR — position fixed bottom 0, white bg, top border, shadow; buttons padding 8px 20px/600/radius 6px. Save = primary bg white text + <kbd>Ctrl+S</kbd> pill; Clear = white/bordered; Delete = #DC2626; Cancel = margin-left auto, transparent. Save and Cancel are ALWAYS rendered, on every form, whether or not the XML toolbar lists them — every other button (Clear, Delete, ...) still only renders if the XML toolbar lists it.
 
 ──────────────────────────────
 FIELD TYPE RENDERING RULES (apply regardless of density):
@@ -606,6 +759,26 @@ FIELD TYPE RENDERING RULES (apply regardless of density):
 - Do NOT render a form, grid, or bottom action toolbar on a screen that has a <navigation> element — it replaces them, it doesn't sit alongside them.
 
 ──────────────────────────────
+<auth> RENDERING (sign up / log in screens only — replaces the form+grid+toolbar layout entirely):
+──────────────────────────────
+- ONE centered card (max-width ~400px, margin auto, vertical-centered on the page), archetype-matched
+  styling (border-radius var(--radius-card), shadow, colors) — no page header/nav band, no sidebar.
+- A Sign Up / Log In toggle at the top of the card: two tab-style labels, or a single form with a
+  link below it ("Already have an account? Log in" / "Don't have an account? Sign up") that swaps
+  which field set (<signup> or <login>) is shown. Only one mode's fields are visible at a time.
+- Password fields render as real <input type="password"> (masked) — never plain text.
+- Signup mode: client-side JS MUST check password === confirmPassword on submit and show an inline
+  error ("Passwords don't match") if they differ, before allowing the simulated submit to proceed.
+- Primary submit button label matches the mode: "Sign Up" for signup, "Log In" for login — never
+  "Save". No Cancel/Clear/Delete buttons on an auth screen.
+- There is no live backend behind this preview (same as every other screen) — simulate success on
+  submit: show a success toast ("Account created!" / "Logged in!") and, since there's nothing to
+  navigate to yet in the preview, just re-render the card in a simple "logged in as {{email}}" state
+  with a "Log out" link that returns to the login form. Do not fabricate a fake token or persist
+  anything — this is a visual simulation only, exactly like every other screen's fake local CRUD.
+- Never render a <grid>, sample user rows, or any list of other accounts on this screen.
+
+──────────────────────────────
 SHARED (both densities):
 ──────────────────────────────
 6. CONFIRMATION MODAL (for delete)
@@ -635,6 +808,9 @@ JAVASCRIPT/FRAMEWORK BEHAVIOUR:
 - Ctrl+S keyboard shortcut triggers save (where applicable in framework)
 - Delete button opens confirmation modal; confirm triggers delete logic + shows toast
 - Clear button resets all form fields
+- Cancel button resets all form fields AND exits edit mode if a row was selected for editing
+  (deselect it, so the form returns to its "add new" state) — same field-reset as Clear, plus
+  clearing the edit-target row
 - Save button logic MUST actually mutate the underlying data before rendering/broadcasting anything:
   read every form field's current value, then either (a) CREATE — no existing row is selected for
   edit — build a new row object from those values (generate/increment an ID client-side if the PK
@@ -669,6 +845,7 @@ FINAL CHECKS before returning:
   window.parent.postMessage({{type:'TDIDE_DATA_CHANGE', ...}}) call after every save/delete of the primary
   entity. This is not optional — a screen missing it is an incomplete generation.
 {extra_instructions_section}
+{project_theme_section}
 {image_reference_section}
 XML UI Definition:
 <xml_ui_definition>
@@ -681,6 +858,13 @@ IMAGE_REFERENCE_SECTION = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 AN IMAGE IS ATTACHED — THIS OVERRIDES THE DESIGN-SYSTEM RULES ABOVE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Before writing any code, look closely at the attached image and privately note, specifically:
+1. The exact background color, header/sidebar color, primary accent color, and text color you see.
+2. The layout skeleton: sidebar or top-nav, column count, where the title/actions/table sit.
+3. Corner roundedness, border weight, and shadow style.
+Then use those exact observations while writing the code below — do not skip this and jump straight
+to a generic layout.
+
 Ignore the archetype/color-derivation system, the CLEAN vs DENSE choice, and every specific
 color/spacing/pixel value given earlier in this prompt — none of that applies to this generation.
 Instead, look at the attached image and copy what you actually see in it:
@@ -770,6 +954,7 @@ Generate the following files:
    - Flutter: StatefulWidget with form, table, dialogs
    - Wire EVERY button to its corresponding API call
    - Include loading states, error handling, success messages
+{auth_frontend_section}
    - Include confirmation dialogs for destructive actions
 
 IF THE XML'S ROOT SCREEN CONTAINS A <navigation> ELEMENT (a landing/hub screen, no <form>/<grid>):
@@ -784,9 +969,44 @@ this is not a CRUD screen — do not invent CRUD endpoints for it.
      targetScreen name kebab-cased (e.g. "Student Screen" -> "student-screen"). This is real
      routing code for whoever wires up the router, not a toast/stub like the preview uses.
 
+IF THE XML'S ROOT SCREEN CONTAINS AN <auth> ELEMENT (a sign up / log in screen, no <form>/<grid>):
+this is real authentication, not a CRUD screen for the user table — never generate generic
+create/read/update/delete endpoints for it.
+   - routes.ext: implement exactly two endpoints — one for signup (hash the password with this
+     project's shared auth module, INSERT a real row into the real user table via the database
+     conventions below, then issue and return an access token the same way login does; if the
+     identifying column — username/email — must be unique and a row already exists, reject with a
+     real 409/400, don't crash) and one for login (look up the real stored row by its identifying
+     column, verify the submitted password against ITS real stored hash — not a fixed demo value
+     — and if valid, issue and return an access token; reject with 401 if the row doesn't exist or
+     the password doesn't match). Use the EXACT shared hashing/token functions and import path
+     given in the auth conventions below, and the EXACT database access patterns given in the
+     database conventions below — never reimplement hashing/JWT logic inline in this file, and
+     never fall back to an in-memory or precomputed-demo-password shortcut now that a real
+     database is wired in.
+   - models.ext: request models for signup (matching the XML's <signup> fields) and login
+     (matching <login>), plus a response model containing at least the access token.
+   - api_contracts.json: exactly these two endpoints (signup, login).
+   - page_component.ext: a real toggle-able signup/login form wired to real API calls (via
+     api_service.ext) — on a successful response, store the returned token the same way this
+     project's other authenticated screens read it from (see the frontend auth storage
+     convention below), then show a real logged-in state, not a toast stub.
+{auth_module_section}
+
+IF send_email BELOW SAYS THIS SCREEN SENDS AN EMAIL/INVITATION: the endpoint handling that
+send/submit action must actually send it via the shared email module — see the email conventions
+below for the exact import/function to use. Never fake a "sent" success message without actually
+calling it, and never swallow a real send failure into a fake success.
+{email_conventions_section}
+
+DATABASE — every CRUD screen (not the <navigation>/<auth> special cases above, which have their
+own data-access rules) reads and writes a REAL database, never in-memory/hardcoded sample data:
+{db_conventions_section}
+
 STRUCTURAL CONVENTIONS — follow these exactly. A separate assembler places your files into a real runnable project (entrypoint, dependency manifest, folder layout) by relying on these exact names/exports — deviating breaks the build:
 {backend_conventions}
 {frontend_conventions}
+{auth_requirement_section}
 
 XML UI Definition:
 <xml_ui_definition>
@@ -841,6 +1061,199 @@ BACKEND_CONVENTIONS = {
     ),
 }
 
+# Real password hashing + JWT issue/verify, generated ONCE per project (generate_auth_module,
+# not per-screen) and pushed as a single top-level file sibling to the entrypoint — NOT inside
+# common-library/ (that folder is hyphenated and never actually imported by generated code
+# today; a real cross-file Python import needs a valid module name, so the auth module lives at
+# the repo root instead, importable the same way main.py already imports each screen's own
+# {slug}.routes package). Every other screen's generate_api_from_xml call is told the exact same
+# import path/function names here (see require_auth handling below) so its own routes can
+# actually depend on this file, not just something that sounds plausible.
+AUTH_CONVENTIONS = {
+    "Python": (
+        "- Use passlib[bcrypt] for hashing and python-jose[cryptography] for JWTs (this project's "
+        "own backend uses this exact combination — mirror it).\n"
+        "- The file MUST be named auth.py and live at the project root, a sibling of main.py — NOT "
+        "inside any screen folder or common-library/. Export exactly these functions: "
+        "`hash_password(password: str) -> str`, `verify_password(plain: str, hashed: str) -> bool`, "
+        "`create_access_token(data: dict) -> str`, and a FastAPI dependency "
+        "`async def get_current_user(authorization: str | None = Header(None)) -> dict` that raises "
+        "HTTPException(401) if `authorization` is None/missing, doesn't start with \"Bearer \", or the "
+        "token is invalid/expired when decoded — NEVER declare the header parameter as `Header(...)` "
+        "(required with no default), because FastAPI then rejects a request with no header at all with "
+        "its own 422 validation error before this function body ever runs, instead of the 401 this "
+        "project requires for missing credentials.\n"
+        "- Other screens' routes.ext import it as `from auth import get_current_user` (a plain "
+        "top-level import — this works because main.py is always run from the project root, "
+        "putting auth.py on the same import path) and add `user = Depends(get_current_user)` as a "
+        "parameter on every protected endpoint function."
+    ),
+    "Java": (
+        "- Use Spring Security + the jjwt library. Put the shared logic in "
+        "src/main/java/com/textdevide/app/security/AuthUtil.java (package "
+        "`com.textdevide.app.security`) exporting static hash/verify/issue/verify-token methods.\n"
+        "- Other controllers import it as `import com.textdevide.app.security.AuthUtil;` and call a "
+        "shared `AuthUtil.requireUser(request)` at the top of every protected endpoint method (or "
+        "apply it as a filter/interceptor if that's cleaner — either way, every non-auth endpoint "
+        "must reject requests with no valid token)."
+    ),
+    "JavaScript": (
+        "- Use bcryptjs for hashing and jsonwebtoken for JWTs. Put the shared logic in "
+        "middleware/auth.js, exporting `hashPassword`, `verifyPassword`, `createToken`, and an "
+        "Express middleware `authenticateToken(req, res, next)`.\n"
+        "- Other routes.ext files import it as `const { authenticateToken } = require('../middleware/auth');` "
+        "and add `router.use(authenticateToken)` (or apply it per-route) so every endpoint requires a valid token."
+    ),
+    "TypeScript": (
+        "- Same as JavaScript but in middleware/auth.ts with proper types, using `export` instead of "
+        "`module.exports`; other files `import { authenticateToken } from '../middleware/auth';`."
+    ),
+    "C#": (
+        "- Use BCrypt.Net for hashing and System.IdentityModel.Tokens.Jwt for JWTs. Put the shared "
+        "logic in Security/AuthService.cs (namespace TextDevIde.App.Security) with hash/verify/issue "
+        "methods and a token-validation helper.\n"
+        "- Every other protected controller is annotated `[Authorize]` (standard ASP.NET Core JWT "
+        "bearer auth, configured against this same signing key) rather than manually re-implementing "
+        "the check per endpoint."
+    ),
+    "Go": (
+        "- Use golang.org/x/crypto/bcrypt for hashing and golang-jwt/jwt for JWTs. Put the shared "
+        "logic in middleware/auth.go (package middleware) exporting hash/verify/issue functions and "
+        "an `Authenticate(next http.Handler) http.Handler` middleware.\n"
+        "- Other handlers wrap their mux registration with `middleware.Authenticate(...)` so every "
+        "endpoint requires a valid token."
+    ),
+    "Ruby": (
+        "- Use the bcrypt and jwt gems. Put the shared logic in lib/auth.rb with hash/verify/issue "
+        "helpers and a `require_auth!` check.\n"
+        "- Every other route calls `require_auth!` (a `before` filter or the first line of each "
+        "route block) so it rejects requests with no valid token."
+    ),
+    "PHP": (
+        "- Use the built-in password_hash()/password_verify() plus the firebase/php-jwt package. Put "
+        "the shared logic in lib/auth.php with hash/verify/issue functions and a "
+        "`require_auth()` callable.\n"
+        "- Every other route file calls `require_auth()` before doing anything else, so it rejects "
+        "requests with no valid token."
+    ),
+}
+
+# Real live database access — every CRUD screen's routes.ext must use this, not fake in-memory
+# data. Unlike AUTH_CONVENTIONS this is ALWAYS threaded in (see db_conventions_section below), not
+# conditional, because a real database is now the baseline for every generated project, not an
+# opt-in capability. Python's db.py/db_models.py are deterministic (PYTHON_DATABASE_MODULE /
+# generate_sqlalchemy_models above), not AI-generated; the other languages' equivalents are
+# AI-generated per project the same way generate_auth_module works, since those aren't live-tested
+# in this environment and consistency with the existing per-language pattern matters more here
+# than the marginal safety deterministic generation buys (which really only pays off when you can
+# actually run and iterate against real failures, as Python's auth.py needed last round).
+DB_CONVENTIONS = {
+    "Python": (
+        "- A real SQLite-backed database is already wired up for this project via database.py "
+        "(exports `get_db`, a FastAPI dependency yielding a SQLAlchemy `Session`) and db_models.py "
+        "(exports one SQLAlchemy model class per table, already matching the real schema — column "
+        "names, types, nullability, uniqueness, and foreign keys are already correct, don't "
+        "redeclare or reinterpret them). Import both: `from database import get_db` and "
+        "`from db_models import <TableClassName>` for the table(s) this screen actually uses.\n"
+        "- Every endpoint takes `db: Session = Depends(get_db)` as a parameter and does REAL "
+        "queries against it — never an in-memory list/dict, never hardcoded sample rows. Create: "
+        "`obj = TableClass(**data); db.add(obj); db.commit(); db.refresh(obj)`. Read one: "
+        "`db.query(TableClass).filter(TableClass.id == id).first()`, raise a real 404 "
+        "(HTTPException) if it's None. Read list: `db.query(TableClass).offset(skip).limit(limit)"
+        ".all()`. Update: fetch first (404 if missing), set attributes from the request body, "
+        "`db.commit(); db.refresh(obj)`. Delete: fetch first (404 if missing), "
+        "`db.delete(obj); db.commit()`.\n"
+        "- A field the XML marks readonly with a formula MUST still be computed server-side before "
+        "the row is written (same rule as always) — never trust a client-submitted value for it.\n"
+        "- Import EVERY db_models class your code references anywhere in the file, including inside "
+        "a validation/uniqueness check (e.g. querying User to check a username/email isn't already "
+        "taken) — not just the ones tied to the endpoint's main response. A class used without a "
+        "matching `from db_models import X` is a NameError at request time, not a warning."
+    ),
+    "Java": (
+        "- Use Spring Data JPA against the project's SQLite database (already configured in "
+        "application.properties) with `@Entity` classes matching the real schema. Autowire a "
+        "`JpaRepository<Entity, Long>` per table and use it for every operation — no in-memory "
+        "lists, no hardcoded sample data."
+    ),
+    "JavaScript": (
+        "- Use the `better-sqlite3` connection already configured in db/connection.js (exports a "
+        "`db` handle) for every query — real INSERT/SELECT/UPDATE/DELETE against the project's "
+        "SQLite file, never an in-memory array or hardcoded sample data."
+    ),
+    "TypeScript": (
+        "- Same as JavaScript but importing from db/connection.ts with proper types."
+    ),
+    "C#": (
+        "- Use the EF Core `AppDbContext` (Microsoft.EntityFrameworkCore.Sqlite, already "
+        "configured) injected via constructor — real `_context.Set<Entity>()` queries for every "
+        "operation, never an in-memory list or hardcoded sample data."
+    ),
+    "Go": (
+        "- Use the `*sql.DB` handle from db/db.go (mattn/go-sqlite3) for every operation — real "
+        "parameterized SQL queries against the project's SQLite file, never an in-memory slice or "
+        "hardcoded sample data."
+    ),
+    "Ruby": (
+        "- Use ActiveRecord models (already configured against the project's SQLite database) for "
+        "every operation — real `.create`/`.find`/`.where`/`.update`/`.destroy` calls, never an "
+        "in-memory array or hardcoded sample data."
+    ),
+    "PHP": (
+        "- Use the PDO SQLite connection from lib/db.php for every operation — real prepared-"
+        "statement INSERT/SELECT/UPDATE/DELETE against the project's SQLite file, never an "
+        "in-memory array or hardcoded sample data."
+    ),
+}
+
+# Real external email sending — only threaded in for the specific screen(s) detected as actually
+# sending an email/invitation (see the send_email flag / gen_screen_api's heuristic), not every
+# screen, since most screens have nothing to do with email. Same deterministic-Python /
+# AI-generated-elsewhere split as DB_CONVENTIONS, for the same reason.
+EMAIL_CONVENTIONS = {
+    "Python": (
+        "- A real email-sending module is already wired up via email_service.py, exporting "
+        "`send_email(to: str, subject: str, body: str) -> None` (raises RuntimeError if SMTP env "
+        "vars aren't configured — let that propagate as a real error response, never catch it and "
+        "pretend the email sent). Import it as `from email_service import send_email`.\n"
+        "- The endpoint handling this screen's send/submit action calls `send_email(...)` with the "
+        "REAL submitted to/subject/body field values from the request — never hardcoded strings."
+    ),
+    "Java": (
+        "- Use Jakarta Mail (jakarta.mail) via the shared EmailService bean already configured "
+        "from environment variables — call its `sendEmail(to, subject, body)` method with the real "
+        "submitted field values, and let a send failure propagate as a real error response."
+    ),
+    "JavaScript": (
+        "- Use nodemailer via the shared `sendEmail(to, subject, body)` helper in "
+        "lib/emailService.js (already configured from environment variables) — call it with the "
+        "real submitted field values, and let a send failure propagate as a real error response."
+    ),
+    "TypeScript": (
+        "- Same as JavaScript but importing from lib/emailService.ts with proper types."
+    ),
+    "C#": (
+        "- Use MailKit via the shared EmailService already configured from environment variables — "
+        "call its SendEmailAsync(to, subject, body) with the real submitted field values, and let a "
+        "send failure propagate as a real error response."
+    ),
+    "Go": (
+        "- Use net/smtp via the shared SendEmail(to, subject, body string) error function in "
+        "email/email.go (already configured from environment variables) — call it with the real "
+        "submitted field values, and return its error as a real error response if it fails."
+    ),
+    "Ruby": (
+        "- Use Net::SMTP via the shared send_email(to, subject, body) helper in lib/email.rb "
+        "(already configured from environment variables) — call it with the real submitted field "
+        "values, and let a send failure propagate as a real error response."
+    ),
+    "PHP": (
+        "- Use PHPMailer via the shared send_email($to, $subject, $body) function in lib/email.php "
+        "(already configured from environment variables) — call it with the real submitted field "
+        "values, and let a send failure propagate as a real error response."
+    ),
+}
+
 # Same reasoning as BACKEND_CONVENTIONS, but for the frontend files (api_service.ext /
 # page_component.ext), and only where it's actually needed. React/Vue/Svelte/Next.js all use a
 # plain `export default` for the component — the assembler can import that under any alias
@@ -861,12 +1274,13 @@ FRONTEND_CONVENTIONS = {
 }
 
 
-async def _call_openai(messages: list, use_json: bool = False, timeout: int = 60, temperature: float = 0, max_retries: int = 2) -> str:
+async def _call_openai(messages: list, use_json: bool = False, timeout: int = 60, temperature: float = 0, max_retries: int = 2,
+                        model: str = "gpt-4o-mini", usage_sink: list | None = None) -> str:
     if not OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY not configured. Add it to your .env file.")
 
     body = {
-        "model": "gpt-4o-mini",
+        "model": model,
         "messages": messages,
         "temperature": temperature,
     }
@@ -889,6 +1303,18 @@ async def _call_openai(messages: list, use_json: bool = False, timeout: int = 60
                 choice = data["choices"][0]
                 if choice.get("finish_reason") == "length":
                     raise ValueError("The AI response was cut off before finishing (hit the token limit) — try a shorter or simpler request.")
+                # A plain list mutated by reference is safe to share across concurrent
+                # asyncio.gather'd calls (single-threaded/cooperative — no race), unlike a
+                # contextvars.ContextVar, which gets copied per-Task and wouldn't propagate
+                # accumulated usage back to the caller once the gather completes.
+                if usage_sink is not None:
+                    usage = data.get("usage") or {}
+                    usage_sink.append({
+                        "model": model,
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    })
                 return choice["message"]["content"]
         except httpx.TransportError as e:
             # Transient network/DNS-level failure (e.g. "getaddrinfo failed") — retry with
@@ -902,7 +1328,7 @@ async def _call_openai(messages: list, use_json: bool = False, timeout: int = 60
             ) from e
 
 
-async def extract_entities(description: str, features: str) -> dict:
+async def extract_entities(description: str, features: str, usage_sink: list | None = None) -> dict:
     user_message = (
         f"<project_description>\n{description}\n</project_description>\n\n"
         f"<detailed_features>\n{features}\n</detailed_features>"
@@ -910,16 +1336,16 @@ async def extract_entities(description: str, features: str) -> dict:
     text = await _call_openai([
         {"role": "system", "content": EXTRACT_PROMPT.format()},
         {"role": "user", "content": user_message},
-    ], use_json=True)
+    ], use_json=True, usage_sink=usage_sink)
     return json.loads(text.strip())
 
 
-async def refine_entities(entities: str, instruction: str) -> dict:
+async def refine_entities(entities: str, instruction: str, usage_sink: list | None = None) -> dict:
     prompt = REFINE_PROMPT.format(entities=entities, instruction=instruction)
     text = await _call_openai([
         {"role": "system", "content": "You are a database architect. Return ONLY valid JSON."},
         {"role": "user", "content": prompt},
-    ], use_json=True)
+    ], use_json=True, usage_sink=usage_sink)
     return json.loads(text.strip())
 
 
@@ -965,7 +1391,7 @@ Return ONLY valid JSON in this exact shape (no markdown fences):
 }}"""
 
 
-async def schema_assistant_edit_table(table: dict, other_tables: list[dict], instruction: str) -> dict:
+async def schema_assistant_edit_table(table: dict, other_tables: list[dict], instruction: str, usage_sink: list | None = None) -> dict:
     other_summary = "\n".join(
         f"- {t['name']}: columns [{', '.join(c['name'] for c in t.get('columns', []))}]"
         for t in other_tables
@@ -978,7 +1404,7 @@ async def schema_assistant_edit_table(table: dict, other_tables: list[dict], ins
     text = await _call_openai([
         {"role": "system", "content": "You are a database architect embedded in a schema editor. Return ONLY valid JSON."},
         {"role": "user", "content": prompt},
-    ], use_json=True)
+    ], use_json=True, usage_sink=usage_sink)
     return json.loads(text.strip())
 
 
@@ -997,13 +1423,13 @@ def _workbench_context(entities: dict | None, screens: list | None, validation_r
     return "\n\n".join(parts)
 
 
-async def interpret_requirement(requirement: str, entities: dict | None, screens: list | None, validation_rules: str | None) -> dict:
+async def interpret_requirement(requirement: str, entities: dict | None, screens: list | None, validation_rules: str | None, usage_sink: list | None = None) -> dict:
     context = _workbench_context(entities, screens, validation_rules)
     user_message = f"<current_project_state>\n{context}\n</current_project_state>\n\n<new_requirement>\n{requirement}\n</new_requirement>"
     text = await _call_openai([
         {"role": "system", "content": ARCHITECT_WORKBENCH_PROMPT},
         {"role": "user", "content": user_message},
-    ], use_json=True, timeout=90)
+    ], use_json=True, timeout=90, usage_sink=usage_sink)
     data = json.loads(text.strip())
     changes = data.get("changes") or {}
     data["changes"] = {
@@ -1108,7 +1534,7 @@ def _ensure_file_splits(code: str, language: str) -> str:
     return "\n\n".join(files)
 
 
-async def generate_entity_code(entities: dict, language: str) -> str:
+async def generate_entity_code(entities: dict, language: str, usage_sink: list | None = None) -> str:
     prompt = ENTITY_PROMPT.format(
         language=language,
         entities=json.dumps(entities, indent=2),
@@ -1116,11 +1542,63 @@ async def generate_entity_code(entities: dict, language: str) -> str:
     code = await _call_openai([
         {"role": "system", "content": "You generate code split into separate files. Every file MUST be preceded by a line: === FILENAME: name.ext === on its own line. Never combine multiple classes in one file."},
         {"role": "user", "content": prompt},
-    ])
+    ], usage_sink=usage_sink)
     return _ensure_file_splits(code, language)
 
 
-async def edit_validation_code(instruction: str, existing_code: str, entities: dict | None, language: str) -> str:
+async def generate_auth_module(backend_lang: str, entities: dict, usage_sink: list | None = None) -> str:
+    """Generated ONCE per project (not per-screen), the first time a screen using <auth> is
+    generated — see routes/projects.py. Every other screen's generate_api_from_xml call is told
+    to import this same file (see require_auth below), so it must stay stable once created."""
+    tables = entities.get("tables", []) if entities else []
+    user_table = next((t for t in tables if t.get("name", "").lower() in ("user", "account", "member")), None) \
+        or next((t for t in tables if "password" in [c.get("name", "").lower() for c in t.get("columns", [])]), None) \
+        or (tables[0] if tables else {"name": "User", "columns": []})
+    prompt = AUTH_MODULE_PROMPT.format(
+        backend_lang=backend_lang,
+        user_entity=user_table.get("name", "User"),
+        user_entity_schema=json.dumps(user_table, indent=2),
+        auth_conventions=AUTH_CONVENTIONS.get(backend_lang, "- Use idiomatic hashing/JWT libraries and file layout for this language."),
+    )
+    code = await _call_openai([
+        {"role": "system", "content": f"You are a senior backend developer writing real, secure authentication code in {backend_lang}. Return ONLY the file's code, no explanations, no markdown fences."},
+        {"role": "user", "content": prompt},
+    ], usage_sink=usage_sink)
+    return _strip_markdown_fence(code)
+
+
+async def generate_db_module(backend_lang: str, usage_sink: list | None = None) -> str:
+    """Non-Python languages only — Python's database.py is deterministic (PYTHON_DATABASE_MODULE
+    above), needing no AI call at all. For the other languages (not live-tested in this
+    environment), this mirrors generate_auth_module's shape: generated ONCE per project, the first
+    time a screen with a schema is generated — see routes/projects.py."""
+    prompt = DB_MODULE_PROMPT.format(
+        backend_lang=backend_lang,
+        db_conventions=DB_CONVENTIONS.get(backend_lang, "- Use an idiomatic embedded SQLite setup for this language."),
+    )
+    code = await _call_openai([
+        {"role": "system", "content": f"You are a senior backend developer writing real database connection/ORM code in {backend_lang}. Return ONLY the file's code, no explanations, no markdown fences."},
+        {"role": "user", "content": prompt},
+    ], usage_sink=usage_sink)
+    return _strip_markdown_fence(code)
+
+
+async def generate_email_module(backend_lang: str, usage_sink: list | None = None) -> str:
+    """Non-Python languages only — Python's email_service.py is deterministic
+    (PYTHON_EMAIL_SERVICE_MODULE above). Same generated-once-per-project shape as
+    generate_auth_module/generate_db_module for the other languages."""
+    prompt = EMAIL_MODULE_PROMPT.format(
+        backend_lang=backend_lang,
+        email_conventions=EMAIL_CONVENTIONS.get(backend_lang, "- Use an idiomatic SMTP-based email send for this language."),
+    )
+    code = await _call_openai([
+        {"role": "system", "content": f"You are a senior backend developer writing real SMTP email-sending code in {backend_lang}. Return ONLY the file's code, no explanations, no markdown fences."},
+        {"role": "user", "content": prompt},
+    ], usage_sink=usage_sink)
+    return _strip_markdown_fence(code)
+
+
+async def edit_validation_code(instruction: str, existing_code: str, entities: dict | None, language: str, usage_sink: list | None = None) -> str:
     prompt = VALIDATION_EDIT_PROMPT.format(
         language=language,
         entities=json.dumps(entities, indent=2) if entities else "No schema defined yet",
@@ -1130,11 +1608,11 @@ async def edit_validation_code(instruction: str, existing_code: str, entities: d
     code = await _call_openai([
         {"role": "system", "content": "You edit existing code files and create new ones. Every file MUST be preceded by: === FILENAME: name.ext === on its own line. Output ALL files including unchanged ones. Never combine multiple classes in one file."},
         {"role": "user", "content": prompt},
-    ])
+    ], usage_sink=usage_sink)
     return _ensure_file_splits(code, language)
 
 
-async def generate_ui_code(description: str, entities: dict | None, language: str) -> str:
+async def generate_ui_code(description: str, entities: dict | None, language: str, usage_sink: list | None = None) -> str:
     prompt = UI_PROMPT.format(
         language=language,
         entities=json.dumps(entities, indent=2) if entities else "No schema defined yet",
@@ -1143,18 +1621,19 @@ async def generate_ui_code(description: str, entities: dict | None, language: st
     return await _call_openai([
         {"role": "system", "content": f"You are a UI code generator for {language}. Return ONLY code."},
         {"role": "user", "content": prompt},
-    ])
+    ], usage_sink=usage_sink)
 
 
-async def detect_screen_intents(description: str) -> dict:
+async def detect_screen_intents(description: str, usage_sink: list | None = None) -> dict:
     prompt = SCREEN_INTENT_PROMPT.format(description=description)
     text = await _call_openai([
         {"role": "system", "content": "You are a UI/UX architect. Return ONLY valid JSON."},
         {"role": "user", "content": prompt},
-    ], use_json=True)
+    ], use_json=True, usage_sink=usage_sink)
     data = json.loads(text.strip())
     if not data.get("screens"):
         data["screens"] = [{"name": description[:40].strip(), "description": description}]
+    data["unresolved"] = data.get("unresolved") or []
     return data
 
 
@@ -1187,12 +1666,12 @@ JSON string):
 }}"""
 
 
-async def refine_ui_xml(xml: str, instruction: str) -> dict:
+async def refine_ui_xml(xml: str, instruction: str, usage_sink: list | None = None) -> dict:
     prompt = REFINE_UI_XML_PROMPT.format(xml=xml, instruction=instruction)
     text = await _call_openai([
         {"role": "system", "content": "You are a UI/UX architect. Return ONLY valid JSON."},
         {"role": "user", "content": prompt},
-    ], use_json=True)
+    ], use_json=True, usage_sink=usage_sink)
     return json.loads(text.strip())
 
 
@@ -1285,12 +1764,12 @@ parseable JSON. Every field_id used in "layout" must correspond to a real fields
 non-hidden field must appear in exactly one layout cell."""
 
 
-async def generate_ui_metadata(page: str, table_blocks: str) -> dict:
+async def generate_ui_metadata(page: str, table_blocks: str, usage_sink: list | None = None) -> dict:
     prompt = UI_METADATA_PROMPT.replace("__PAGE__", page).replace("__TABLES__", table_blocks)
     text = await _call_openai([
         {"role": "system", "content": "You are a UI metadata generator. Return ONLY valid JSON."},
         {"role": "user", "content": prompt},
-    ], use_json=True)
+    ], use_json=True, usage_sink=usage_sink)
     return json.loads(text.strip())
 
 
@@ -1467,7 +1946,8 @@ def _entity_table_blocks(entities: dict, table_names: list[str]) -> tuple[str, d
 
 
 async def generate_ui_xml(description: str, entities: dict | None, existing_screens: list[dict] | None = None,
-                           screen_name: str = "", screen_entities: list[str] | None = None) -> str:
+                           screen_name: str = "", screen_entities: list[str] | None = None,
+                           usage_sink: list | None = None) -> str:
     if existing_screens:
         lines = "\n".join(f"- \"{s['name']}\": {s.get('purpose') or 'no description'}" for s in existing_screens)
         existing_screens_section = (
@@ -1481,27 +1961,43 @@ async def generate_ui_xml(description: str, entities: dict | None, existing_scre
         existing_screens_section = ""
 
     # Multiple primary entities means a navigation/hub screen (no form fields at all) — the
-    # richer metadata pipeline only applies to single/few-entity CRUD-style screens.
+    # richer metadata pipeline only applies to single/few-entity CRUD-style screens. Also skip it
+    # for screens whose description unambiguously signals read-only (a report/summary screen):
+    # once a fully-built <form> block is dangling in the final prompt as "already designed, paste
+    # it in", the model reliably pastes it in even when told the classification above overrides
+    # that — in testing it kept the form (and the mandatory save/cancel toolbar that follows from
+    # having one) regardless of prose telling it not to. Not building the form at all removes the
+    # temptation instead of relying on the model to decline it.
+    _read_only_signals = ("read-only", "read only", "readonly", "view only", "view-only",
+                           "no editing", "not editable", "no create", "no crud")
+    _desc_lower = (description or "").lower()
+    is_read_only_report = any(sig in _desc_lower for sig in _read_only_signals)
+
     prebuilt_form_section = ""
-    if entities and screen_entities and len(screen_entities) <= 3:
+    if entities and screen_entities and len(screen_entities) <= 3 and not is_read_only_report:
         table_blocks, fk_targets = _entity_table_blocks(entities, screen_entities)
         if table_blocks:
             try:
-                metadata = await generate_ui_metadata(screen_name or "Screen", table_blocks)
+                metadata = await generate_ui_metadata(screen_name or "Screen", table_blocks, usage_sink=usage_sink)
                 columns_by_key, validations_by_key = _entity_validation_maps(entities, screen_entities)
                 form_xml = _metadata_to_form_xml(metadata, fk_targets, columns_by_key, validations_by_key)
                 prebuilt_form_section = (
-                    "\nA <form> section has already been designed for this screen using richer "
-                    "field-control inference than you'd do alone (proper email/phone/url/color/file "
-                    "inputs, checkboxes for booleans, composite fieldsets for address/name/date-range "
-                    "groups). COPY IT BYTE-FOR-BYTE as the screen's <form> element. This OVERRIDES every "
-                    "other rule above about how to build a <form> — do not add, remove, or infer a "
+                    "\nIF (and only if) the screen-shape classification above concluded this screen needs "
+                    "a data-entry <form> at all (i.e. it's a genuine create/browse/manage screen, NOT a "
+                    "read-only report, pure search/lookup, navigation hub, or auth screen): a <form> "
+                    "section has already been designed for it using richer field-control inference than "
+                    "you'd do alone (proper email/phone/url/color/file inputs, checkboxes for booleans, "
+                    "composite fieldsets for address/name/date-range groups). COPY IT BYTE-FOR-BYTE as the "
+                    "screen's <form> element in that case — do not add, remove, or infer a "
                     "dataSource/valueField/displayField/rule/hint/autoFill on ANY of these fields even "
                     "if the general field-type rules above would normally call for one, do not change "
                     "any type= value, do not add or remove fields, do not reorder or rename anything. "
                     "Treat the block below as an opaque, already-finished string to paste in unmodified — "
                     "build everything else around it (header, grid if a list view is warranted, bottom "
-                    "toolbar, navigation if applicable, dataBindings, accessibility):\n"
+                    "toolbar, navigation if applicable, dataBindings, accessibility).\n"
+                    "IF the classification above concluded this is a read-only report/summary or pure "
+                    "search/lookup screen, IGNORE this pre-built form entirely — do not paste it in, do "
+                    "not include a <form> element at all, per the classification rules above.\n"
                     f"{form_xml}\n"
                 )
             except Exception:
@@ -1512,10 +2008,37 @@ async def generate_ui_xml(description: str, entities: dict | None, existing_scre
         description=description,
         existing_screens_section=existing_screens_section + prebuilt_form_section,
     )
-    return await _call_openai([
+    xml = await _call_openai([
         {"role": "system", "content": "You are a UI/UX architect. Return ONLY valid XML."},
         {"role": "user", "content": prompt},
-    ])
+    ], usage_sink=usage_sink)
+    return _strip_form_if_read_only(xml)
+
+
+_ALLOWED_OPS_RE = re.compile(r"<allowedOperations>\s*([^<]*)\s*</allowedOperations>", re.IGNORECASE)
+_FORM_BLOCK_RE = re.compile(r"[ \t]*<form\b.*?</form>\s*\n?", re.IGNORECASE | re.DOTALL)
+_BOTTOM_TOOLBAR_RE = re.compile(
+    r'[ \t]*<toolbar\s+position="bottom".*?</toolbar>\s*\n?', re.IGNORECASE | re.DOTALL
+)
+
+
+def _strip_form_if_read_only(xml: str) -> str:
+    """Backstop for a real gap in gpt-4o-mini's instruction-following: even when told explicitly
+    that a read-only report/search screen must have no <form> and no save/cancel <toolbar>, it
+    reliably ignores that and includes both anyway — in testing this happened even with the
+    prebuilt-metadata form generation skipped entirely, so it's the model's own independent
+    choice, not it copying a fed-in form. But it DOES reliably self-report the screen as
+    SELECT-only in <dataBindings><allowedOperations> even while making that mistake, so that's a
+    trustworthy signal to post-process against deterministically rather than keep tuning prose."""
+    ops_match = _ALLOWED_OPS_RE.search(xml)
+    if not ops_match:
+        return xml
+    ops = ops_match.group(1).upper()
+    if "INSERT" in ops or "UPDATE" in ops or "DELETE" in ops:
+        return xml
+    xml = _FORM_BLOCK_RE.sub("", xml)
+    xml = _BOTTOM_TOOLBAR_RE.sub("", xml)
+    return xml
 
 
 def _inject_cross_screen_sync(html: str, xml: str) -> str:
@@ -1766,8 +2289,68 @@ def _inject_cross_screen_sync(html: str, xml: str) -> str:
     return html + script
 
 
+def _strip_markdown_fence(text: str) -> str:
+    """Defensively strips a leading ```lang / trailing ``` if the model wrapped its output in a
+    markdown code fence despite being told not to — observed happening occasionally with gpt-4o
+    (image-reference mode) even though gpt-4o-mini rarely does it. Left untouched if no fence."""
+    stripped = text.strip()
+    m = re.match(r"^```[a-zA-Z]*\n(.*)\n```\s*$", stripped, flags=re.S)
+    return m.group(1) if m else text
+
+
+_THEME_VARS = ["--clr-primary", "--clr-primary-dark", "--clr-primary-light", "--clr-secondary", "--clr-secondary-dark",
+               "--clr-header-bg", "--clr-bg", "--clr-surface", "--clr-border", "--clr-text", "--clr-muted",
+               "--font-family", "--radius-card"]
+
+
+def _extract_theme_from_html(html: str, density: str) -> dict | None:
+    """Regex-extracts the :root custom properties a generated screen committed to, so they can be
+    saved once (Project.ui_theme) and handed back as a hard override to every later screen in the
+    same project — the same idea frontend/src/utils/theme.js uses client-side for recoloring,
+    done here in Python since this runs server-side right after generation. None if no
+    --clr-primary was found (nothing usable to lock)."""
+    root_match = re.search(r":root\s*\{([^}]*)\}", html)
+    if not root_match:
+        return None
+    block = root_match.group(1)
+    theme = {}
+    for var in _THEME_VARS:
+        m = re.search(rf"{re.escape(var)}\s*:\s*([^;]+);", block)
+        if m:
+            theme[var] = m.group(1).strip()
+    if "--clr-primary" not in theme:
+        return None
+    # Not every generation defines every variable in _THEME_VARS (observed in practice: a
+    # DENSE-style screen that omitted --clr-header-bg/--clr-surface entirely) — fall back to a
+    # close existing relative rather than leaving a gap that later screens would then derive
+    # freshly on their own, quietly breaking consistency for just that one property.
+    theme.setdefault("--clr-header-bg", theme.get("--clr-secondary-dark") or theme.get("--clr-primary-dark") or theme["--clr-primary"])
+    theme.setdefault("--clr-surface", theme.get("--clr-bg") or "#FFFFFF")
+    theme["density"] = density
+    return theme
+
+
+def _build_project_theme_section(theme: dict) -> str:
+    lines = "\n".join(f"  {k}: {v};" for k, v in theme.items() if k != "density")
+    density = theme.get("density", "CLEAN")
+    return f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROJECT THEME — THIS OVERRIDES THE VISUAL IDENTITY SECTION ABOVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+This application already has an established visual identity, committed to by an earlier screen in
+this same project. Do NOT pick your own archetype, colors, font, or radius — use EXACTLY these:
+{lines}
+Also use LAYOUT DENSITY: {density} — follow that section's structural rules (spacing, card style,
+header band, toolbar), but with the colors/font/radius given above instead of anything derived
+there. This keeps every screen in the app looking like one consistent product, not a new design
+each time. The XML is still the source of truth for WHAT controls/data exist — only the color
+palette, typography, radius, and density are fixed by this override.
+"""
+
+
 async def generate_html_from_xml(xml: str, frontend_lang: str = "HTML/CSS", extra_instructions: list[str] | None = None,
-                                  reference_image: str | None = None) -> str:
+                                  reference_image: str | None = None, usage_sink: list | None = None,
+                                  project_theme: dict | None = None) -> str:
     if extra_instructions:
         notes = "\n".join(f"- {n}" for n in extra_instructions)
         extra_section = (
@@ -1780,33 +2363,213 @@ async def generate_html_from_xml(xml: str, frontend_lang: str = "HTML/CSS", extr
     else:
         extra_section = ""
     image_section = IMAGE_REFERENCE_SECTION if reference_image else ""
+    # A locked project theme is a hard override too, but an explicit reference image (a one-off
+    # visual instruction for THIS screen) still wins if somehow both are present.
+    theme_section = _build_project_theme_section(project_theme) if (project_theme and not reference_image) else ""
     prompt = XML_TO_HTML_PROMPT.format(xml=xml, frontend_lang=frontend_lang, extra_instructions_section=extra_section,
-                                        image_reference_section=image_section)
+                                        project_theme_section=theme_section, image_reference_section=image_section)
     # A reference image (wireframe/screenshot) turns the user message into a multimodal content
     # list per OpenAI's standard image_url block — _call_openai passes messages straight through
     # with no transformation, so this needs no changes there.
     user_content = prompt if not reference_image else [
         {"type": "text", "text": prompt},
-        {"type": "image_url", "image_url": {"url": reference_image}},
+        {"type": "image_url", "image_url": {"url": reference_image, "detail": "high"}},
     ]
+    # Image mode needs faithful copying, not creative reinterpretation, so it uses the
+    # full gpt-4o (materially better vision fidelity than mini) at a much lower temperature
+    # than the no-image path, which stays high/gpt-4o-mini for cheap design variety.
+    call_kwargs = {"model": "gpt-4o", "temperature": 0.4} if reference_image else {"temperature": 0.9}
     html = await _call_openai([
         {"role": "system", "content": f"You are a senior UI/UX product designer who also writes production {frontend_lang} code. Design first — commit to a distinct visual identity (color, type, spacing, shape) before you touch markup — then implement it precisely and correctly. Return ONLY the complete output file for the chosen framework. No markdown fences."},
         {"role": "user", "content": user_content},
-    ], timeout=180, temperature=0.9)  # visual/creative output — temperature=0 made every design collapse to the same "safest" choice
+    ], timeout=180, usage_sink=usage_sink, **call_kwargs)  # visual/creative output — temperature=0 made every design collapse to the same "safest" choice
+    html = _strip_markdown_fence(html)
     if frontend_lang == "HTML/CSS":
         html = _inject_cross_screen_sync(html, xml)
     return html
 
 
-async def generate_api_from_xml(xml: str, backend_lang: str = "Python", frontend_lang: str = "React") -> str:
+# Forced style hints for the 3 design variants offered when generating from a text prompt
+# (no reference image). These reuse the archetype/density vocabulary already defined in
+# XML_TO_HTML_PROMPT's VISUAL IDENTITY / LAYOUT DENSITY sections, so the model just needs to
+# honor an explicit choice instead of making one — this is what guarantees the 3 results are
+# visibly different, rather than leaving it to temperature chance (which tends to collapse to
+# the same archetype for the same domain words).
+_VARIANT_STYLE_HINTS = [
+    ("Clean & Minimal", "LAYOUT DENSITY: use CLEAN (not DENSE). Pick whichever color archetype best fits the domain."),
+    ("Bold & Colorful", "LAYOUT DENSITY: use CLEAN (not DENSE). Color archetype: use WARM CONSUMER or EDITORIAL BOLD "
+                         "(whichever isn't the obvious/default choice for this domain) — a vivid, saturated, confident palette, not a muted one."),
+    ("Compact & Dense", "LAYOUT DENSITY: use DENSE (not CLEAN), the full enterprise-console style with a dark header band and sticky bottom toolbar."),
+]
+
+
+async def generate_html_variants_from_xml(xml: str, frontend_lang: str = "HTML/CSS",
+                                           extra_instructions: list[str] | None = None,
+                                           usage_sink: list | None = None,
+                                           project_theme: dict | None = None) -> list[dict]:
+    """3 concurrent generate_html_from_xml calls, each forced toward a distinct visual style,
+    so the caller can offer the user a real choice instead of one AI-picked look. Text-prompt
+    mode only — pointless against a single reference image, so callers should not use this
+    when a reference_image is set. Callers also shouldn't normally pass project_theme once a
+    project already has one locked (offering 3 variants defeats the point of a shared theme),
+    but it's threaded through defensively in case this is ever called at that point anyway."""
+    base_instructions = list(extra_instructions or [])
+
+    async def _one(label: str, hint: str) -> dict:
+        # Sharing one usage_sink list across all 3 concurrent tasks is safe — asyncio is
+        # single-threaded/cooperative, so concurrent list.append calls never race.
+        html = await generate_html_from_xml(xml, frontend_lang=frontend_lang, extra_instructions=base_instructions + [hint],
+                                             usage_sink=usage_sink, project_theme=project_theme)
+        return {"label": label, "html": html}
+
+    return await asyncio.gather(*(_one(label, hint) for label, hint in _VARIANT_STYLE_HINTS))
+
+
+async def generate_api_from_xml(xml: str, backend_lang: str = "Python", frontend_lang: str = "React",
+                                 usage_sink: list | None = None, require_auth: bool = False,
+                                 entities: dict | None = None, send_email: bool = False) -> str:
     conventions = BACKEND_CONVENTIONS.get(backend_lang, "- Use idiomatic file/module naming for this language.")
     frontend_conventions = FRONTEND_CONVENTIONS.get(frontend_lang, "")
+    auth_conventions_text = AUTH_CONVENTIONS.get(backend_lang, "- Use idiomatic hashing/JWT libraries and file layout for this language.")
+    # Real database is the baseline for every CRUD screen now, not conditional like auth/email —
+    # always threaded in. When the caller also has the real schema, name this screen's exact real
+    # table/columns so the model can't invent or rename one that doesn't actually exist.
+    db_conventions_text = DB_CONVENTIONS.get(
+        backend_lang, "- Use a real embedded/local database for this language — never in-memory or hardcoded sample data.")
+    entity_note = ""
+    if entities:
+        m = re.search(r"<entity>\s*([^<]+?)\s*</entity>", xml)
+        if m:
+            table = next((t for t in entities.get("tables", []) if t.get("name") == m.group(1).strip()), None)
+            if table:
+                cols = ", ".join(c["name"] for c in table.get("columns", []))
+                entity_note = (
+                    f"\n   This screen's real table is `{table['name']}` with real columns: {cols}. "
+                    "Use these EXACT names — never invent, rename, or omit a column.\n"
+                )
+    db_conventions_section = f"{db_conventions_text}{entity_note}"
+    email_conventions_text = EMAIL_CONVENTIONS.get(
+        backend_lang, "- Use a real SMTP-based email send for this language, configured via environment variables — never fake a success.")
+    email_conventions_section = f"   Email conventions for {backend_lang}:\n{email_conventions_text}\n" if send_email else ""
+    # Only relevant when this screen's own XML is the <auth> screen — gives it the shared
+    # module's exact import path/function names so its signup/login endpoints use the real
+    # shared implementation instead of reinventing hashing/JWT inline.
+    auth_module_section = f"   Auth module conventions for {backend_lang}:\n{auth_conventions_text}" if "<auth" in xml else ""
+    # Applies to every OTHER screen once the project has a shared auth module — never passed for
+    # the auth screen's own generation (its signup/login endpoints must stay unauthenticated).
+    auth_requirement_section = (
+        "\nAUTHENTICATION REQUIRED — this project already has a shared auth module generated. EVERY "
+        "endpoint in routes.ext for THIS screen MUST require a valid access token and reject requests "
+        f"without one, using the exact shared import/dependency pattern below:\n{auth_conventions_text}\n"
+    ) if require_auth else ""
+    # Frontend token handling: the auth screen stores what login/signup returns; every other
+    # protected screen attaches it. Both read/write the same localStorage key so they interop —
+    # this app's own frontend/src/api/client.js is the literal reference for the axios shape.
+    if "<auth" in xml:
+        auth_frontend_section = (
+            "   AUTH TOKEN STORAGE — on a successful signup/login API response, store the returned "
+            "access token in localStorage under the key \"token\" (Flutter: shared preferences under "
+            "the same key name) so every other screen's api_service.ext can read it."
+        )
+    elif require_auth:
+        auth_frontend_section = (
+            "   AUTH TOKEN ATTACHMENT — this screen's endpoints require a token. api_service.ext MUST "
+            "attach it as an `Authorization: Bearer <token>` header on every request, reading it from "
+            "localStorage key \"token\" (Flutter: shared preferences). For axios-based frontends "
+            "(React/Vue/Next.js/Svelte), add a request interceptor:\n"
+            "     api.interceptors.request.use((config) => {\n"
+            "       const token = localStorage.getItem(\"token\");\n"
+            "       if (token) config.headers.Authorization = `Bearer ${token}`;\n"
+            "       return config;\n"
+            "     });\n"
+            "   For Angular, use an HttpInterceptor with the same logic; for Flutter, add the header "
+            "in the http service's request method."
+        )
+    else:
+        auth_frontend_section = ""
     prompt = XML_TO_API_PROMPT.format(xml=xml, backend_lang=backend_lang, frontend_lang=frontend_lang,
-                                       backend_conventions=conventions, frontend_conventions=frontend_conventions)
-    return await _call_openai([
+                                       backend_conventions=conventions, frontend_conventions=frontend_conventions,
+                                       auth_module_section=auth_module_section, auth_requirement_section=auth_requirement_section,
+                                       auth_frontend_section=auth_frontend_section,
+                                       db_conventions_section=db_conventions_section,
+                                       email_conventions_section=email_conventions_section)
+    code = await _call_openai([
         {"role": "system", "content": f"You are a full-stack developer. Generate {backend_lang} backend + {frontend_lang} frontend code. Use === FILENAME: name.ext === to separate files. Return ONLY code — never wrap any file in markdown code fences (```)."},
         {"role": "user", "content": prompt},
-    ], timeout=180)
+    ], timeout=180, usage_sink=usage_sink)
+    if backend_lang == "Python":
+        code = _fix_python_sibling_imports(code)
+        if entities:
+            code = _ensure_db_model_imports(code, entities)
+    return code
+
+
+def _fix_python_sibling_imports(api_code: str) -> str:
+    """Deterministic fix for a real, pre-existing bug caught by an actual multi-screen pip-install
+    run: routes.py and models.py always live together in the same per-screen folder
+    (_backend_file_path: {slug}/routes.py, {slug}/models.py), but the model writes
+    `from models import X` — a bare absolute import that only resolves if models.py sits at the
+    repo root. With more than one screen, main.py's `from {slug}.routes import ...` makes each
+    screen folder an (implicit namespace) package, and `from models import X` inside it raises
+    ModuleNotFoundError at startup. `from .models import X` (relative to the same package) always
+    resolves correctly regardless of the folder's actual name, so rewrite it rather than trying to
+    get the AI to know its own slug."""
+    return re.sub(r"^from models import", "from .models import", api_code, flags=re.MULTILINE)
+
+
+_DB_MODELS_IMPORT_RE = re.compile(r"^from db_models import ([\w, ]+)$", re.MULTILINE)
+
+
+def _ensure_db_model_imports(api_code: str, entities: dict) -> str:
+    """Deterministic backstop for a real, repeatable model mistake: even when explicitly told to
+    import every db_models class it references, the model sometimes references one (e.g. querying
+    User inside an incidental uniqueness check on an otherwise unrelated endpoint) without adding
+    the import — a NameError at request time, not a warning. Tuning the prompt wording further
+    didn't fix it in testing, so this fixes it mechanically instead, the same lesson learned from
+    the read-only-report <form>-stripping fix earlier."""
+    table_names = [t.get("name") for t in entities.get("tables", []) if t.get("name")]
+    if not table_names:
+        return api_code
+
+    # The model is supposed to substitute the real extension (routes.py) but sometimes echoes the
+    # literal "routes.ext" placeholder from the prompt instead — match either, same defensive
+    # reasoning as _backend_file_path forcing the real filename regardless of what the AI wrote.
+    marker_match = re.search(r"=== FILENAME: routes\.\w+ ===", api_code)
+    if not marker_match:
+        return api_code
+    body_start = marker_match.end()
+    next_marker = api_code.find("=== FILENAME:", body_start)
+    end = next_marker if next_marker != -1 else len(api_code)
+    section = api_code[body_start:end]
+
+    m = _DB_MODELS_IMPORT_RE.search(section)
+    imported = {n.strip() for n in m.group(1).split(",") if n.strip()} if m else set()
+
+    missing = [
+        tname for tname in table_names
+        if tname not in imported and re.search(rf"\b{re.escape(tname)}\s*[.(]", section)
+    ]
+    if not missing:
+        return api_code
+
+    if m:
+        new_line = f"from db_models import {', '.join(sorted(imported | set(missing)))}"
+        section = section[:m.start()] + new_line + section[m.end():]
+    else:
+        insertion = f"from db_models import {', '.join(missing)}\n"
+        lines = section.splitlines(keepends=True)
+        insert_at = 0
+        for i, line in enumerate(lines):
+            if line.startswith(("from ", "import ")):
+                insert_at = i + 1
+            elif line.strip() == "":
+                continue
+            else:
+                break
+        lines.insert(insert_at, insertion)
+        section = "".join(lines)
+
+    return api_code[:body_start] + section + api_code[end:]
 
 
 def generate_er_diagram(entities: dict) -> str:
@@ -1839,3 +2602,146 @@ def generate_er_diagram(entities: dict) -> str:
                 lines.append(f'    {ref_table} ||--o{{ {table["name"]} : "has"')
 
     return "\n".join(lines)
+
+
+# Real, live database wiring for the generated Python backend (SQLite by default, overridable via
+# DATABASE_URL). Deterministic, not AI-generated — unlike auth.py, this needs zero per-project
+# judgment: every project gets the exact same engine/session boilerplate, so there's no reason to
+# spend a model call (or risk a hallucinated mistake) on it. Lands at the repo root, sibling of
+# main.py/auth.py, importable the same way (see _db_module_path in github_service.py).
+PYTHON_DATABASE_MODULE = '''import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+
+# Defaults to a local SQLite file so the generated app works immediately after
+# `pip install -r requirements.txt && uvicorn main:app` with nothing else to set up. Point
+# DATABASE_URL at a real Postgres/MySQL/etc connection string later if you want to.
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+
+_connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, connect_args=_connect_args)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+'''
+
+
+_SQLALCHEMY_TYPE_ARGS_RE = re.compile(r"\(([^)]*)\)")
+
+
+def _sql_type_to_sqlalchemy(col_type: str) -> str:
+    """Maps this app's schema "type" strings (VARCHAR(50), DECIMAL(10,2), INT, DATE, TIMESTAMP,
+    BOOLEAN, TEXT — see COLUMN_TYPE_RULES) to a SQLAlchemy column-type expression, as source text
+    to embed in generated code. Mirrors the split-then-uppercase approach generate_er_diagram
+    already uses (col_type.split("(")[0].upper()) rather than generate_sql's less reliable
+    type_map.get(col_type.upper(), ...) which never matches a type that carries a "(...)" suffix."""
+    raw = col_type or "VARCHAR"
+    base = raw.split("(")[0].strip().upper()
+    args_match = _SQLALCHEMY_TYPE_ARGS_RE.search(raw)
+    args = args_match.group(1).strip() if args_match else ""
+    if base == "VARCHAR":
+        return f"String({args})" if args else "String(255)"
+    if base == "TEXT":
+        return "Text"
+    if base in ("INT", "INTEGER"):
+        return "Integer"
+    if base == "DECIMAL":
+        return f"Numeric({args})" if args else "Numeric(10, 2)"
+    if base == "DATE":
+        return "Date"
+    if base == "TIMESTAMP":
+        return "DateTime"
+    if base == "BOOLEAN":
+        return "Boolean"
+    return "String(255)"
+
+
+def generate_sqlalchemy_models(entities: dict) -> str:
+    """Deterministic, non-AI conversion of project.entities into real SQLAlchemy ORM model
+    classes — one per table — that the generated backend's routes actually read/write through.
+    Same reasoning as generate_sql/generate_er_diagram: the schema is already fully known
+    structured data, so there's no reason to ask the AI to reconstruct it and risk a mistake in
+    something entirely mechanical. Becomes db_models.py at the repo root (see _db_module_path)."""
+    tables = entities.get("tables", []) if entities else []
+    used_types = set()
+    class_blocks = []
+    for table in tables:
+        tname = table["name"]
+        lines = [f'class {tname}(Base):', f'    __tablename__ = "{tname}"', ""]
+        for col in table.get("columns", []):
+            cname = col["name"]
+            if col.get("pk"):
+                used_types.add("Integer")
+                lines.append(f"    {cname} = Column(Integer, primary_key=True, autoincrement=True)")
+                continue
+            sa_type = _sql_type_to_sqlalchemy(col.get("type", "VARCHAR"))
+            used_types.add(sa_type.split("(")[0])
+            attrs = []
+            fk = col.get("fk")
+            if fk and "." in fk:
+                ref_table, ref_col = fk.split(".", 1)
+                attrs.append(f'ForeignKey("{ref_table}.{ref_col}")')
+            if not col.get("nullable", True):
+                attrs.append("nullable=False")
+            if col.get("unique"):
+                attrs.append("unique=True")
+            if col.get("default") == "now()":
+                used_types.add("func")
+                attrs.append("server_default=func.now()")
+            attr_str = f", {', '.join(attrs)}" if attrs else ""
+            lines.append(f"    {cname} = Column({sa_type}{attr_str})")
+        class_blocks.append("\n".join(lines) + "\n")
+
+    type_imports = sorted(t for t in used_types if t not in ("Integer", "func"))
+    if "Integer" in used_types:
+        type_imports.insert(0, "Integer")
+    header = ["from sqlalchemy import Column, ForeignKey, " + ", ".join(type_imports or ["String"])]
+    if "func" in used_types:
+        header.append("from sqlalchemy.sql import func")
+    header.append("from database import Base")
+    header.append("")
+    header.append("")
+    return "\n".join(header) + "\n\n\n".join(class_blocks)
+
+
+# Real email sending for the generated Python backend — stdlib smtplib, zero new dependency,
+# configured entirely through env vars so it works with any SMTP provider (Gmail, Outlook, a
+# company relay) with no third-party sign-up required. Deterministic for the same reason
+# PYTHON_DATABASE_MODULE is: sending mail has no per-project variation to reason about. An
+# unconfigured deployment fails loudly (RuntimeError) instead of silently pretending to send —
+# that's the whole point of this being real instead of a fake success toast.
+PYTHON_EMAIL_SERVICE_MODULE = '''import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
+
+
+def send_email(to: str, subject: str, body: str) -> None:
+    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
+        raise RuntimeError(
+            "Email is not configured — set SMTP_HOST, SMTP_USER, SMTP_PASSWORD "
+            "(and optionally SMTP_PORT, SMTP_FROM) in your environment / .env file."
+        )
+    msg = MIMEMultipart()
+    msg["From"] = SMTP_FROM
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(SMTP_FROM, [to], msg.as_string())
+'''

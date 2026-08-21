@@ -38,6 +38,7 @@ class UserResponse(BaseModel):
     github_token: Optional[str] = None
     date_format: str = "YYYY-MM-DD"
     language: str = "en"
+    is_superuser: bool = False
 
     @field_validator("date_format", mode="before")
     @classmethod
@@ -110,6 +111,7 @@ class ProjectResponse(BaseModel):
     ui_api: Optional[str] = None
     er_diagram: Optional[str] = None
     ui_screens: Optional[str] = None
+    ui_theme: Optional[str] = None
     github_repo: Optional[str] = None
     github_repo_url: Optional[str] = None
     github_frontend_repo: Optional[str] = None
@@ -206,6 +208,20 @@ class ScreenUpdate(BaseModel):
     primary_entities: Optional[list[str]] = None
     joined_entities: Optional[list[str]] = None
     reference_image: Optional[str] = None  # data URL; empty string clears it, omitted/None leaves untouched
+    html: Optional[str] = None  # persists a screen's preview HTML directly, e.g. a picked design variant or a recolored version
+    # Explicit opt-in: only the "commit to this picked design variant" action should ever lock
+    # the project's shared theme — a plain Colors-popover save (which also sets `html`) never
+    # passes this, so recoloring one screen can't silently re-theme the whole project.
+    lock_theme_density: Optional[str] = None  # "CLEAN" | "DENSE", only acted on if project.ui_theme is still empty
+
+
+class HtmlVariant(BaseModel):
+    label: str
+    html: str
+
+
+class HtmlVariantsResponse(BaseModel):
+    variants: list[HtmlVariant]
 
 
 class PromptLogResponse(BaseModel):

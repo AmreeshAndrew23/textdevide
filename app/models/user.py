@@ -13,6 +13,7 @@ class User(Base):
     picture = Column(String, nullable=True)
     auth_provider = Column(String, default="email")
     is_active = Column(Boolean, default=True)
+    is_superuser = Column(Boolean, default=False)
     github_token = Column(String, nullable=True)
     # User configuration
     date_format = Column(String, nullable=True, default="YYYY-MM-DD")

@@ -22,3 +22,8 @@ elif DATABASE_URL.startswith("postgres://"):
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
+# Comma-separated emails that get is_superuser=True auto-granted on every startup (see
+# database.py's _sync_superusers). Grant-only — never auto-revokes, so a blank/misconfigured
+# env var never demotes anyone. Needed to reach the admin token-usage view at /admin.
+SUPERUSER_EMAILS = [e.strip().lower() for e in os.getenv("SUPERUSER_EMAILS", "").split(",") if e.strip()]
+

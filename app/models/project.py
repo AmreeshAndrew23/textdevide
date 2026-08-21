@@ -23,6 +23,10 @@ class Project(Base):
     ui_api = Column(Text, nullable=True)
     er_diagram = Column(Text, nullable=True)
     ui_screens = Column(Text, nullable=True)
+    ui_theme = Column(Text, nullable=True)  # JSON: locked colors/font/radius/density shared across every screen
+    auth_code = Column(Text, nullable=True)  # shared hash/JWT auth module code, generated once when the first <auth> screen appears; its presence means "this project has real authentication"
+    db_code = Column(Text, nullable=True)  # non-Python only: AI-generated real DB module code (Python's database.py/db_models.py are deterministic, regenerated from entities each push, not stored)
+    email_code = Column(Text, nullable=True)  # shared email-sending module code, generated once when the first email/invitation-sending screen appears; its presence means "this project can really send email"
     github_repo = Column(String, nullable=True)  # backend repo (routes/models/db/entities)
     github_repo_url = Column(String, nullable=True)
     github_frontend_repo = Column(String, nullable=True)  # separate frontend repo (UI code)

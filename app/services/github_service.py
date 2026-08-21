@@ -3,6 +3,8 @@ import json
 import re
 import httpx
 
+from app.services.ai_service import PYTHON_DATABASE_MODULE, PYTHON_EMAIL_SERVICE_MODULE, generate_sqlalchemy_models
+
 GITHUB_API = "https://api.github.com"
 
 EXT = {"Python": "py", "Java": "java", "JavaScript": "js", "TypeScript": "ts",
@@ -163,14 +165,75 @@ def _backend_file_path(language: str, category: str, slug: str, ai_filename: str
     return f"{slug}/routes.py" if category == "routes" else f"{slug}/models.py"
 
 
+# Where the shared auth module (project.auth_code, see ai_service.generate_auth_module) lands —
+# MUST match the exact path AUTH_CONVENTIONS tells the AI to import in ai_service.py, for every
+# other screen's generated routes to actually resolve the import. Python's goes at the repo root
+# (a sibling of main.py, NOT inside common-library/) since that folder is hyphenated and was
+# never a real importable package to begin with.
+_AUTH_MODULE_PATH = {
+    "Python": "auth.py",
+    "Java": "src/main/java/com/textdevide/app/security/AuthUtil.java",
+    "JavaScript": "middleware/auth.js",
+    "TypeScript": "middleware/auth.ts",
+    "C#": "Security/AuthService.cs",
+    "Go": "middleware/auth.go",
+    "Ruby": "lib/auth.rb",
+    "PHP": "lib/auth.php",
+}
+
+
+def _auth_module_path(language: str) -> str:
+    return _AUTH_MODULE_PATH.get(language, f"auth.{EXT.get(language, 'txt')}")
+
+
+# Where the real live-database wiring lands — Python's is two files (engine/session, and the ORM
+# model classes) since ai_service generates them as two separate deterministic pieces; every other
+# language gets a single conventional path (see DB_CONVENTIONS in ai_service.py, which every
+# screen's own generated routes are told to import from). Present whenever project.entities has at
+# least one table — this is now the baseline for every project, not an opt-in like auth.
+_DB_MODULE_PATH = {
+    "Python": ("database.py", "db_models.py"),
+    "Java": ("src/main/java/com/textdevide/app/config/DatabaseConfig.java", None),
+    "JavaScript": ("db/connection.js", None),
+    "TypeScript": ("db/connection.ts", None),
+    "C#": ("Data/AppDbContext.cs", None),
+    "Go": ("db/db.go", None),
+    "Ruby": ("config/database.rb", None),
+    "PHP": ("lib/db.php", None),
+}
+
+# Where the shared email-sending module (project.email_code) lands — same shape as
+# _AUTH_MODULE_PATH, MUST match what EMAIL_CONVENTIONS tells the AI to import.
+_EMAIL_MODULE_PATH = {
+    "Python": "email_service.py",
+    "Java": "src/main/java/com/textdevide/app/service/EmailService.java",
+    "JavaScript": "lib/emailService.js",
+    "TypeScript": "lib/emailService.ts",
+    "C#": "Services/EmailService.cs",
+    "Go": "email/email.go",
+    "Ruby": "lib/email.rb",
+    "PHP": "lib/email.php",
+}
+
+
+def _email_module_path(language: str) -> str:
+    return _EMAIL_MODULE_PATH.get(language, f"email_service.{EXT.get(language, 'txt')}")
+
+
 def _python_scaffold(project, screen_slugs: list[str]) -> dict:
     imports = "\n".join(f"from {s}.routes import router as {s}_router" for s in screen_slugs)
     includes = "\n".join(f'app.include_router({s}_router, prefix="/api")' for s in screen_slugs)
+    # A real database is the baseline once there's a schema at all — not opt-in like auth/email.
+    # Importing Base/engine and creating tables here (rather than only relying on some screen's own
+    # db_models import to trigger it) guarantees the tables exist even before any screen is hit.
+    has_db = bool(project.entities)
+    db_import = "\nfrom database import Base, engine" if has_db else ""
+    db_create = "\nBase.metadata.create_all(bind=engine)\n" if has_db else ""
     main_py = f'''"""Entrypoint — wires every generated screen's router into one FastAPI app.
 Run with: pip install -r requirements.txt && uvicorn main:app --reload
 """
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware{db_import}
 {(chr(10) + imports) if imports else ""}
 
 app = FastAPI(title="{project.name}")
@@ -181,7 +244,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+{db_create}
 
 @app.get("/health")
 async def health():
@@ -189,12 +252,53 @@ async def health():
 
 {includes}
 '''
-    requirements = "fastapi\nuvicorn[standard]\npydantic\npandas\nopenpyxl\n"
+    requirements = "fastapi\nuvicorn[standard]\npydantic[email]\npandas\nopenpyxl\n"
+    if has_db:
+        requirements += "sqlalchemy\n"
+    if project.auth_code:
+        requirements += "passlib[bcrypt]\nbcrypt==4.0.1\npython-jose[cryptography]\n"
     return {"main.py": main_py, "requirements.txt": requirements}
 
 
 def _java_scaffold(project) -> dict:
     artifact = _slugify(project.name).lower() or "app"
+    auth_deps = '''
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.jsonwebtoken</groupId>
+      <artifactId>jjwt-api</artifactId>
+      <version>0.11.5</version>
+    </dependency>
+    <dependency>
+      <groupId>io.jsonwebtoken</groupId>
+      <artifactId>jjwt-impl</artifactId>
+      <version>0.11.5</version>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.jsonwebtoken</groupId>
+      <artifactId>jjwt-jackson</artifactId>
+      <version>0.11.5</version>
+      <scope>runtime</scope>
+    </dependency>''' if project.auth_code else ""
+    db_deps = '''
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.xerial</groupId>
+      <artifactId>sqlite-jdbc</artifactId>
+      <version>3.45.1.0</version>
+    </dependency>''' if project.entities else ""
+    email_deps = '''
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-mail</artifactId>
+    </dependency>''' if project.email_code else ""
     pom = f'''<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -220,7 +324,7 @@ def _java_scaffold(project) -> dict:
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-validation</artifactId>
-    </dependency>
+    </dependency>{auth_deps}{db_deps}{email_deps}
   </dependencies>
   <build>
     <plugins>
@@ -272,6 +376,7 @@ public class Application {
 def _node_scaffold(project, language: str, screen_slugs: list[str]) -> dict:
     is_ts = language == "TypeScript"
     ext = "ts" if is_ts else "js"
+    has_auth = bool(project.auth_code)
     if is_ts:
         imports = "\n".join(f'import {s}Router from "./routes/{s}.routes";' for s in screen_slugs)
         mounts = "\n".join(f"app.use('/api', {s}Router);" for s in screen_slugs)
@@ -303,6 +408,12 @@ app.listen(PORT, () => console.log(`Server running on port ${{PORT}}`));
   "include": ["src/**/*", "routes/**/*", "models/**/*"]
 }
 '''
+        ts_auth_deps = ',\n    "bcryptjs": "^2.4.3",\n    "jsonwebtoken": "^9.0.2"' if has_auth else ""
+        ts_auth_dev_deps = ',\n    "@types/bcryptjs": "^2.4.6",\n    "@types/jsonwebtoken": "^9.0.6"' if has_auth else ""
+        ts_db_deps = ',\n    "better-sqlite3": "^11.1.2"' if project.entities else ""
+        ts_db_dev_deps = ',\n    "@types/better-sqlite3": "^7.6.10"' if project.entities else ""
+        ts_email_deps = ',\n    "nodemailer": "^6.9.13"' if project.email_code else ""
+        ts_email_dev_deps = ',\n    "@types/nodemailer": "^6.4.15"' if project.email_code else ""
         package_json = f'''{{
   "name": "{_slugify(project.name).lower()}-backend",
   "version": "1.0.0",
@@ -314,14 +425,14 @@ app.listen(PORT, () => console.log(`Server running on port ${{PORT}}`));
   }},
   "dependencies": {{
     "express": "^4.19.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5"{ts_auth_deps}{ts_db_deps}{ts_email_deps}
   }},
   "devDependencies": {{
     "typescript": "^5.4.5",
     "ts-node-dev": "^2.0.0",
     "@types/express": "^4.17.21",
     "@types/cors": "^2.8.17",
-    "@types/node": "^20.12.7"
+    "@types/node": "^20.12.7"{ts_auth_dev_deps}{ts_db_dev_deps}{ts_email_dev_deps}
   }}
 }}
 '''
@@ -344,6 +455,9 @@ app.get("/health", (_req, res) => res.json({{ status: "ok" }}));
 const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => console.log(`Server running on port ${{PORT}}`));
 '''
+    js_auth_deps = ',\n    "bcryptjs": "^2.4.3",\n    "jsonwebtoken": "^9.0.2"' if has_auth else ""
+    js_db_deps = ',\n    "better-sqlite3": "^11.1.2"' if project.entities else ""
+    js_email_deps = ',\n    "nodemailer": "^6.9.13"' if project.email_code else ""
     package_json = f'''{{
   "name": "{_slugify(project.name).lower()}-backend",
   "version": "1.0.0",
@@ -355,7 +469,7 @@ app.listen(PORT, () => console.log(`Server running on port ${{PORT}}`));
   }},
   "dependencies": {{
     "express": "^4.19.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5"{js_auth_deps}{js_db_deps}{js_email_deps}
   }}
 }}
 '''
@@ -381,12 +495,25 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.Run();
 '''
-    csproj = '''<Project Sdk="Microsoft.NET.Sdk.Web">
+    auth_refs = '''
+  <ItemGroup>
+    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="7.5.1" />
+  </ItemGroup>''' if project.auth_code else ""
+    db_refs = '''
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.4" />
+  </ItemGroup>''' if project.entities else ""
+    email_refs = '''
+  <ItemGroup>
+    <PackageReference Include="MailKit" Version="4.6.0" />
+  </ItemGroup>''' if project.email_code else ""
+    csproj = f'''<Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-  </PropertyGroup>
+  </PropertyGroup>{auth_refs}{db_refs}{email_refs}
 </Project>
 '''
     return {"Program.cs": program_cs, f"{project_name}.csproj": csproj}
@@ -416,11 +543,23 @@ func main() {{
 \tlog.Fatal(http.ListenAndServe(":8000", mux))
 }}
 '''
-    return {"main.go": main_go, "go.mod": f"module {module}\n\ngo 1.21\n"}
+    go_mod = f"module {module}\n\ngo 1.21\n"
+    go_requires = []
+    if project.auth_code:
+        go_requires += ["golang.org/x/crypto v0.21.0", "github.com/golang-jwt/jwt/v5 v5.2.1"]
+    if project.entities:
+        go_requires.append("github.com/mattn/go-sqlite3 v1.14.22")
+    if go_requires:
+        go_mod += "\nrequire (\n" + "\n".join(f"\t{r}" for r in go_requires) + "\n)\n"
+    return {"main.go": main_go, "go.mod": go_mod}
 
 
 def _ruby_scaffold(project) -> dict:
     gemfile = 'source "https://rubygems.org"\n\ngem "sinatra"\ngem "sinatra-contrib"\ngem "rack-cors"\n'
+    if project.auth_code:
+        gemfile += 'gem "bcrypt"\ngem "jwt"\n'
+    if project.entities:
+        gemfile += 'gem "sqlite3"\ngem "activerecord"\n'
     app_rb = '''# Entrypoint. Each screen's routes.rb under routes/ needs to be require'd and
 # mounted here manually — see the comment in each file for its expected mount path.
 require "sinatra"
@@ -443,12 +582,14 @@ end
 
 
 def _php_scaffold(project) -> dict:
-    composer = '''{
+    php_auth_deps = ',\n    "firebase/php-jwt": "^6.10"' if project.auth_code else ""
+    php_email_deps = ',\n    "phpmailer/phpmailer": "^6.9"' if project.email_code else ""
+    composer = f'''{{
   "name": "textdevide/backend",
-  "require": {
-    "php": ">=8.1"
-  }
-}
+  "require": {{
+    "php": ">=8.1"{php_auth_deps}{php_email_deps}
+  }}
+}}
 '''
     index_php = '''<?php
 // Entrypoint. Each screen's routes.php under routes/ needs to be require'd and
@@ -1210,6 +1351,50 @@ def build_push_files(project) -> tuple:
     if project.validation_code:
         for f in _parse_bundle(project.validation_code, f"validation.{ext}"):
             backend_files[f"common-library/{f['name']}"] = f["code"]
+
+    # Shared auth module — only present once a screen using <auth> has been generated (see
+    # gen_screen_xml). Lands at a fixed, language-specific path every other secured screen's
+    # generated routes import from (_auth_module_path / AUTH_CONVENTIONS in ai_service.py).
+    has_auth = bool(project.auth_code)
+    if has_auth:
+        backend_files[_auth_module_path(project.language)] = project.auth_code
+
+    # Real live database — the baseline for every project with a schema, not an opt-in like auth.
+    # Python's engine/session (database.py) and ORM models (db_models.py) are both deterministic
+    # (see ai_service.py) since neither needs per-project judgment; other languages' equivalents
+    # are AI-generated once per project the same way the auth module is (see routes/projects.py).
+    if project.entities:
+        try:
+            entities = json.loads(project.entities)
+        except Exception:
+            entities = None
+        if entities and entities.get("tables"):
+            if project.language == "Python":
+                backend_files["database.py"] = PYTHON_DATABASE_MODULE
+                backend_files["db_models.py"] = generate_sqlalchemy_models(entities)
+            elif project.db_code:
+                db_path, _ = _DB_MODULE_PATH.get(project.language, (f"db.{EXT.get(project.language, 'txt')}", None))
+                backend_files[db_path] = project.db_code
+
+    # Shared email module — only present once a screen detected as actually sending an email has
+    # been generated (see gen_screen_api). Python's is deterministic; other languages' are
+    # AI-generated once per project, same shape as the auth/db modules above.
+    if project.email_code:
+        if project.language == "Python":
+            backend_files[_email_module_path(project.language)] = PYTHON_EMAIL_SERVICE_MODULE
+        else:
+            backend_files[_email_module_path(project.language)] = project.email_code
+
+    # .env.example — documents the real config knobs a generated project actually reads.
+    env_lines = []
+    if project.entities:
+        env_lines.append("# Optional — defaults to a local SQLite file if unset\nDATABASE_URL=")
+    if project.email_code:
+        env_lines.append(
+            "# Required for real email sending\nSMTP_HOST=\nSMTP_PORT=587\nSMTP_USER=\nSMTP_PASSWORD=\nSMTP_FROM="
+        )
+    if env_lines:
+        backend_files[".env.example"] = "\n\n".join(env_lines) + "\n"
 
     # schema/ — one XML per database table; db-design/ — one SQL file per table
     if project.entities:
