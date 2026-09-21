@@ -1,0 +1,41 @@
+{
+  "name": "backend-node",
+  "version": "1.0.0",
+  "description": "Text Dev IDE backend (Node.js/TypeScript, Fastify, Postgres + Neo4j)",
+  "engines": { "node": ">=20" },
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "db:push": "drizzle-kit push"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@xmldom/xmldom": "^0.9.12",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^18.0.1",
+    "drizzle-orm": "^0.45.2",
+    "fastify": "^5.12.5",
+    "jose": "^6.2.12",
+    "jsonwebtoken": "^9.0.3",
+    "neo4j-driver": "^6.2.0",
+    "pg": "^8.23.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^26.6.2",
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.10",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}
