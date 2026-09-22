@@ -7,6 +7,7 @@
 import { DOMParser } from "@xmldom/xmldom";
 import type { Element as XmlElement } from "@xmldom/xmldom";
 import { type Entities, columnType, coerceValue } from "./values.js";
+import { isElement, childElements } from "./screenModel.js";
 
 export type QueryResult = { rows: Record<string, unknown>[]; count: number };
 export type QueryExecutor = (statement: string, params: Record<string, unknown>) => Promise<QueryResult>;
@@ -128,15 +129,6 @@ function parseFieldPersistence(root: XmlElement): Map<string, [string, string]> 
     }
   }
   return mapping;
-}
-
-function isElement(n: unknown): n is XmlElement {
-  return (n as { nodeType?: number }).nodeType === 1;
-}
-
-function childElements(parent: XmlElement, tagName?: string): XmlElement[] {
-  const els = Array.from(parent.childNodes || []).filter(isElement);
-  return tagName ? els.filter((el) => el.tagName === tagName) : els;
 }
 
 // Equivalent of ElementTree's `for el in root.iter(): if el.get("id") == element_id`.

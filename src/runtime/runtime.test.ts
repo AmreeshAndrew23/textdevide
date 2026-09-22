@@ -3,6 +3,8 @@ import { labelFor, prepareCypher, validateCypherStatic } from "./cypher.js";
 import { coerceValue } from "./values.js";
 import { evaluateCondition, resolveTemplate, runEvent, type QueryExecutor } from "./engine.js";
 import { lintScreenXml } from "../services/aiService.js";
+import { parseScreenModel } from "./screenModel.js";
+import { renderScreen } from "./renderer.js";
 
 const tables = new Set(["Department", "Course"]);
 const prep = (s: string, params: string[] = []) => prepareCypher(s, 7, tables, new Set(params));
@@ -167,5 +169,55 @@ describe("engine (fake Neo4j executor)", () => {
     const actions = await runEvent(exec, entities, screenXml, "save", "click", { deptid: "ME", deptname: "Mech" });
     expect(actions).toContainEqual({ type: "message", messageType: "success", value: "Saved" });
     expect(seen[0]).toBe('CREATE:{"deptid":"ME","deptname":"Mech"}');
+  });
+});
+
+describe("screenModel", () => {
+  const model = parseScreenModel(screenXml);
+  it("extracts fields, grid, and buttons in document order", () => {
+    expect(model.fields.map((f) => f.id)).toEqual(["deptid", "deptname"]);
+    expect(model.grids[0]).toMatchObject({ id: "courses", columns: [{ id: "courseid", header: "ID", binding: "courseid" }] });
+    expect(model.buttons.map((b) => b.id)).toEqual(["save"]);
+  });
+  it("attaches each element's declared event types", () => {
+    expect(model.fields.find((f) => f.id === "deptid")?.eventTypes).toEqual(["change"]);
+    expect(model.fields.find((f) => f.id === "deptname")?.eventTypes).toEqual([]);
+    expect(model.buttons.find((b) => b.id === "save")?.eventTypes).toEqual(["click"]);
+  });
+});
+
+describe("renderer (server-side HTML)", () => {
+  const model = parseScreenModel(screenXml);
+  const html = renderScreen(model, { apiBase: "http://localhost:8001", projectId: 42, screenId: "s1", token: "tok123" });
+
+  it("renders one input per field, a grid table, and a wired button", () => {
+    expect(html).toContain('id="deptid"');
+    expect(html).toContain('id="deptname"');
+    expect(html).toContain('data-grid="courses"');
+    expect(html).toContain(">ID<"); // grid column header
+    expect(html).toContain('id="save" data-button data-click');
+  });
+  it("only wires a commit event for fields that declare one", () => {
+    expect(html).toMatch(/id="deptid"[^>]*data-commit-event="blur"/);
+    expect(html).not.toMatch(/id="deptname"[^>]*data-commit-event/);
+  });
+  it("bakes in the project/screen/token/API base for the client script", () => {
+    expect(html).toContain('var API_BASE = "http://localhost:8001"');
+    expect(html).toContain("var PROJECT_ID = 42");
+    expect(html).toContain('var SCREEN_ID = "s1"');
+    expect(html).toContain('var TOKEN = "tok123"');
+    expect(html).toContain('"courses":["courseid"]'); // grid column bindings for the client script
+  });
+  it("falls back to a plain text input for type=select (no options source in this vocabulary)", () => {
+    const selectXml = screenXml.replace('<field id="deptname" label="Name" type="text"', '<field id="deptname" label="Name" type="select"');
+    const out = renderScreen(parseScreenModel(selectXml), { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(out).toMatch(/id="deptname"[^>]*type="text"|<input type="text" id="deptname"/);
+    expect(out).not.toContain("<select");
+  });
+  it("escapes field/label/hint content so generated screen text can't break out of the HTML", () => {
+    const xssXml = screenXml.replace('label="Name"', 'label="&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;"');
+    const out = renderScreen(parseScreenModel(xssXml), { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(out).not.toContain("<script>alert(1)</script>");
+    expect(out).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
 });
