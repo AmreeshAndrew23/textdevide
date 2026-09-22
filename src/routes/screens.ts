@@ -5,7 +5,8 @@ import { db } from "../db/connection.js";
 import { projects, type ProjectRow } from "../db/schema.js";
 import { serializeProject } from "../serializers.js";
 import {
-  ScreenCreateSchema, ScreenUpdateSchema, GenerateUIXmlRequestSchema, RefineUIRequestSchema, BatchGenerateScreensRequestSchema,
+  ScreenCreateSchema, ScreenUpdateSchema, GenerateUIXmlRequestSchema, RefineUIRequestSchema,
+  BatchGenerateScreensRequestSchema, BatchDeleteScreensRequestSchema,
 } from "../models/schemas.js";
 import { requireAuth } from "./authGuard.js";
 import { generateUiXml, refineUiXml, type UsageEntry } from "../services/aiService.js";
@@ -94,6 +95,17 @@ export default async function screensRoutes(app: FastifyInstance) {
   app.delete("/projects/:id/screens/:screenId", async (req: FastifyRequest<{ Params: { id: string; screenId: string } }>, reply) => {
     const project = await getOwnedProject(Number(req.params.id), req.user.id);
     const screens = getScreens(project).filter((s) => s.id !== req.params.screenId);
+    const updated = await saveScreens(project.id, screens);
+    return reply.send(serializeProject(updated));
+  });
+
+  // Removes several screens in one call/one project update, instead of the client looping the
+  // single-screen DELETE per selected screen.
+  app.post("/projects/:id/screens/batch-delete", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const project = await getOwnedProject(Number(req.params.id), req.user.id);
+    const body = BatchDeleteScreensRequestSchema.parse(req.body);
+    const toDelete = new Set(body.screen_ids);
+    const screens = getScreens(project).filter((s) => !toDelete.has(s.id));
     const updated = await saveScreens(project.id, screens);
     return reply.send(serializeProject(updated));
   });
