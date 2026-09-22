@@ -391,14 +391,14 @@ export function lintScreenXml(xml: string): string {
   });
 }
 
-export async function generateUiXml(description: string, entities: any, usageSink?: UsageEntry[]): Promise<string> {
+export async function generateUiXml(description: string, entities: any, usageSink?: UsageEntry[], signal?: AbortSignal): Promise<string> {
   const prompt = UI_XML_PROMPT(entities ? JSON.stringify(entities, null, 2) : "No schema defined yet", description);
   const xml = await callOpenAI(
     [
       { role: "system", content: "You are a UI/UX architect. Return ONLY valid XML." },
       { role: "user", content: prompt },
     ],
-    { usageSink }
+    { usageSink, signal }
   );
   return lintScreenXml(xml);
 }
@@ -413,10 +413,11 @@ export type UsageEntry = { model: string; prompt_tokens: number; completion_toke
 
 export async function callOpenAI(
   messages: ChatMessage[],
-  opts: { useJson?: boolean; timeout?: number; temperature?: number; maxRetries?: number; model?: string; usageSink?: UsageEntry[] } = {}
+  opts: { useJson?: boolean; timeout?: number; temperature?: number; maxRetries?: number; model?: string; usageSink?: UsageEntry[]; signal?: AbortSignal } = {}
 ): Promise<string> {
-  const { useJson = false, temperature = 0, maxRetries = 2, model = "gpt-4o-mini", usageSink } = opts;
+  const { useJson = false, temperature = 0, maxRetries = 2, model = "gpt-4o-mini", usageSink, signal } = opts;
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not configured. Add it to your .env file.");
+  if (signal?.aborted) throw new DOMException("Cancelled before the request started", "AbortError");
 
   const body: Record<string, unknown> = { model, messages, temperature };
   if (useJson) body.response_format = { type: "json_object" };
@@ -427,6 +428,7 @@ export async function callOpenAI(
         method: "POST",
         headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal,
       });
       if (!resp.ok) {
         const text = await resp.text().catch(() => "");

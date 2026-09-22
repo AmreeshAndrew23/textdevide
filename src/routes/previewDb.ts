@@ -7,6 +7,7 @@ import { requireAuth } from "./authGuard.js";
 import { HttpError } from "../services/authService.js";
 import { runEvent } from "../runtime/engine.js";
 import * as store from "../runtime/neo4jStore.js";
+import { raceAbort, requestAbortSignal, RequestAbortedError } from "../utils/requestAbort.js";
 
 type Screen = { id: string; xml?: string };
 
@@ -30,12 +31,20 @@ async function getOwnedProject(projectId: number, userId: number): Promise<Proje
 export default async function previewDbRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireAuth);
 
+  // Neo4j's driver has no built-in way to cancel an in-flight session — a "Stop" click can't force
+  // the remote write to abandon mid-statement. This races the HTTP response against the client
+  // disconnecting instead: on abort, the handler stops waiting and returns promptly (freeing the
+  // connection for the user to retry), even though whatever statement was already sent to Neo4j
+  // may still complete server-side. Best-effort, not a true cancel — same trade-off syncSchema's
+  // own "IF NOT EXISTS" idempotency already assumes (safe to re-run either way).
   const syncRoute = async (req: FastifyRequest<{ Params: { id: string } }>) => {
     const project = await getOwnedProject(Number(req.params.id), req.user.id);
     if (!project.entities) throw new HttpError(400, "No schema yet — extract entities first");
+    const signal = requestAbortSignal(req);
     try {
-      return await store.syncSchema(project.id, JSON.parse(project.entities), { force: true });
+      return await raceAbort(store.syncSchema(project.id, JSON.parse(project.entities), { force: true }), signal);
     } catch (e) {
+      if (e instanceof RequestAbortedError) throw new HttpError(499, "Cancelled");
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.startsWith("This project has no tables")) throw new HttpError(400, msg);
       req.log.error(e, `Neo4j schema sync failed for project ${project.id}`);

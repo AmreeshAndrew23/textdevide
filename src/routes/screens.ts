@@ -11,6 +11,7 @@ import { requireAuth } from "./authGuard.js";
 import { generateUiXml, refineUiXml, type UsageEntry } from "../services/aiService.js";
 import { logPrompt } from "../services/promptLog.js";
 import { HttpError } from "../services/authService.js";
+import { requestAbortSignal } from "../utils/requestAbort.js";
 
 type Screen = {
   id: string;
@@ -106,10 +107,12 @@ export default async function screensRoutes(app: FastifyInstance) {
     const entities = project.entities ? JSON.parse(project.entities) : null;
 
     const usageSink: UsageEntry[] = [];
+    const signal = requestAbortSignal(req);
     let xml: string;
     try {
-      xml = await generateUiXml(body.description, entities, usageSink);
+      xml = await generateUiXml(body.description, entities, usageSink, signal);
     } catch (e) {
+      if (e instanceof Error && e.name === "AbortError") throw new HttpError(499, "Cancelled");
       throw new HttpError(500, `XML generation failed: ${e instanceof Error ? e.message : e}`);
     }
     await logPrompt(req.user.id, project.id, "screen_generate_xml", body.description, xml, usageSink);
@@ -137,13 +140,14 @@ export default async function screensRoutes(app: FastifyInstance) {
     const body = BatchGenerateScreensRequestSchema.parse(req.body);
     const entities = project.entities ? JSON.parse(project.entities) : null;
     const screens = getScreens(project);
+    const signal = requestAbortSignal(req);
 
     const outcomes = await Promise.all(
       body.screens.map(async (s) => {
         const id = randomUUID().slice(0, 8);
         const usageSink: UsageEntry[] = [];
         try {
-          const xml = await generateUiXml(s.description, entities, usageSink);
+          const xml = await generateUiXml(s.description, entities, usageSink, signal);
           await logPrompt(req.user.id, project.id, "screen_generate_xml", s.description, xml, usageSink);
           return { screen: { id, name: s.name, description: s.description, xml, html: "", api: "", primary_entities: [], joined_entities: [], reference_image: null } as Screen, ok: true as const };
         } catch (e) {
