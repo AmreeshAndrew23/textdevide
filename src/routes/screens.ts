@@ -4,7 +4,9 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { projects, type ProjectRow } from "../db/schema.js";
 import { serializeProject } from "../serializers.js";
-import { ScreenCreateSchema, ScreenUpdateSchema, GenerateUIXmlRequestSchema, RefineUIRequestSchema } from "../models/schemas.js";
+import {
+  ScreenCreateSchema, ScreenUpdateSchema, GenerateUIXmlRequestSchema, RefineUIRequestSchema, BatchGenerateScreensRequestSchema,
+} from "../models/schemas.js";
 import { requireAuth } from "./authGuard.js";
 import { generateUiXml, refineUiXml, type UsageEntry } from "../services/aiService.js";
 import { logPrompt } from "../services/promptLog.js";
@@ -122,6 +124,39 @@ export default async function screensRoutes(app: FastifyInstance) {
     screens[idx] = screen;
     const updated = await saveScreens(project.id, screens);
     return reply.send(serializeProject(updated));
+  });
+
+  // Generates several screens' XML in one call (e.g. every screen detect-intents split a
+  // description into) instead of the client looping create+generate-xml per screen. Each screen
+  // is created and generated independently and concurrently — one failing (a bad AI response, a
+  // transient network error) doesn't lose the others; the caller gets a per-screen result list
+  // alongside the updated project so it knows which ones need a manual retry via the existing
+  // single-screen generate-xml route.
+  app.post("/projects/:id/screens/batch-generate", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const project = await getOwnedProject(Number(req.params.id), req.user.id);
+    const body = BatchGenerateScreensRequestSchema.parse(req.body);
+    const entities = project.entities ? JSON.parse(project.entities) : null;
+    const screens = getScreens(project);
+
+    const outcomes = await Promise.all(
+      body.screens.map(async (s) => {
+        const id = randomUUID().slice(0, 8);
+        const usageSink: UsageEntry[] = [];
+        try {
+          const xml = await generateUiXml(s.description, entities, usageSink);
+          await logPrompt(req.user.id, project.id, "screen_generate_xml", s.description, xml, usageSink);
+          return { screen: { id, name: s.name, description: s.description, xml, html: "", api: "", primary_entities: [], joined_entities: [], reference_image: null } as Screen, ok: true as const };
+        } catch (e) {
+          const error = e instanceof Error ? e.message : String(e);
+          return { screen: { id, name: s.name, description: s.description, xml: "", html: "", api: "", primary_entities: [], joined_entities: [], reference_image: null } as Screen, ok: false as const, error };
+        }
+      })
+    );
+
+    screens.push(...outcomes.map((o) => o.screen));
+    const updated = await saveScreens(project.id, screens);
+    const results = outcomes.map((o) => ({ screen_id: o.screen.id, name: o.screen.name, ok: o.ok, error: o.ok ? null : o.error }));
+    return reply.status(201).send({ ...serializeProject(updated), results });
   });
 
   app.post("/projects/:id/screens/:screenId/refine-ui", async (req: FastifyRequest<{ Params: { id: string; screenId: string } }>, reply) => {

@@ -101,6 +101,10 @@ export const GenerateFromTemplateRequestSchema = z.object({
   template: z.string(),
 });
 
+export const BatchGenerateScreensRequestSchema = z.object({
+  screens: z.array(z.object({ name: z.string(), description: z.string() })).min(1),
+});
+
 export const ProjectUpdateSchema = z.object({
   name: z.string().nullish(),
   description: z.string().nullish(),
