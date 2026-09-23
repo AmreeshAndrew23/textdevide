@@ -34,6 +34,7 @@ export const ProjectCreateSchema = z.object({
   features: z.string().nullish(),
   language: z.string().default("Python"),
   frontend_language: z.string().default("React"),
+  theme: z.string().nullish(),
 });
 
 export const ExtractRequestSchema = z.object({
@@ -126,4 +127,5 @@ export const ProjectUpdateSchema = z.object({
   frontend_language: z.string().nullish(),
   er_diagram: z.string().nullish(),
   ui_screens: z.string().nullish(),
+  theme: z.string().nullish(),
 });

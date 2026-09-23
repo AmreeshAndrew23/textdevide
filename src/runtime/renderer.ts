@@ -280,11 +280,31 @@ function renderNavItems(opts: ShellOpts): string {
     .join("\n");
 }
 
+export type ThemeKey = keyof typeof THEMES;
+
+// A small curated set of named palettes — not free-form color picking, not AI-derived. Each just
+// supplies the accent colors; the layout/typography/spacing system (cards, nav, forms, focus
+// states) stays the one already built and is identical across every theme. "indigo" is the
+// original default and what an unset/unrecognized theme key falls back to.
+export const THEMES = {
+  indigo: { label: "Indigo", primary: "#4f46e5", primaryDark: "#3730a3", primaryLight: "#eef2ff", secondary: "#0891b2" },
+  emerald: { label: "Emerald", primary: "#059669", primaryDark: "#065f46", primaryLight: "#ecfdf5", secondary: "#7c3aed" },
+  slate: { label: "Slate", primary: "#334155", primaryDark: "#1e293b", primaryLight: "#f1f5f9", secondary: "#0891b2" },
+  rose: { label: "Rose", primary: "#e11d48", primaryDark: "#9f1239", primaryLight: "#fff1f2", secondary: "#0891b2" },
+  amber: { label: "Amber", primary: "#d97706", primaryDark: "#92400e", primaryLight: "#fffbeb", secondary: "#0369a1" },
+  ocean: { label: "Ocean", primary: "#0284c7", primaryDark: "#075985", primaryLight: "#f0f9ff", secondary: "#7c3aed" },
+} as const;
+
+export function resolveTheme(key: string | null | undefined) {
+  return THEMES[(key as ThemeKey) ?? ""] ?? THEMES.indigo;
+}
+
 export function renderScreen(
   model: ScreenModel,
-  opts: { apiBase: string; projectId: number; screenId: string; token: string; appName?: string; screens?: ShellScreen[] }
+  opts: { apiBase: string; projectId: number; screenId: string; token: string; appName?: string; screens?: ShellScreen[]; theme?: string | null }
 ): string {
   const shellOpts: ShellOpts = { ...opts, appName: opts.appName || "App", screens: opts.screens || [] };
+  const t = resolveTheme(opts.theme);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -294,8 +314,8 @@ export function renderScreen(
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <style>
   :root {
-    --clr-primary: #4f46e5; --clr-primary-dark: #3730a3; --clr-primary-light: #eef2ff;
-    --clr-secondary: #0891b2;
+    --clr-primary: ${t.primary}; --clr-primary-dark: ${t.primaryDark}; --clr-primary-light: ${t.primaryLight};
+    --clr-secondary: ${t.secondary};
     --clr-danger: #dc2626; --clr-success: #15803d;
     --clr-border: #e2e8f0; --clr-bg: #f8fafc; --clr-surface: #ffffff;
     --clr-text: #1e293b; --clr-muted: #64748b;

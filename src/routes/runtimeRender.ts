@@ -60,6 +60,7 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
         const html = renderScreen(model, {
           apiBase, projectId: project.id, screenId: screen.id, token,
           appName: project.name, screens: allScreens.map((s) => ({ id: s.id, name: s.name || "" })),
+          theme: project.uiTheme,
         });
         return reply.type("text/html; charset=utf-8").send(html);
       } catch (e) {

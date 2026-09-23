@@ -4,7 +4,7 @@ import { coerceValue } from "./values.js";
 import { evaluateCondition, resolveTemplate, runEvent, type QueryExecutor } from "./engine.js";
 import { lintScreenXml } from "../services/aiService.js";
 import { parseScreenModel } from "./screenModel.js";
-import { renderScreen } from "./renderer.js";
+import { renderScreen, THEMES } from "./renderer.js";
 
 const tables = new Set(["Department", "Course"]);
 const prep = (s: string, params: string[] = []) => prepareCypher(s, 7, tables, new Set(params));
@@ -315,5 +315,28 @@ describe("engine: <navigate>", () => {
   it("treats a missing siblingScreens argument the same as an empty project (degrades, never throws)", async () => {
     const actions = await runEvent(exec, entities, loginScreenXml, "forgotBtn", "click", {});
     expect(actions[0].type).toBe("message");
+  });
+});
+
+describe("renderer: per-project theme", () => {
+  const model = parseScreenModel(screenXml);
+  const render = (theme?: string | null) => renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s1", token: "t", theme });
+
+  it("applies each named theme's real primary color", () => {
+    for (const [key, palette] of Object.entries(THEMES)) {
+      const html = render(key);
+      expect(html).toContain(`--clr-primary: ${palette.primary};`);
+      expect(html).toContain(`--clr-secondary: ${palette.secondary};`);
+    }
+  });
+  it("falls back to the default (indigo) theme when unset or unrecognized", () => {
+    expect(render(undefined)).toContain(`--clr-primary: ${THEMES.indigo.primary};`);
+    expect(render(null)).toContain(`--clr-primary: ${THEMES.indigo.primary};`);
+    expect(render("not-a-real-theme")).toContain(`--clr-primary: ${THEMES.indigo.primary};`);
+  });
+  it("every theme still renders the same layout/markup — only colors change", () => {
+    const indigo = render("indigo").replace(/--clr-[a-z-]+: #[0-9a-f]+;/gi, "");
+    const emerald = render("emerald").replace(/--clr-[a-z-]+: #[0-9a-f]+;/gi, "");
+    expect(indigo).toBe(emerald);
   });
 });

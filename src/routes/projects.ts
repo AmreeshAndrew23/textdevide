@@ -8,6 +8,7 @@ import { requireAuth } from "./authGuard.js";
 import { generateSql } from "../services/sqlGen.js";
 import { HttpError } from "../services/authService.js";
 import { syncSchemaInBackground, dropProjectDataInBackground } from "../runtime/neo4jStore.js";
+import { THEMES } from "../runtime/renderer.js";
 
 function safeJson(text: string | null | undefined): any {
   if (!text) return null;
@@ -36,7 +37,7 @@ const UPDATE_KEY_MAP: Record<string, string> = {
   status: "status", language: "language", validation_rules: "validationRules",
   validation_code: "validationCode", ui_description: "uiDescription", ui_code: "uiCode",
   ui_xml: "uiXml", ui_html: "uiHtml", ui_api: "uiApi", frontend_language: "frontendLanguage",
-  er_diagram: "erDiagram", ui_screens: "uiScreens",
+  er_diagram: "erDiagram", ui_screens: "uiScreens", theme: "uiTheme",
 };
 
 export default async function projectRoutes(app: FastifyInstance) {
@@ -58,6 +59,7 @@ export default async function projectRoutes(app: FastifyInstance) {
         language: body.language,
         frontendLanguage: body.frontend_language,
         status: "draft", // Column(String, default="draft") in project.py — explicit, see authService's NEW_USER_DEFAULTS note
+        uiTheme: body.theme && body.theme in THEMES ? body.theme : "indigo",
         userId: req.user.id,
       })
       .returning();
