@@ -224,6 +224,36 @@ describe("renderer (server-side HTML)", () => {
     expect(html).toContain("function navigateUrl(screenId)");
     expect(html).toContain("window.location.href = navigateUrl(navigateTo)");
   });
+  it("falls back to sensible defaults when no app shell info is passed", () => {
+    expect(html).toContain(">App<"); // default appName
+    expect(html).toContain("No other screens yet");
+  });
+});
+
+describe("renderer: app shell (persistent header + nav across screens)", () => {
+  const model = parseScreenModel(screenXml);
+  const shellOpts = {
+    apiBase: "http://localhost:8001", projectId: 42, screenId: "s1", token: "tok123",
+    appName: "Exam Registration", screens: [{ id: "s1", name: "Department" }, { id: "s2", name: "Course" }],
+  };
+  const html = renderScreen(model, shellOpts);
+
+  it("shows the app name in the top bar", () => {
+    expect(html).toContain(">Exam Registration<");
+  });
+  it("lists every screen in the nav, marking the current one active and not a link", () => {
+    expect(html).toMatch(/<span class="app-nav-item active"[^>]*>Department<\/span>/);
+    expect(html).not.toMatch(/<a[^>]*>Department<\/a>/);
+  });
+  it("links every OTHER screen to its real runtime URL with the token", () => {
+    expect(html).toContain('href="http://localhost:8001/runtime/projects/42/screens/s2?token=tok123"');
+    expect(html).toMatch(/<a class="app-nav-item" href="[^"]+">Course<\/a>/);
+  });
+  it("a different screen's render shows the identical nav with a different item active", () => {
+    const html2 = renderScreen(model, { ...shellOpts, screenId: "s2" });
+    expect(html2).toMatch(/<span class="app-nav-item active"[^>]*>Course<\/span>/);
+    expect(html2).toMatch(/<a class="app-nav-item" href="[^"]+">Department<\/a>/);
+  });
 });
 
 // A Login screen (password check via <when>, only navigates to Dashboard on success) plus a

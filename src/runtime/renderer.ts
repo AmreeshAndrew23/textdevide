@@ -216,7 +216,39 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
 </script>`;
 }
 
-export function renderScreen(model: ScreenModel, opts: { apiBase: string; projectId: number; screenId: string; token: string }): string {
+export type ShellScreen = { id: string; name: string };
+
+function shellUrl(opts: { apiBase: string; projectId: number; token: string }, screenId: string): string {
+  return `${opts.apiBase}/runtime/projects/${opts.projectId}/screens/${screenId}?token=${encodeURIComponent(opts.token)}`;
+}
+
+type ShellOpts = { apiBase: string; projectId: number; screenId: string; token: string; appName: string; screens: ShellScreen[] };
+
+// Same top-bar + left-nav layout as frontend/src/components/AppShell.jsx — moved here so it's part
+// of what actually ships (every screen carries its own copy), not preview-only React chrome that
+// only existed inside the Studio.
+function renderTopBar(opts: ShellOpts): string {
+  return `<a class="app-topbar-title" href="${escAttr(shellUrl(opts, opts.screenId))}">${esc(opts.appName || "App")}</a>`;
+}
+
+// Plain <a href> links (real navigation, no JS needed for this part) — the active screen renders
+// as inert text, not a link to itself.
+function renderNavItems(opts: ShellOpts): string {
+  if (!opts.screens.length) return '<span class="app-nav-empty">No other screens yet</span>';
+  return opts.screens
+    .map((s) =>
+      s.id === opts.screenId
+        ? `<span class="app-nav-item active" aria-current="page">${esc(s.name)}</span>`
+        : `<a class="app-nav-item" href="${escAttr(shellUrl(opts, s.id))}">${esc(s.name)}</a>`
+    )
+    .join("\n");
+}
+
+export function renderScreen(
+  model: ScreenModel,
+  opts: { apiBase: string; projectId: number; screenId: string; token: string; appName?: string; screens?: ShellScreen[] }
+): string {
+  const shellOpts: ShellOpts = { ...opts, appName: opts.appName || "App", screens: opts.screens || [] };
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -226,7 +258,17 @@ export function renderScreen(model: ScreenModel, opts: { apiBase: string; projec
 <style>
   :root { --clr-primary: #4f46e5; --clr-danger: #dc2626; --clr-border: #cbd5e1; --clr-bg: #f8fafc; --clr-text: #1e293b; --clr-muted: #64748b; }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, sans-serif; color: var(--clr-text); background: var(--clr-bg); padding: 24px 32px; }
+  html, body { height: 100%; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: var(--clr-text); background: var(--clr-bg); display: flex; flex-direction: column; }
+  .app-topbar { flex-shrink: 0; padding: 12px 20px; border-bottom: 1px solid var(--clr-border); background: #fff; }
+  .app-topbar-title { font-weight: 700; font-size: 15px; color: var(--clr-text); text-decoration: none; }
+  .app-body { display: flex; flex: 1; min-height: 0; }
+  .app-nav { width: 190px; flex-shrink: 0; border-right: 1px solid var(--clr-border); background: #fff; padding: 10px; overflow-y: auto; }
+  .app-nav-item { display: block; padding: 8px 10px; border-radius: 6px; font-size: 13px; text-decoration: none; color: var(--clr-text); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  a.app-nav-item:hover { background: var(--clr-bg); }
+  .app-nav-item.active { background: var(--clr-primary); color: #fff; font-weight: 600; cursor: default; }
+  .app-nav-empty { display: block; padding: 8px 10px; font-size: 12px; color: var(--clr-muted); }
+  .app-content { flex: 1; min-width: 0; overflow: auto; padding: 24px 32px; }
   h1 { font-size: 22px; margin: 0 0 4px; }
   .subtitle { color: var(--clr-muted); font-size: 13px; margin-bottom: 20px; }
   .field-wrap { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; max-width: 360px; }
@@ -254,11 +296,21 @@ export function renderScreen(model: ScreenModel, opts: { apiBase: string; projec
 </style>
 </head>
 <body>
+<header class="app-topbar">
+${renderTopBar(shellOpts)}
+</header>
+<div class="app-body">
+<nav class="app-nav">
+${renderNavItems(shellOpts)}
+</nav>
+<main class="app-content">
   <h1>${esc(model.header.title || model.title)}</h1>
   ${model.header.subtitle ? `<div class="subtitle">${esc(model.header.subtitle)}</div>` : ""}
   <div id="screen-messages"></div>
   ${renderItems(model.items)}
-  ${clientScript(model, opts)}
+</main>
+</div>
+${clientScript(model, opts)}
 </body>
 </html>`;
 }
