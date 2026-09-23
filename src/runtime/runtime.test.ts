@@ -220,4 +220,70 @@ describe("renderer (server-side HTML)", () => {
     expect(out).not.toContain("<script>alert(1)</script>");
     expect(out).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
+  it("includes navigate handling in the generated client script", () => {
+    expect(html).toContain("function navigateUrl(screenId)");
+    expect(html).toContain("window.location.href = navigateUrl(navigateTo)");
+  });
+});
+
+// A Login screen (password check via <when>, only navigates to Dashboard on success) plus a
+// top-level, query-less <navigate> for "Forgot Password" — the two positions <navigate> is valid in.
+const loginScreenXml = `<screen id="loginScreen" title="Login">
+  <dataSources><dataSource id="mainDB" type="database"/></dataSources>
+  <queries>
+    <query id="checkLogin"><dataSource ref="mainDB"/>
+      <statement>MATCH (u:User) WHERE u.email = $email AND u.password = $password RETURN count(u) AS count</statement>
+      <parameters><parameter name="email" source="field:email"/><parameter name="password" source="field:password"/></parameters></query>
+  </queries>
+  <ui>
+    <field id="email" label="Email" type="email"/>
+    <field id="password" label="Password" type="password"/>
+    <button id="loginBtn" label="Log In"/>
+    <button id="forgotBtn" label="Forgot Password?"/>
+  </ui>
+  <events>
+    <event type="click" element="loginBtn">
+      <execute query="checkLogin">
+        <when condition="result.count == 0"><message type="error" value="Invalid credentials"/><stop/></when>
+        <when condition="result.count > 0"><navigate screen="dash1"/></when>
+      </execute>
+    </event>
+    <event type="click" element="forgotBtn">
+      <navigate screen="Forgot Password"/>
+    </event>
+  </events>
+</screen>`;
+
+describe("engine: <navigate>", () => {
+  const entities = { tables: [{ name: "User" }] };
+  const siblings = [{ id: "dash1", name: "Dashboard" }, { id: "fp1", name: "Forgot Password" }];
+  const exec: QueryExecutor = async (statement) =>
+    statement.includes("count(u)") ? { rows: [{ count: 1 }], count: 1 } : { rows: [], count: 0 };
+
+  it("resolves a top-level, query-less navigate by name", async () => {
+    const actions = await runEvent(exec, entities, loginScreenXml, "forgotBtn", "click", {}, siblings);
+    expect(actions).toEqual([{ type: "navigate", screenId: "fp1", screenName: "Forgot Password" }]);
+  });
+
+  it("only navigates (by id) after a <when> condition matches", async () => {
+    const actions = await runEvent(exec, entities, loginScreenXml, "loginBtn", "click", { email: "a@b.com", password: "x" }, siblings);
+    expect(actions.at(-1)).toEqual({ type: "navigate", screenId: "dash1", screenName: "Dashboard" });
+  });
+
+  it("does not navigate when the guarding condition fails", async () => {
+    const failExec: QueryExecutor = async () => ({ rows: [{ count: 0 }], count: 1 });
+    const actions = await runEvent(failExec, entities, loginScreenXml, "loginBtn", "click", { email: "a@b.com", password: "wrong" }, siblings);
+    expect(actions.some((a) => a.type === "navigate")).toBe(false);
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Invalid credentials" });
+  });
+
+  it("degrades to an error message instead of navigating nowhere when the target no longer exists", async () => {
+    const actions = await runEvent(exec, entities, loginScreenXml, "forgotBtn", "click", {}, [{ id: "dash1", name: "Dashboard" }]);
+    expect(actions).toEqual([{ type: "message", messageType: "error", value: "That screen isn't available right now." }]);
+  });
+
+  it("treats a missing siblingScreens argument the same as an empty project (degrades, never throws)", async () => {
+    const actions = await runEvent(exec, entities, loginScreenXml, "forgotBtn", "click", {});
+    expect(actions[0].type).toBe("message");
+  });
 });

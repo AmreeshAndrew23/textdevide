@@ -5,11 +5,11 @@ import { projects, type ProjectRow } from "../db/schema.js";
 import { PreviewRowsRequestSchema, RunEventRequestSchema } from "../models/schemas.js";
 import { requireAuth } from "./authGuard.js";
 import { HttpError } from "../services/authService.js";
-import { runEvent } from "../runtime/engine.js";
+import { runEvent, type SiblingScreen } from "../runtime/engine.js";
 import * as store from "../runtime/neo4jStore.js";
 import { raceAbort, requestAbortSignal, RequestAbortedError } from "../utils/requestAbort.js";
 
-type Screen = { id: string; xml?: string };
+type Screen = { id: string; name?: string; xml?: string };
 
 function getScreens(project: ProjectRow): Screen[] {
   if (!project.uiScreens) return [];
@@ -92,16 +92,21 @@ export default async function previewDbRoutes(app: FastifyInstance) {
 
   app.post("/projects/:id/screens/:screenId/run-event", async (req: FastifyRequest<{ Params: { id: string; screenId: string } }>, reply) => {
     const project = await getOwnedProject(Number(req.params.id), req.user.id);
-    const screen = getScreens(project).find((s) => s.id === req.params.screenId);
+    const allScreens = getScreens(project);
+    const screen = allScreens.find((s) => s.id === req.params.screenId);
     if (!screen) throw new HttpError(404, "Screen not found");
     if (!screen.xml) throw new HttpError(400, "Screen has no XML yet");
     const entities = project.entities ? JSON.parse(project.entities) : {};
     const body = RunEventRequestSchema.parse(req.body);
+    // Fetched fresh on every call (not baked into the XML at generation time) so a <navigate>
+    // keeps resolving correctly even if a target screen was renamed or removed since this screen's
+    // XML was written.
+    const siblingScreens: SiblingScreen[] = allScreens.filter((s) => s.id !== screen.id).map((s) => ({ id: s.id, name: s.name || "" }));
 
     try {
       if ((entities.tables || []).length) await store.syncSchema(project.id, entities);
       const actions = await store.withTx((tx) =>
-        runEvent((statement, params) => store.executeQuery(tx, project.id, entities, statement, params), entities, screen.xml!, body.elementId, body.eventType, body.fieldValues)
+        runEvent((statement, params) => store.executeQuery(tx, project.id, entities, statement, params), entities, screen.xml!, body.elementId, body.eventType, body.fieldValues, siblingScreens)
       );
       return reply.send({ actions });
     } catch (e) {

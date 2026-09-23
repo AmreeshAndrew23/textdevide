@@ -9,7 +9,7 @@ import {
   BatchGenerateScreensRequestSchema, BatchDeleteScreensRequestSchema,
 } from "../models/schemas.js";
 import { requireAuth } from "./authGuard.js";
-import { generateUiXml, refineUiXml, type UsageEntry } from "../services/aiService.js";
+import { generateUiXml, refineUiXml, type UsageEntry, type SiblingScreenInfo } from "../services/aiService.js";
 import { logPrompt } from "../services/promptLog.js";
 import { HttpError } from "../services/authService.js";
 import { requestAbortSignal } from "../utils/requestAbort.js";
@@ -46,6 +46,12 @@ async function getOwnedProject(projectId: number, userId: number): Promise<Proje
   const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
   if (!project || project.userId !== userId) throw new HttpError(404, "Project not found");
   return project;
+}
+
+// Every OTHER screen in the project, so generation/refinement can wire up a real <navigate> instead
+// of leaving an obviously-navigational button (Forgot Password, Back to Login, ...) dead.
+function siblingsOf(screens: Screen[], excludeId?: string): SiblingScreenInfo[] {
+  return screens.filter((s) => s.id !== excludeId).map((s) => ({ id: s.id, name: s.name, description: s.description }));
 }
 
 export default async function screensRoutes(app: FastifyInstance) {
@@ -122,7 +128,7 @@ export default async function screensRoutes(app: FastifyInstance) {
     const signal = requestAbortSignal(req);
     let xml: string;
     try {
-      xml = await generateUiXml(body.description, entities, usageSink, signal);
+      xml = await generateUiXml(body.description, entities, usageSink, signal, siblingsOf(screens, req.params.screenId));
     } catch (e) {
       if (e instanceof Error && e.name === "AbortError") throw new HttpError(499, "Cancelled");
       throw new HttpError(500, `XML generation failed: ${e instanceof Error ? e.message : e}`);
@@ -154,12 +160,18 @@ export default async function screensRoutes(app: FastifyInstance) {
     const screens = getScreens(project);
     const signal = requestAbortSignal(req);
 
+    // Every id in this batch is assigned up front (synchronously, before any generation call
+    // starts) so each screen's prompt can see its NEW siblings too, not just already-saved ones —
+    // a freshly-batch-generated Login + Forgot Password + Dashboard can cross-link each other in
+    // this same call.
+    const withIds = body.screens.map((s) => ({ ...s, id: randomUUID().slice(0, 8) }));
+    const batchSiblings: SiblingScreenInfo[] = [...siblingsOf(screens), ...withIds.map((s) => ({ id: s.id, name: s.name, description: s.description }))];
+
     const outcomes = await Promise.all(
-      body.screens.map(async (s) => {
-        const id = randomUUID().slice(0, 8);
+      withIds.map(async ({ id, ...s }) => {
         const usageSink: UsageEntry[] = [];
         try {
-          const xml = await generateUiXml(s.description, entities, usageSink, signal);
+          const xml = await generateUiXml(s.description, entities, usageSink, signal, batchSiblings.filter((sib) => sib.id !== id));
           await logPrompt(req.user.id, project.id, "screen_generate_xml", s.description, xml, usageSink);
           return { screen: { id, name: s.name, description: s.description, xml, html: "", api: "", primary_entities: [], joined_entities: [], reference_image: null } as Screen, ok: true as const };
         } catch (e) {
@@ -189,7 +201,7 @@ export default async function screensRoutes(app: FastifyInstance) {
     let newXml: string;
     let summary: string;
     try {
-      const refineResult = await refineUiXml(screen.xml, body.instruction, usageSink);
+      const refineResult = await refineUiXml(screen.xml, body.instruction, usageSink, siblingsOf(screens, screen.id));
       newXml = refineResult.xml || screen.xml;
       summary = refineResult.summary || "Applied your change — check the preview.";
     } catch (e) {

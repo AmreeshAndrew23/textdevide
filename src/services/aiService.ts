@@ -298,6 +298,14 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      <button> declared in <ui> above — this is how an event is wired to what triggers it, since
      <event> never lives inside the element itself. type="change" pairs with a <field>'s id, "click"
      with a <button>'s id.
+   - <navigate screen="idOrName"/> — jumps to another screen in this project (a real page
+     navigation, not a query). Valid wherever <execute>/<stop> are valid: as a top-level step
+     directly under <event> (no query needed at all — e.g. a plain "Back to Login" link), or nested
+     inside a <when> (e.g. only navigate to the Dashboard once a login lookup's <when
+     condition="result.count > 0"> confirms the password matched). screen="..." MUST be the exact
+     id or exact name of one of THIS PROJECT'S OTHER SCREENS listed below — never invent a screen
+     that isn't in that list. Whatever runs after a <navigate> in the same chain never executes
+     (same as <stop>), since the page is about to leave.
    - condition is one comparison: a left operand, one of == != > &lt; >= &lt;=, and a right
      operand — a bare "<" is invalid inside an XML attribute value, so write it as "&lt;" (a bare
      ">" is fine unescaped, as used above). Operands are: result.count / result.rows.length (row
@@ -319,19 +327,46 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
 There is no dedicated <auth> or <navigation> element in this format. A login/signup screen is built
 from the same generic <field>/<button>/<events>/<query> primitives as any other screen (a login
 button's click event runs a lookup query keyed on the identifying column, compares the stored password
-column against field:password in a <when>, and either <set>s a logged-in outcome or <message>s an
-error). Cross-screen navigation is handled by the application shell outside this XML — never build
-a screen whose only job is linking to other screens.
+column against field:password in a <when>, and either <navigate>s to this project's real "logged
+in" landing screen (see rule 6's <navigate>) or <message>s an error).
+
+Use <navigate> for any button/link whose job is sending the user to another real screen in this
+project — a "Forgot Password?" link on a login screen, a "Back to Login" link, a "Create Account"
+link, a "View Details"/"Cancel" button that returns to a list screen, and so on — whenever a
+suitable target actually appears in the OTHER SCREENS IN THIS PROJECT list given to you. Never
+invent a screen to link to, and never leave an obviously-navigational button as a dead element with
+no event when a real target exists — that's an incomplete generation. If no suitable sibling screen
+exists yet, either omit that button/link entirely or describe it in your response as something the
+user should generate a screen for, rather than wiring it to nothing.
 
 These are the ONLY element/attribute types this format supports. Never introduce a new element or
 attribute name beyond what's listed above, even if a request seems to call for one.`;
 
-export const UI_XML_PROMPT = (entities: string, description: string) => `You are a UI/UX architect. Given a screen description and database schema, generate a complete XML UI definition.
+export type SiblingScreenInfo = { id: string; name: string; description?: string | null };
+
+function siblingScreensSection(siblingScreens: SiblingScreenInfo[]): string {
+  if (!siblingScreens.length) {
+    return "OTHER SCREENS IN THIS PROJECT: none yet — this is the only screen in the project so far.\n" +
+      "This is a HARD constraint: do NOT emit a <navigate> element anywhere in this XML, for any " +
+      "button or link, even one that would obviously need to go somewhere in a real app (a login " +
+      "screen's \"Forgot Password?\"/\"Create Account\", a save button's \"go to dashboard\", etc.). " +
+      "There is nothing to navigate to yet — inventing a screen id like \"dashboardScreen\" that " +
+      "isn't in this list is wrong even if it seems like a reasonable guess. If the description " +
+      "implies such a link, either omit that button entirely or render it with no <event> at all.";
+  }
+  const lines = siblingScreens.map((s) => `- id="${s.id}" name="${s.name}"${s.description ? ` — ${s.description}` : ""}`).join("\n");
+  return `OTHER SCREENS IN THIS PROJECT (valid <navigate screen="..."/> targets — use the id, exactly as ` +
+    `written above, never a different spelling or an id from your own imagination):\n${lines}`;
+}
+
+export const UI_XML_PROMPT = (entities: string, description: string, siblingScreens: SiblingScreenInfo[] = []) => `You are a UI/UX architect. Given a screen description and database schema, generate a complete XML UI definition.
 
 Database Schema:
 <database_schema>
 ${entities}
 </database_schema>
+
+${siblingScreensSection(siblingScreens)}
 
 Screen Description:
 <screen_description>
@@ -341,11 +376,13 @@ ${description}
 Design the screen using REAL queries against the REAL tables/columns in the schema above — never
 invent a table or column. Think through what happens step by step before writing XML: what does the
 screen show first, what user actions exist, and for each action which query (or queries) it runs and
-what should happen with the result (populate a field, populate a grid, show a message, stop). A
-screen that only reads data needs read-only (MATCH ... RETURN) queries and no insert/update/delete button. A screen that
-creates or edits records needs a save button whose event validates first (a lookup/uniqueness-check
-query) and only then runs the real CREATE/SET query. A login/signup screen is built the same way
-— see the note on this at the end of the vocabulary rules below, there is no dedicated element for it.
+what should happen with the result (populate a field, populate a grid, show a message, navigate,
+stop). A screen that only reads data needs read-only (MATCH ... RETURN) queries and no insert/
+update/delete button. A screen that creates or edits records needs a save button whose event
+validates first (a lookup/uniqueness-check query) and only then runs the real CREATE/SET query. A
+login/signup screen is built the same way — see the note on this at the end of the vocabulary rules
+below, there is no dedicated element for it. Also wire up <navigate> for any button/link that should
+send the user to one of the OTHER SCREENS listed above — see rule 6.
 
 Generate a well-structured XML that defines the entire screen. Include:
 
@@ -391,8 +428,10 @@ export function lintScreenXml(xml: string): string {
   });
 }
 
-export async function generateUiXml(description: string, entities: any, usageSink?: UsageEntry[], signal?: AbortSignal): Promise<string> {
-  const prompt = UI_XML_PROMPT(entities ? JSON.stringify(entities, null, 2) : "No schema defined yet", description);
+export async function generateUiXml(
+  description: string, entities: any, usageSink?: UsageEntry[], signal?: AbortSignal, siblingScreens: SiblingScreenInfo[] = []
+): Promise<string> {
+  const prompt = UI_XML_PROMPT(entities ? JSON.stringify(entities, null, 2) : "No schema defined yet", description, siblingScreens);
   const xml = await callOpenAI(
     [
       { role: "system", content: "You are a UI/UX architect. Return ONLY valid XML." },
@@ -719,7 +758,7 @@ Rules:
 - Each "description" must stand alone and preserve every relevant detail from the original text for that screen — do not drop information, just split it correctly
 - Return ONLY the JSON, no explanations or markdown fences`;
 
-const REFINE_UI_XML_PROMPT = (xml: string, instruction: string) => `You are a UI/UX architect. You are given an existing XML UI definition for a screen and a
+const REFINE_UI_XML_PROMPT = (xml: string, instruction: string, siblingScreens: SiblingScreenInfo[]) => `You are a UI/UX architect. You are given an existing XML UI definition for a screen and a
 follow-up change request from the user. Apply ONLY the requested change — keep every other element, attribute,
 and sample row exactly as it already is unless the change necessarily affects it.
 
@@ -728,6 +767,8 @@ originally generated under. Express the requested change using these constructs;
 element or attribute name, even if the request seems to call for one:
 
 ${UI_XML_VOCABULARY_RULES}
+
+${siblingScreensSection(siblingScreens)}
 
 Existing XML UI Definition:
 <existing_xml>
@@ -839,8 +880,8 @@ export async function detectScreenIntents(description: string, usageSink?: Usage
   return data;
 }
 
-export async function refineUiXml(xml: string, instruction: string, usageSink?: UsageEntry[]): Promise<any> {
-  const prompt = REFINE_UI_XML_PROMPT(xml, instruction);
+export async function refineUiXml(xml: string, instruction: string, usageSink?: UsageEntry[], siblingScreens: SiblingScreenInfo[] = []): Promise<any> {
+  const prompt = REFINE_UI_XML_PROMPT(xml, instruction, siblingScreens);
   const text = await callOpenAI(
     [
       { role: "system", content: "You are a UI/UX architect. Return ONLY valid JSON." },

@@ -169,17 +169,45 @@ export type EventAction =
   | { type: "map"; target: string; value: unknown }
   | { type: "set"; target: string; value: unknown }
   | { type: "message"; messageType: string; value: string }
+  | { type: "navigate"; screenId: string; screenName: string }
   | { type: "stop" };
+
+// A project's OTHER screens (never includes the one currently running) — a <navigate screen="..">
+// is resolved against this, real id first, then a case-insensitive name match, so navigation only
+// ever lands on a screen that genuinely exists right now.
+export type SiblingScreen = { id: string; name: string };
+
+function resolveSibling(ref: string, siblingScreens: SiblingScreen[]): SiblingScreen | null {
+  const trimmed = (ref || "").trim();
+  if (!trimmed) return null;
+  return siblingScreens.find((s) => s.id === trimmed) || siblingScreens.find((s) => s.name.trim().toLowerCase() === trimmed.toLowerCase()) || null;
+}
+
+// A reference to a screen that no longer exists (renamed away/deleted since this XML was
+// generated, or the model referencing something that was never real) degrades to a visible error
+// message instead of navigating nowhere or throwing — same "fail soft" spirit as
+// evaluateCondition/resolveTemplate's handling of a malformed condition/template.
+function runNavigate(el: XmlElement, siblingScreens: SiblingScreen[], actions: EventAction[]): void {
+  const ref = el.getAttribute("screen") || "";
+  const target = resolveSibling(ref, siblingScreens);
+  if (target) {
+    actions.push({ type: "navigate", screenId: target.id, screenName: target.name });
+  } else {
+    console.warn(`run_event: <navigate> referenced unknown screen ${JSON.stringify(ref)}`);
+    actions.push({ type: "message", messageType: "error", value: "That screen isn't available right now." });
+  }
+}
 
 // Executes one screen element's <events><event> chain for real, inside the CALLER's transaction
 // (the caller commits/rolls back — same pattern as syncSchema/replaceAllRows). Walks its ordered
-// <execute>/<when> steps and returns a flat, already-decided list of UI actions (map/set/message/
-// stop) for the UI runtime to apply mechanically. Throws on a genuine failure (malformed XML,
-// unknown element, a query that fails to execute) so the caller rolls back instead of silently
-// committing a partially-applied chain.
+// <execute>/<navigate> steps and returns a flat, already-decided list of UI actions (map/set/
+// message/navigate/stop) for the UI runtime to apply mechanically. Throws on a genuine failure
+// (malformed XML, unknown element, a query that fails to execute) so the caller rolls back instead
+// of silently committing a partially-applied chain.
 export async function runEvent(
   exec: QueryExecutor, entities: Entities, screenXml: string,
-  elementId: string, eventType: string, fieldValues: Record<string, unknown>
+  elementId: string, eventType: string, fieldValues: Record<string, unknown>,
+  siblingScreens: SiblingScreen[] = []
 ): Promise<EventAction[]> {
   let root: XmlElement;
   try {
@@ -204,20 +232,24 @@ export async function runEvent(
   const actions: EventAction[] = [];
   const values = { ...fieldValues }; // a <set> can feed later steps in the same chain
 
-  const executeEls = childElements(event, "execute");
-  for (const executeEl of executeEls) {
-    const stopped = await runExecute(exec, queries, fieldPersistence, entities, executeEl, values, actions);
-    if (stopped) break; // a <stop/> anywhere inside cancels any later top-level <execute> too
+  for (const step of childElements(event)) {
+    if (step.tagName === "execute") {
+      const stopped = await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, step, values, actions);
+      if (stopped) break; // a <stop/> or <navigate/> anywhere inside cancels any later top-level step
+    } else if (step.tagName === "navigate") {
+      runNavigate(step, siblingScreens, actions);
+      break; // navigating away ends the chain, same as <stop>
+    }
   }
   return actions;
 }
 
 // Runs ONE <execute>'s query and processes its map/when children in order. Returns true if a
-// <stop/> fired anywhere inside it (including inside a nested <when><execute>), so the caller
-// knows to stop walking any later sibling.
+// <stop/> or <navigate/> fired anywhere inside it (including inside a nested <when><execute>), so
+// the caller knows to stop walking any later sibling.
 async function runExecute(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
-  entities: Entities, executeEl: XmlElement, fieldValues: Record<string, unknown>, actions: EventAction[]
+  entities: Entities, siblingScreens: SiblingScreen[], executeEl: XmlElement, fieldValues: Record<string, unknown>, actions: EventAction[]
 ): Promise<boolean> {
   const queryId = executeEl.getAttribute("query");
   const query = queryId ? queries.get(queryId) : undefined;
@@ -244,7 +276,7 @@ async function runExecute(
       actions.push({ type: "map", target, value });
     } else if (child.tagName === "when") {
       if (!evaluateCondition(child.getAttribute("condition") || "", result, fieldValues)) continue;
-      if (await runWhenBody(exec, queries, fieldPersistence, entities, child, result, fieldValues, actions)) {
+      if (await runWhenBody(exec, queries, fieldPersistence, entities, siblingScreens, child, result, fieldValues, actions)) {
         return true;
       }
     }
@@ -252,13 +284,14 @@ async function runExecute(
   return false;
 }
 
-// Processes a matched <when>'s children in order: <set>/<message>/<stop>, or a nested <execute>
-// — a real generation reliably nests a second <execute> inside a <when> for "only do the next
-// step if this one found something" chains, so this supports it natively rather than forcing
-// every conditional chain to be flattened into top-level siblings. Returns true if a <stop/> fired.
+// Processes a matched <when>'s children in order: <set>/<message>/<navigate>/<stop>, or a nested
+// <execute> — a real generation reliably nests a second <execute> inside a <when> for "only do the
+// next step if this one found something" chains, so this supports it natively rather than forcing
+// every conditional chain to be flattened into top-level siblings. Returns true if a <stop/> or
+// <navigate/> fired.
 async function runWhenBody(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
-  entities: Entities, whenEl: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[]
+  entities: Entities, siblingScreens: SiblingScreen[], whenEl: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[]
 ): Promise<boolean> {
   const children = childElements(whenEl);
   for (const inner of children) {
@@ -273,11 +306,14 @@ async function runWhenBody(
         messageType: inner.getAttribute("type") || "info",
         value: resolveTemplate(inner.getAttribute("value") || "", result, fieldValues),
       });
+    } else if (inner.tagName === "navigate") {
+      runNavigate(inner, siblingScreens, actions);
+      return true;
     } else if (inner.tagName === "stop") {
       actions.push({ type: "stop" });
       return true;
     } else if (inner.tagName === "execute") {
-      if (await runExecute(exec, queries, fieldPersistence, entities, inner, fieldValues, actions)) return true;
+      if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, inner, fieldValues, actions)) return true;
     }
   }
   return false;

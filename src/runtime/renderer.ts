@@ -133,8 +133,13 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     root.querySelectorAll("[data-button]").forEach(function (b) { b.disabled = busy; });
   }
 
+  function navigateUrl(screenId) {
+    return API_BASE + "/runtime/projects/" + PROJECT_ID + "/screens/" + screenId + "?token=" + encodeURIComponent(TOKEN);
+  }
+
   function applyActions(actions) {
     var messages = [];
+    var navigateTo = null;
     (actions || []).forEach(function (a) {
       if ((a.type === "map" || a.type === "set") && typeof a.target === "string" && a.target.indexOf("field:") === 0) {
         var el = fieldEl(a.target.slice(6));
@@ -143,10 +148,17 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
         renderGridRows(a.target.slice(5), a.value);
       } else if (a.type === "message") {
         messages.push(a);
+      } else if (a.type === "navigate") {
+        navigateTo = a.screenId;
       }
       // "stop" carries no client-side meaning — it already shaped which actions the server sent.
     });
     showMessages(messages);
+    // Applied last, after every other action in this batch (a field/grid update right before
+    // navigating away should still be visible for the instant before the page unloads) — a real
+    // page navigation (the rendered screen IS the whole surface, no shell to swap in place), so
+    // this works the same whether the page is standalone or embedded in an iframe.
+    if (navigateTo) window.location.href = navigateUrl(navigateTo);
   }
 
   function renderGridRows(gridId, rows) {
