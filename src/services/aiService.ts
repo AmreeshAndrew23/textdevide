@@ -271,7 +271,7 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
 6. <events> — a SINGLE top-level <events> block, a sibling of <ui> (not nested inside it, and not
    nested inside any <field>/<button>), listing every event on the whole screen:
    <events>
-     <event type="change|click" element="fieldOrButtonId">
+     <event type="change|click|load" element="fieldOrButtonId">
        <execute query="queryId">
          <map result="columnName" target="field:fieldId"/>   -- one row's column -> a field
          <map result="rows" target="grid:gridId"/>           -- the whole result set -> a grid
@@ -297,7 +297,7 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
    - element="..." is REQUIRED on every <event> and MUST exactly match the id of a real <field> or
      <button> declared in <ui> above — this is how an event is wired to what triggers it, since
      <event> never lives inside the element itself. type="change" pairs with a <field>'s id, "click"
-     with a <button>'s id.
+     with a <button>'s id, and "load" with the <screen>'s own id attribute (the one exception).
    - <navigate screen="idOrName"/> — jumps to another screen in this project (a real page
      navigation, not a query). Valid wherever <execute>/<stop> are valid: as a top-level step
      directly under <event> (no query needed at all — e.g. a plain "Back to Login" link), or nested
@@ -317,6 +317,34 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
    - A save/insert/update button's event is typically: a validation query first (e.g. "does this
      deptid exist?"), a <when> that <message>s an error and <stop/>s if it's invalid, then the real
      insert/update query.
+   - <event type="load" element="<the screen's own id>"> runs ONCE, automatically, when the screen
+     opens — use it whenever the screen shows a <grid> of saved records, so the grid lists what is
+     already in the database (its <execute> runs the list query and <map result="rows"
+     target="grid:gridId"/>). Without it the grid stays empty until the user does something.
+   - EVERY screen that saves data must also work for EDITING what was saved, and must show the result
+     of a save: after the insert/update query, <execute> the list query again and <map result="rows"
+     target="grid:gridId"/> so the grid immediately shows the change, and end with a <message
+     type="success" value="Saved."/>. Clicking a grid row already copies that row into the form
+     fields with the same persistenceMapping (the runtime does this — do not model it), so the Save
+     button must handle BOTH cases with the key field: run a count query on the key ("does a row with
+     this key exist?"); <when condition="result.count == 0"> runs the CREATE query, and <when
+     condition="result.count > 0"> runs an UPDATE query (MATCH ... SET ...) — never fail with
+     "already exists" for a key the user is deliberately editing. Do NOT add a separate uniqueness
+     check on any non-key column (email, name, ...) that rejects the save — it would block editing
+     that same row. A delete button (only if the description calls for one) runs MATCH ... DELETE
+     keyed on the key field, then reloads the grid. Put a column's persistenceMapping on every
+     <column> whose value comes from a field. The standard Save event, which you should follow:
+       <event type="click" element="saveButton">
+         <execute query="countByKey">                       -- MATCH ... WHERE key = $key RETURN count(x) AS count
+           <when condition="result.count == 0"><execute query="createRow"/></when>
+           <when condition="result.count > 0"><execute query="updateRow"/></when>
+         </execute>
+         <execute query="listRows"><map result="rows" target="grid:gridId"/></execute>
+         <message type="success" value="Saved."/>
+       </event>
+       <event type="load" element="theScreenId">
+         <execute query="listRows"><map result="rows" target="grid:gridId"/></execute>
+       </event>
 
 7. <dataBindings> — <entity name="EntityName" operations="SELECT, INSERT, UPDATE, DELETE"/> for
    every real table this screen's queries touch (documentation only — actual permissions come from

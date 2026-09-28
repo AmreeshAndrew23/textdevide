@@ -334,9 +334,83 @@ describe("renderer: per-project theme", () => {
     expect(render(null)).toContain(`--clr-primary: ${THEMES.indigo.primary};`);
     expect(render("not-a-real-theme")).toContain(`--clr-primary: ${THEMES.indigo.primary};`);
   });
-  it("every theme still renders the same layout/markup — only colors change", () => {
-    const indigo = render("indigo").replace(/--clr-[a-z-]+: #[0-9a-f]+;/gi, "");
-    const emerald = render("emerald").replace(/--clr-[a-z-]+: #[0-9a-f]+;/gi, "");
-    expect(indigo).toBe(emerald);
+  const bodyTag = (html: string) => /<body [^>]*>/.exec(html)![0];
+
+  it("each of the six presets is a genuinely different layout, not just a recolor", () => {
+    const signatures = new Set(Object.keys(THEMES).map((k) => bodyTag(render(k))));
+    expect(signatures.size).toBe(6);
+    const colors = new Set(Object.values(THEMES).map((t) => t.primary));
+    expect(colors.size).toBe(6);
+  });
+  it("carries each preset's distinguishing structural markers", () => {
+    expect(bodyTag(render("rose"))).toContain('data-nav="top"'); // Editorial: top nav, not a sidebar
+    expect(bodyTag(render("indigo"))).toContain('data-nav="left"');
+    expect(bodyTag(render("slate"))).toContain('data-fields="inline"'); // Enterprise: label-left forms
+    expect(bodyTag(render("slate"))).toContain('data-toolbar="sticky"');
+    expect(bodyTag(render("amber"))).toContain('data-header="light"'); // Warm: light header
+    expect(bodyTag(render("emerald"))).toContain('data-card="border"'); // Clinical: borders, no shadows
+    expect(bodyTag(render("ocean"))).toContain('data-mono="true"'); // Precision: monospace numerics
+    expect(bodyTag(render("ocean"))).toContain('data-density="compact"');
+    expect(render("amber")).toContain("--radius: 16px;");
+    expect(render("slate")).toContain("--radius: 4px;");
+  });
+  it("the page body markup and client script are identical across presets — only the <body> attributes and CSS vary", () => {
+    const fromHeader = (html: string) => html.slice(html.indexOf('<header class="app-topbar">'));
+    const base = fromHeader(render("indigo"));
+    for (const key of Object.keys(THEMES)) expect(fromHeader(render(key))).toBe(base);
+  });
+  it("every preset still renders every hook the engine/client script depend on", () => {
+    for (const key of Object.keys(THEMES)) {
+      const html = render(key);
+      for (const hook of ["data-field=", "data-grid=", "data-button", 'id="screen-messages"', "GRID_COLUMNS", 'class="app-nav"', "run-event"]) {
+        expect(html, `${key} missing ${hook}`).toContain(hook);
+      }
+    }
+  });
+});
+
+describe("engine: unconditional nested steps and save feedback", () => {
+  const xml = `<screen id="s" title="S">
+  <queries>
+    <query id="ins"><statement>CREATE (s:Student {studentid: $id})</statement><parameters><parameter name="id" source="field:idField"/></parameters></query>
+    <query id="list"><statement>MATCH (s:Student) RETURN s.studentid AS studentid</statement></query>
+    <query id="del"><statement>MATCH (s:Student) WHERE s.studentid = $id DELETE s</statement><parameters><parameter name="id" source="field:idField"/></parameters></query>
+  </queries>
+  <ui><field id="idField" label="Id" type="text"/><button id="save" label="Save"/><button id="remove" label="Delete"/><grid id="g" label="G"><column id="c" header="Id" binding="studentid" persistenceMapping="Student.studentid"/></grid></ui>
+  <events>
+    <event type="click" element="save">
+      <execute query="ins"><execute query="list"><map result="rows" target="grid:g"/></execute></execute>
+    </event>
+    <event type="click" element="remove"><execute query="del"/></event>
+    <event type="load" element="s"><execute query="list"><map result="rows" target="grid:g"/></execute></event>
+  </events>
+</screen>`;
+  const exec: QueryExecutor = async (statement) =>
+    statement.startsWith("MATCH (s:Student) RETURN") ? { rows: [{ studentid: 1 }], count: 1 } : { rows: [], count: 0 };
+  const entities = { tables: [{ name: "Student", columns: [{ name: "studentid", type: "INT" }] }] };
+
+  it("runs an <execute> nested directly inside another <execute> (insert, then reload the grid)", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { idField: "1" });
+    expect(actions).toContainEqual({ type: "map", target: "grid:g", value: [{ studentid: 1 }] });
+  });
+  it("confirms a save that wrote data but declared no message", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { idField: "1" });
+    expect(actions).toContainEqual({ type: "message", messageType: "success", value: "Saved successfully." });
+  });
+  it("confirms a delete", async () => {
+    const actions = await runEvent(exec, entities, xml, "remove", "click", { idField: "1" });
+    expect(actions).toContainEqual({ type: "message", messageType: "success", value: "Deleted successfully." });
+  });
+  it("adds no confirmation for a read-only event", async () => {
+    const actions = await runEvent(exec, entities, xml, "s", "load", {});
+    expect(actions).toEqual([{ type: "map", target: "grid:g", value: [{ studentid: 1 }] }]);
+  });
+  it("model exposes load events and grid column persistence mappings; page fires them on open", () => {
+    const model = parseScreenModel(xml);
+    expect(model.loadElements).toEqual(["s"]);
+    expect(model.grids[0].columns[0].persistenceMapping).toBe("Student.studentid");
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(html).toContain('var LOAD_ELEMENTS = ["s"];');
+    expect(html).toContain('"g":["Student.studentid"]');
   });
 });

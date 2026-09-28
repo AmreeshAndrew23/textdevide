@@ -31,7 +31,7 @@ export type FieldItem = {
   eventTypes: string[];
 };
 
-export type GridColumn = { id: string; header: string; binding: string };
+export type GridColumn = { id: string; header: string; binding: string; persistenceMapping: string | null };
 export type GridItem = { kind: "grid"; id: string; label: string; emptyMessage: string; columns: GridColumn[]; eventTypes: string[] };
 export type ButtonItem = { kind: "button"; id: string; label: string; style: string; eventTypes: string[] };
 export type FieldsetItem = { kind: "fieldset"; legend: string; items: UiItem[] };
@@ -45,6 +45,9 @@ export type ScreenModel = {
   fields: FieldItem[];
   grids: GridItem[];
   buttons: ButtonItem[];
+  // Element ids of <event type="load"> handlers — fired once, automatically, when the page opens
+  // (e.g. to fill a grid with the rows that already exist).
+  loadElements: string[];
 };
 
 function attr(el: XmlElement, name: string, fallback = ""): string {
@@ -102,6 +105,7 @@ function parseGrid(el: XmlElement, eventsByElement: Map<string, string[]>): Grid
     id: attr(c, "id"),
     header: attr(c, "header", attr(c, "id")),
     binding: attr(c, "binding", attr(c, "id")),
+    persistenceMapping: c.getAttribute("persistenceMapping"),
   }));
   return { kind: "grid", id, label: attr(el, "label", id), emptyMessage: attr(el, "emptyMessage", "No records."), columns, eventTypes: eventsByElement.get(id) || [] };
 }
@@ -147,11 +151,13 @@ export function parseScreenModel(xml: string): ScreenModel {
   if (root.tagName !== "screen") throw new ScreenParseError('Root element must be <screen>');
 
   const eventsByElement = new Map<string, string[]>();
+  const loadElements: string[] = [];
   const eventsEl = firstChild(root, "events");
   for (const ev of eventsEl ? childElements(eventsEl, "event") : []) {
     const elId = attr(ev, "element");
     const type = attr(ev, "type");
     if (!elId || !type) continue;
+    if (type === "load" && !loadElements.includes(elId)) loadElements.push(elId);
     const list = eventsByElement.get(elId) || [];
     list.push(type);
     eventsByElement.set(elId, list);
@@ -170,5 +176,6 @@ export function parseScreenModel(xml: string): ScreenModel {
     fields,
     grids,
     buttons,
+    loadElements,
   };
 }

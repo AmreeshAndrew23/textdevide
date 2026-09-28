@@ -111,7 +111,11 @@ export default async function previewDbRoutes(app: FastifyInstance) {
       return reply.send({ actions });
     } catch (e) {
       req.log.warn(`run_event failed for project ${project.id} screen ${req.params.screenId}: ${e}`);
-      return reply.send({ actions: [{ type: "message", messageType: "error", value: "Something went wrong — please try again." }] });
+      const code = (e as { code?: string }).code || "";
+      const message = code.includes("ConstraintValidationFailed")
+        ? "A record with that key already exists."
+        : "Something went wrong — please try again.";
+      return reply.send({ actions: [{ type: "message", messageType: "error", value: message }] });
     }
   });
 }

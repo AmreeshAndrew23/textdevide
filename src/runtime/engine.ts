@@ -232,14 +232,30 @@ export async function runEvent(
   const actions: EventAction[] = [];
   const values = { ...fieldValues }; // a <set> can feed later steps in the same chain
 
+  // Tracks whether a real write/delete actually ran, so a save that succeeds silently (the XML
+  // wrote no <message>) still tells the user something happened instead of looking like a dead button.
+  const write = { kind: null as "save" | "delete" | null };
+  const trackedExec: QueryExecutor = async (statement, params) => {
+    if (/\bDELETE\b/i.test(statement)) write.kind = "delete";
+    else if (/\b(CREATE|MERGE|SET|REMOVE)\b/i.test(statement) && write.kind !== "delete") write.kind = "save";
+    return exec(statement, params);
+  };
+
   for (const step of childElements(event)) {
     if (step.tagName === "execute") {
-      const stopped = await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, step, values, actions);
+      const stopped = await runExecute(trackedExec, queries, fieldPersistence, entities, siblingScreens, step, values, actions);
       if (stopped) break; // a <stop/> or <navigate/> anywhere inside cancels any later top-level step
     } else if (step.tagName === "navigate") {
       runNavigate(step, siblingScreens, actions);
       break; // navigating away ends the chain, same as <stop>
+    } else if (step.tagName === "message" || step.tagName === "set" || step.tagName === "stop") {
+      // e.g. a closing <message type="success" value="Saved."/> written after the executes. It has
+      // no query result of its own, so ${result.*} placeholders resolve to empty.
+      if (await runStep(trackedExec, queries, fieldPersistence, entities, siblingScreens, step, { rows: [], count: 0 }, values, actions)) break;
     }
+  }
+  if (write.kind && !actions.some((a) => a.type === "message" || a.type === "navigate")) {
+    actions.push({ type: "message", messageType: "success", value: write.kind === "delete" ? "Deleted successfully." : "Saved successfully." });
   }
   return actions;
 }
@@ -279,6 +295,12 @@ async function runExecute(
       if (await runWhenBody(exec, queries, fieldPersistence, entities, siblingScreens, child, result, fieldValues, actions)) {
         return true;
       }
+    } else if (child.tagName === "execute" || child.tagName === "set" || child.tagName === "message" || child.tagName === "navigate" || child.tagName === "stop") {
+      // The model routinely writes "insert, THEN reload the list" as a second <execute> nested
+      // directly inside the first (no <when> around it). Silently skipping it meant a successful
+      // save never refreshed the grid or confirmed anything — so an unconditional step runs the
+      // same way a step inside a matched <when> does.
+      if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, child, result, fieldValues, actions)) return true;
     }
   }
   return false;
@@ -293,28 +315,37 @@ async function runWhenBody(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
   entities: Entities, siblingScreens: SiblingScreen[], whenEl: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[]
 ): Promise<boolean> {
-  const children = childElements(whenEl);
-  for (const inner of children) {
-    if (inner.tagName === "set") {
-      const target = inner.getAttribute("target") || "";
-      const value = resolveTemplate(inner.getAttribute("value") || "", result, fieldValues);
-      if (target.startsWith("field:")) fieldValues[target.slice("field:".length)] = value;
-      actions.push({ type: "set", target, value });
-    } else if (inner.tagName === "message") {
-      actions.push({
-        type: "message",
-        messageType: inner.getAttribute("type") || "info",
-        value: resolveTemplate(inner.getAttribute("value") || "", result, fieldValues),
-      });
-    } else if (inner.tagName === "navigate") {
-      runNavigate(inner, siblingScreens, actions);
-      return true;
-    } else if (inner.tagName === "stop") {
-      actions.push({ type: "stop" });
-      return true;
-    } else if (inner.tagName === "execute") {
-      if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, inner, fieldValues, actions)) return true;
-    }
+  for (const inner of childElements(whenEl)) {
+    if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, inner, result, fieldValues, actions)) return true;
+  }
+  return false;
+}
+
+// One <set>/<message>/<navigate>/<stop>/<execute> step, shared by a matched <when> and an
+// unconditional step directly inside an <execute>. Returns true if a <stop/> or <navigate/> fired.
+async function runStep(
+  exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
+  entities: Entities, siblingScreens: SiblingScreen[], inner: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[]
+): Promise<boolean> {
+  if (inner.tagName === "set") {
+    const target = inner.getAttribute("target") || "";
+    const value = resolveTemplate(inner.getAttribute("value") || "", result, fieldValues);
+    if (target.startsWith("field:")) fieldValues[target.slice("field:".length)] = value;
+    actions.push({ type: "set", target, value });
+  } else if (inner.tagName === "message") {
+    actions.push({
+      type: "message",
+      messageType: inner.getAttribute("type") || "info",
+      value: resolveTemplate(inner.getAttribute("value") || "", result, fieldValues),
+    });
+  } else if (inner.tagName === "navigate") {
+    runNavigate(inner, siblingScreens, actions);
+    return true;
+  } else if (inner.tagName === "stop") {
+    actions.push({ type: "stop" });
+    return true;
+  } else if (inner.tagName === "execute") {
+    if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, inner, fieldValues, actions)) return true;
   }
   return false;
 }

@@ -57,7 +57,7 @@ function renderField(f: FieldItem): string {
 
 function renderGrid(g: GridItem): string {
   const headers = g.columns.map((c) => `<th>${esc(c.header)}</th>`).join("");
-  return `<div class="card grid-wrap" data-grid="${escAttr(g.id)}">
+  return `<div class="card grid-wrap" data-grid="${escAttr(g.id)}" data-empty="${escAttr(g.emptyMessage)}">
   <div class="card-header"><h3>${esc(g.label)}</h3></div>
   <div class="table-scroll">
   <table>
@@ -130,7 +130,18 @@ function gridColumnsJson(model: ScreenModel): string {
   return JSON.stringify(map);
 }
 
+// Which "table.column" each grid column / form field is bound to — lets clicking a grid row fill
+// the form fields that map to the same column (edit-in-place), with no AI involvement.
+function mappingsJson(model: ScreenModel): { grid: string; field: string } {
+  const grid: Record<string, (string | null)[]> = {};
+  for (const g of model.grids) grid[g.id] = g.columns.map((c) => c.persistenceMapping);
+  const field: Record<string, string> = {};
+  for (const f of model.fields) if (f.persistenceMapping) field[f.id] = f.persistenceMapping;
+  return { grid: JSON.stringify(grid), field: JSON.stringify(field) };
+}
+
 function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: number; screenId: string; token: string }): string {
+  const mappings = mappingsJson(model);
   return `
 <script>
 (function () {
@@ -139,6 +150,10 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
   var SCREEN_ID = ${JSON.stringify(opts.screenId)};
   var TOKEN = ${JSON.stringify(opts.token)};
   var GRID_COLUMNS = ${gridColumnsJson(model)};
+  var GRID_MAPPINGS = ${mappings.grid};
+  var FIELD_MAPPINGS = ${mappings.field};
+  var LOAD_ELEMENTS = ${JSON.stringify(model.loadElements)};
+  var GRID_ROWS = {};
   var root = document;
 
   function fieldEl(id) { return root.querySelector('[data-field="' + id + '"] input, [data-field="' + id + '"] textarea'); }
@@ -200,18 +215,45 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     if (!wrap) return;
     var tbody = wrap.querySelector("tbody");
     var bindings = GRID_COLUMNS[gridId] || [];
+    GRID_ROWS[gridId] = rows;
     if (!rows.length) {
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="' + Math.max(bindings.length, 1) + '"></td></tr>';
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="' + Math.max(bindings.length, 1) + '">' + (wrap.getAttribute("data-empty") || "") + "</td></tr>";
       return;
     }
-    tbody.innerHTML = rows.map(function (row) {
-      return "<tr>" + bindings.map(function (b) {
+    tbody.innerHTML = rows.map(function (row, i) {
+      return '<tr data-row="' + i + '">' + bindings.map(function (b) {
         var v = row[b];
         var span = document.createElement("span"); span.textContent = v == null ? "" : String(v);
         return "<td>" + span.innerHTML + "</td>";
       }).join("") + "</tr>";
     }).join("");
   }
+
+  // Clicking a grid row copies its values into every form field bound to the same table.column
+  // (edit-in-place) — the matching is by persistenceMapping, so it works for any generated screen.
+  root.querySelectorAll("[data-grid]").forEach(function (wrap) {
+    wrap.addEventListener("click", function (e) {
+      var tr = e.target.closest && e.target.closest("tr[data-row]");
+      if (!tr) return;
+      var gridId = wrap.getAttribute("data-grid");
+      var row = (GRID_ROWS[gridId] || [])[Number(tr.getAttribute("data-row"))];
+      if (!row) return;
+      var bindings = GRID_COLUMNS[gridId] || [];
+      var mappings = GRID_MAPPINGS[gridId] || [];
+      bindings.forEach(function (binding, i) {
+        if (!mappings[i]) return;
+        Object.keys(FIELD_MAPPINGS).forEach(function (fieldId) {
+          if (FIELD_MAPPINGS[fieldId] !== mappings[i]) return;
+          var el = fieldEl(fieldId);
+          if (!el) return;
+          var v = row[binding];
+          if (el.type === "checkbox") el.checked = Boolean(v); else el.value = v == null ? "" : v;
+        });
+      });
+      wrap.querySelectorAll("tr.selected").forEach(function (r) { r.classList.remove("selected"); });
+      tr.classList.add("selected");
+    });
+  });
 
   function fireEvent(elementId, eventType, valuesOverride) {
     setBusy(true);
@@ -246,6 +288,12 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
   root.querySelectorAll("[data-click]").forEach(function (btn) {
     btn.addEventListener("click", function () { fireEvent(btn.id, "click"); });
   });
+
+  // <event type="load"> handlers run once when the page opens, one after another (each finishes
+  // before the next starts) — e.g. to fill a grid with the rows already saved.
+  LOAD_ELEMENTS.reduce(function (chain, id) {
+    return chain.then(function () { return fireEvent(id, "load"); });
+  }, Promise.resolve());
 })();
 </script>`;
 }
@@ -282,17 +330,39 @@ function renderNavItems(opts: ShellOpts): string {
 
 export type ThemeKey = keyof typeof THEMES;
 
-// A small curated set of named palettes — not free-form color picking, not AI-derived. Each just
-// supplies the accent colors; the layout/typography/spacing system (cards, nav, forms, focus
-// states) stays the one already built and is identical across every theme. "indigo" is the
-// original default and what an unset/unrecognized theme key falls back to.
+// A small curated set of named style presets — not free-form color picking, not AI-derived. Each
+// key pairs a color palette WITH a real structural layout (header style, nav placement, form field
+// layout, toolbar placement, card style, corner radius, density, numeric font) — not just a
+// recolor of one fixed skeleton. Every structural difference is expressed as CSS driven by
+// data-* attributes on <body> (see renderScreen) — the HTML shape itself never changes, so the
+// event engine/client script stay completely unaffected by which preset is picked. Keys are
+// unchanged from the original color-only version (already stored on real projects); "indigo"
+// remains the default and what an unset/unrecognized key falls back to.
 export const THEMES = {
-  indigo: { label: "Indigo", primary: "#4f46e5", primaryDark: "#3730a3", primaryLight: "#eef2ff", secondary: "#0891b2" },
-  emerald: { label: "Emerald", primary: "#059669", primaryDark: "#065f46", primaryLight: "#ecfdf5", secondary: "#7c3aed" },
-  slate: { label: "Slate", primary: "#334155", primaryDark: "#1e293b", primaryLight: "#f1f5f9", secondary: "#0891b2" },
-  rose: { label: "Rose", primary: "#e11d48", primaryDark: "#9f1239", primaryLight: "#fff1f2", secondary: "#0891b2" },
-  amber: { label: "Amber", primary: "#d97706", primaryDark: "#92400e", primaryLight: "#fffbeb", secondary: "#0369a1" },
-  ocean: { label: "Ocean", primary: "#0284c7", primaryDark: "#075985", primaryLight: "#f0f9ff", secondary: "#7c3aed" },
+  indigo: {
+    label: "Modern", primary: "#4f46e5", primaryDark: "#3730a3", primaryLight: "#eef2ff", secondary: "#0891b2",
+    header: "gradient", nav: "left", fields: "stacked", toolbar: "inline", card: "shadow", density: "comfortable", radius: "10px", mono: false,
+  },
+  slate: {
+    label: "Enterprise", primary: "#334155", primaryDark: "#1e293b", primaryLight: "#f1f5f9", secondary: "#0891b2",
+    header: "solid", nav: "left", fields: "inline", toolbar: "sticky", card: "shadow", density: "compact", radius: "4px", mono: false,
+  },
+  amber: {
+    label: "Warm", primary: "#d97706", primaryDark: "#92400e", primaryLight: "#fffbeb", secondary: "#0369a1",
+    header: "light", nav: "left", fields: "stacked", toolbar: "inline", card: "shadow", density: "comfortable", radius: "16px", mono: false,
+  },
+  emerald: {
+    label: "Clinical", primary: "#059669", primaryDark: "#065f46", primaryLight: "#ecfdf5", secondary: "#7c3aed",
+    header: "light", nav: "left", fields: "stacked", toolbar: "inline", card: "border", density: "comfortable", radius: "8px", mono: false,
+  },
+  ocean: {
+    label: "Precision", primary: "#0284c7", primaryDark: "#075985", primaryLight: "#f0f9ff", secondary: "#7c3aed",
+    header: "solid", nav: "left", fields: "stacked", toolbar: "inline", card: "shadow", density: "compact", radius: "6px", mono: true,
+  },
+  rose: {
+    label: "Editorial", primary: "#e11d48", primaryDark: "#9f1239", primaryLight: "#fff1f2", secondary: "#0891b2",
+    header: "solid", nav: "top", fields: "stacked", toolbar: "inline", card: "shadow", density: "comfortable", radius: "12px", mono: false,
+  },
 } as const;
 
 export function resolveTheme(key: string | null | undefined) {
@@ -320,7 +390,8 @@ export function renderScreen(
     --clr-border: #e2e8f0; --clr-bg: #f8fafc; --clr-surface: #ffffff;
     --clr-text: #1e293b; --clr-muted: #64748b;
     --font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    --radius: 10px;
+    --font-mono: 'SF Mono', 'Consolas', 'Menlo', monospace;
+    --radius: ${t.radius};
     --shadow-card: 0 1px 2px rgba(15,23,42,0.04), 0 4px 12px rgba(15,23,42,0.05);
   }
   * { box-sizing: border-box; }
@@ -385,6 +456,8 @@ export function renderScreen(
   th { color: var(--clr-muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; background: #fafbfc; }
   tbody tr:last-child td { border-bottom: none; }
   tbody tr:hover td { background: #fafbfc; }
+  tbody tr[data-row] { cursor: pointer; }
+  tbody tr.selected td { background: var(--clr-primary-light); }
   .empty-row td { color: var(--clr-muted); font-style: italic; text-align: center; padding: 28px 20px; }
 
   .toolbar { margin-bottom: 20px; }
@@ -405,9 +478,57 @@ export function renderScreen(
   .banner.notice { background: #f1f5f9; color: #334155; }
   .banner.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
   .banner.success { background: #f0fdf4; color: var(--clr-success); border: 1px solid #bbf7d0; }
+
+  /* ---- Structural preset variants, driven by data-* attributes on <body> ---- */
+  /* header: gradient (default, above) | solid | light */
+  body[data-header="solid"] .app-topbar { background: var(--clr-primary-dark); }
+  body[data-header="light"] .app-topbar {
+    background: var(--clr-surface); border-bottom: 1px solid var(--clr-border); box-shadow: none;
+  }
+  body[data-header="light"] .app-mark { background: var(--clr-primary); color: #fff; }
+  body[data-header="light"] .app-topbar-title { color: var(--clr-text); }
+
+  /* nav: left (default, above) | top — a genuinely different app shell, not just tighter spacing */
+  body[data-nav="top"] .app-body { flex-direction: column; }
+  body[data-nav="top"] .app-nav {
+    width: 100%; display: flex; flex-direction: row; align-items: center; gap: 4px;
+    border-right: none; border-bottom: 1px solid var(--clr-border);
+    padding: 10px 24px; overflow-x: auto; overflow-y: visible; white-space: nowrap;
+  }
+  body[data-nav="top"] .app-nav-item, body[data-nav="top"] .app-nav-empty { margin-bottom: 0; flex-shrink: 0; }
+
+  /* fields: stacked (default, above) | inline — label on the left, input on the right */
+  body[data-fields="inline"] .field-wrap { flex-direction: row; align-items: center; gap: 14px; }
+  body[data-fields="inline"] .field-wrap label { width: 150px; flex-shrink: 0; text-align: right; }
+  body[data-fields="inline"] .field-wrap input, body[data-fields="inline"] .field-wrap textarea { flex: 1; }
+  body[data-fields="inline"] .field-wrap .hint { margin-left: 164px; }
+  body[data-fields="inline"] .form-card { max-width: 640px; }
+
+  /* toolbar: inline (default, above) | sticky — pinned to the bottom of the content pane */
+  body[data-toolbar="sticky"] .toolbar {
+    position: sticky; bottom: 0; margin: 24px -36px -32px; padding: 14px 36px;
+    background: var(--clr-surface); border-top: 1px solid var(--clr-border);
+  }
+
+  /* card: shadow (default, above) | border — flat, high-contrast, no drop shadow */
+  body[data-card="border"] .card { box-shadow: none; border: 1.5px solid var(--clr-border); }
+  body[data-card="border"] th { background: transparent; border-bottom: 1.5px solid var(--clr-border); }
+
+  /* density: comfortable (default, above) | compact */
+  body[data-density="compact"] .app-content { padding: 22px 26px; }
+  body[data-density="compact"] .form-card { padding: 18px 20px; }
+  body[data-density="compact"] .field-wrap { margin-bottom: 12px; gap: 4px; }
+  body[data-density="compact"] .card-header { padding: 11px 16px; }
+  body[data-density="compact"] th, body[data-density="compact"] td { padding: 7px 16px; font-size: 12.5px; }
+  body[data-density="compact"] th { letter-spacing: 0.04em; }
+  body[data-density="compact"] h1 { font-size: 19px; margin-bottom: 2px; }
+  body[data-density="compact"] .subtitle { margin-bottom: 18px; }
+
+  /* mono: numeric-looking inputs get a monospace font for scannable data entry */
+  body[data-mono="true"] input[type=number] { font-family: var(--font-mono); }
 </style>
 </head>
-<body>
+<body data-header="${t.header}" data-nav="${t.nav}" data-fields="${t.fields}" data-toolbar="${t.toolbar}" data-card="${t.card}" data-density="${t.density}" data-mono="${t.mono}">
 <header class="app-topbar">
 ${renderTopBar(shellOpts)}
 </header>
