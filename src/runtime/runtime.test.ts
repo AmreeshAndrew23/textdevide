@@ -4,7 +4,7 @@ import { coerceValue } from "./values.js";
 import { evaluateCondition, resolveTemplate, runEvent, type QueryExecutor } from "./engine.js";
 import { lintScreenXml } from "../services/aiService.js";
 import { parseScreenModel } from "./screenModel.js";
-import { renderScreen, THEMES } from "./renderer.js";
+import { renderScreen, THEMES, findScreenForLabel } from "./renderer.js";
 
 const tables = new Set(["Department", "Course"]);
 const prep = (s: string, params: string[] = []) => prepareCypher(s, 7, tables, new Set(params));
@@ -412,5 +412,40 @@ describe("engine: unconditional nested steps and save feedback", () => {
     const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
     expect(html).toContain('var LOAD_ELEMENTS = ["s"];');
     expect(html).toContain('"g":["Student.studentid"]');
+  });
+});
+
+describe("renderer: buttons that name another screen become links", () => {
+  const screens = [
+    { id: "s_login", name: "Login Screen" },
+    { id: "s_dash", name: "Dashboard" },
+    { id: "s_reset", name: "Forgot Password" },
+    { id: "s_cur", name: "Current" },
+  ];
+  it("matches a label containing a screen's name, ignoring case, punctuation and 'Screen'/'Page' suffixes", () => {
+    expect(findScreenForLabel("Go to Dashboard", screens, "s_cur")?.id).toBe("s_dash");
+    expect(findScreenForLabel("Forgot Password?", screens, "s_cur")?.id).toBe("s_reset");
+    expect(findScreenForLabel("Back to Login", screens, "s_cur")?.id).toBe("s_login");
+  });
+  it("does not match partial words, unrelated labels, or the current screen itself", () => {
+    expect(findScreenForLabel("Dash", screens, "s_cur")).toBeNull();
+    expect(findScreenForLabel("Save", screens, "s_cur")).toBeNull();
+    expect(findScreenForLabel("Dashboard", screens, "s_dash")).toBeNull();
+  });
+  it("prefers the longest matching screen name", () => {
+    const list = [{ id: "a", name: "Student" }, { id: "b", name: "Student Registration" }];
+    expect(findScreenForLabel("Open Student Registration", list, "x")?.id).toBe("b");
+  });
+
+  const xml = `<screen id="cur" title="Cur"><ui>
+    <field id="f" label="F" type="text"/>
+    <button id="toDash" label="Go to Dashboard"/>
+    <button id="save" label="Save Dashboard"/>
+  </ui><events><event type="click" element="save"><execute query="q"/></event></events></screen>`;
+  it("wires only handler-less buttons; a button with its own click event is never hijacked", () => {
+    const html = renderScreen(parseScreenModel(xml), { apiBase: "http://x", projectId: 1, screenId: "cur", token: "t", screens });
+    expect(html).toMatch(/id="toDash" data-button data-nav-href="http:\/\/x\/runtime\/projects\/1\/screens\/s_dash\?token=t"/);
+    expect(html).toMatch(/id="save" data-button data-click class=/);
+    expect(html).not.toMatch(/id="save"[^>]*data-nav-href/);
   });
 });

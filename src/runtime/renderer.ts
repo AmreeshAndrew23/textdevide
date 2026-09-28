@@ -68,22 +68,49 @@ function renderGrid(g: GridItem): string {
 </div>`;
 }
 
-function renderButton(b: ButtonItem): string {
-  const cls = BUTTON_CLASS[b.style] || BUTTON_CLASS.primary;
-  const wired = b.eventTypes.includes("click") ? " data-click" : "";
-  return `<button type="button" id="${escAttr(b.id)}" data-button${wired} class="${cls}">${esc(b.label)}</button>`;
+// Given a button's label, the URL of the project screen it names (or null).
+type Linker = (label: string) => string | null;
+
+const NOISE_WORDS = /\b(screen|page|view)\b/g;
+const normalizeLabel = (s: string) => s.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim();
+const normalizeScreenName = (s: string) => normalizeLabel(s).replace(NOISE_WORDS, " ").replace(/\s+/g, " ").trim();
+
+// A button whose label names another screen ("Dashboard", "Go to Login", "Forgot Password?") is a
+// link to it, even when the generated XML wired no <navigate>. Whole-word phrase match, so
+// "Go to Dashboard" matches a screen named "Dashboard Screen" but "Dash" would not; the longest
+// matching screen name wins. The current screen is never a target.
+export function findScreenForLabel(label: string, screens: ShellScreen[], currentScreenId: string): ShellScreen | null {
+  const text = ` ${normalizeLabel(label)} `;
+  let best: { screen: ShellScreen; len: number } | null = null;
+  for (const s of screens) {
+    if (s.id === currentScreenId) continue;
+    const name = normalizeScreenName(s.name);
+    if (!name || !text.includes(` ${name} `)) continue;
+    if (!best || name.length > best.len) best = { screen: s, len: name.length };
+  }
+  return best ? best.screen : null;
 }
 
-function renderOne(it: UiItem): string {
+function renderButton(b: ButtonItem, linkFor: Linker): string {
+  const cls = BUTTON_CLASS[b.style] || BUTTON_CLASS.primary;
+  const wired = b.eventTypes.includes("click") ? " data-click" : "";
+  // Only a button with NO handler of its own becomes an automatic link — a Save/Login button that
+  // runs real queries must never be hijacked just because its label contains a screen's name.
+  const href = wired ? null : linkFor(b.label);
+  const link = href ? ` data-nav-href="${escAttr(href)}"` : "";
+  return `<button type="button" id="${escAttr(b.id)}" data-button${wired}${link} class="${cls}">${esc(b.label)}</button>`;
+}
+
+function renderOne(it: UiItem, linkFor: Linker): string {
   if (it.kind === "field") return renderField(it);
   if (it.kind === "grid") return renderGrid(it);
-  if (it.kind === "button") return renderButton(it);
-  return `<fieldset><legend>${esc(it.legend)}</legend>${renderInner(it.items)}</fieldset>`;
+  if (it.kind === "button") return renderButton(it, linkFor);
+  return `<fieldset><legend>${esc(it.legend)}</legend>${renderInner(it.items, linkFor)}</fieldset>`;
 }
 
 // Used inside a <fieldset> — no card grouping there, the fieldset border is already the grouping.
-function renderInner(items: UiItem[]): string {
-  return items.map(renderOne).join("\n");
+function renderInner(items: UiItem[], linkFor: Linker): string {
+  return items.map((it) => renderOne(it, linkFor)).join("\n");
 }
 
 // Top level only: consecutive fields/fieldsets group into one form card (a grid always starts its
@@ -92,23 +119,23 @@ function renderInner(items: UiItem[]): string {
 // common form pattern) — but if nothing is open (a button appears right after a grid, or as the
 // very first item, both real documented patterns), it renders as a plain toolbar instead of a
 // lonely card containing only buttons.
-function renderItems(items: UiItem[]): string {
+function renderItems(items: UiItem[], linkFor: Linker): string {
   const out: string[] = [];
   let group: UiItem[] = [];
   let toolbar: ButtonItem[] = [];
   const flushGroup = () => {
-    if (group.length) out.push(`<div class="card form-card">\n${group.map(renderOne).join("\n")}\n</div>`);
+    if (group.length) out.push(`<div class="card form-card">\n${group.map((g) => renderOne(g, linkFor)).join("\n")}\n</div>`);
     group = [];
   };
   const flushToolbar = () => {
-    if (toolbar.length) out.push(`<div class="toolbar">\n${toolbar.map(renderOne).join("\n")}\n</div>`);
+    if (toolbar.length) out.push(`<div class="toolbar">\n${toolbar.map((b) => renderOne(b, linkFor)).join("\n")}\n</div>`);
     toolbar = [];
   };
   for (const it of items) {
     if (it.kind === "grid") {
       flushGroup();
       flushToolbar();
-      out.push(renderOne(it));
+      out.push(renderOne(it, linkFor));
     } else if (it.kind === "button") {
       if (group.length) group.push(it); // attach to the still-open form card
       else toolbar.push(it); // nothing open — accumulate as a standalone toolbar row instead
@@ -287,6 +314,11 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
 
   root.querySelectorAll("[data-click]").forEach(function (btn) {
     btn.addEventListener("click", function () { fireEvent(btn.id, "click"); });
+  });
+
+  // A handler-less button whose label names another screen is a plain link to that screen.
+  root.querySelectorAll("[data-nav-href]").forEach(function (btn) {
+    btn.addEventListener("click", function () { window.location.href = btn.getAttribute("data-nav-href"); });
   });
 
   // <event type="load"> handlers run once when the page opens, one after another (each finishes
@@ -540,7 +572,10 @@ ${renderNavItems(shellOpts)}
   <h1>${esc(model.header.title || model.title)}</h1>
   ${model.header.subtitle ? `<div class="subtitle">${esc(model.header.subtitle)}</div>` : ""}
   <div id="screen-messages"></div>
-  ${renderItems(model.items)}
+  ${renderItems(model.items, (label) => {
+    const target = findScreenForLabel(label, shellOpts.screens, opts.screenId);
+    return target ? shellUrl(opts, target.id) : null;
+  })}
 </main>
 </div>
 ${clientScript(model, opts)}
