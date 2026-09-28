@@ -1,7 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { eq } from "drizzle-orm";
-import { db } from "../db/connection.js";
-import { projects } from "../db/schema.js";
+import type { ProjectRow } from "../db/schema.js";
 import { serializeProject } from "../serializers.js";
 import {
   ExtractRequestSchema, RefineRequestSchema, SchemaAssistantRequestSchema, WorkbenchInterpretRequestSchema,
@@ -15,12 +13,7 @@ import {
 import { logPrompt } from "../services/promptLog.js";
 import { HttpError } from "../services/authService.js";
 import { syncSchemaInBackground } from "../runtime/neo4jStore.js";
-
-async function getOwnedProject(projectId: number, userId: number) {
-  const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
-  if (!project || project.userId !== userId) throw new HttpError(404, "Project not found");
-  return project;
-}
+import { getOwnedProject, updateProject } from "../services/projectStore.js";
 
 function getScreens(project: { uiScreens: string | null }): any[] {
   if (!project.uiScreens) return [];
@@ -89,11 +82,7 @@ export default async function projectsAiRoutes(app: FastifyInstance) {
 
     const updateValues: Record<string, unknown> = { description: body.description, features: body.features, entities: JSON.stringify(entities), status: "draft" };
     if (entityCode) updateValues.validationCode = entityCode;
-    const [updated] = await db
-      .update(projects)
-      .set(updateValues)
-      .where(eq(projects.id, project.id))
-      .returning();
+    const updated = await updateProject(project.id, updateValues as Partial<ProjectRow>);
     syncSchemaInBackground(project.id, entities);
     return reply.send({ ...serializeProject(updated), unresolved });
   });
@@ -113,11 +102,7 @@ export default async function projectsAiRoutes(app: FastifyInstance) {
 
     await logPrompt(req.user.id, project.id, "refine_entities", body.instruction, JSON.stringify(entities), usageSink);
 
-    const [updated] = await db
-      .update(projects)
-      .set({ entities: JSON.stringify(entities), status: "draft" })
-      .where(eq(projects.id, project.id))
-      .returning();
+    const updated = await updateProject(project.id, { entities: JSON.stringify(entities), status: "draft" });
     syncSchemaInBackground(project.id, entities);
     return reply.send({ ...serializeProject(updated), unresolved });
   });
@@ -145,7 +130,7 @@ export default async function projectsAiRoutes(app: FastifyInstance) {
     tables[idx] = updatedTable;
     entities.tables = tables;
     const entitiesJson = JSON.stringify(entities);
-    await db.update(projects).set({ entities: entitiesJson }).where(eq(projects.id, project.id));
+    await updateProject(project.id, { entities: entitiesJson });
     syncSchemaInBackground(project.id, entities);
     await logPrompt(req.user.id, project.id, "schema_assistant", `[${req.params.tableName}] ${body.instruction}`, result.summary || "", usageSink);
 
@@ -196,23 +181,19 @@ export default async function projectsAiRoutes(app: FastifyInstance) {
     } catch (e) {
       throw new HttpError(500, `Validation generation failed: ${e instanceof Error ? e.message : e}`);
     }
-    const [updated] = await db
-      .update(projects)
-      .set({ validationRules: `${project.validationRules || ""}\n${body.rules}`, validationCode: code })
-      .where(eq(projects.id, project.id))
-      .returning();
+    const updated = await updateProject(project.id, { validationRules: `${project.validationRules || ""}\n${body.rules}`, validationCode: code });
     return reply.send(serializeProject(updated));
   });
 
   app.post("/projects/:id/finalize", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     const project = await getOwnedProject(Number(req.params.id), req.user.id);
-    const [updated] = await db.update(projects).set({ status: "finalized" }).where(eq(projects.id, project.id)).returning();
+    const updated = await updateProject(project.id, { status: "finalized" });
     return reply.send(serializeProject(updated));
   });
 
   app.post("/projects/:id/unlock", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     const project = await getOwnedProject(Number(req.params.id), req.user.id);
-    const [updated] = await db.update(projects).set({ status: "draft" }).where(eq(projects.id, project.id)).returning();
+    const updated = await updateProject(project.id, { status: "draft" });
     return reply.send(serializeProject(updated));
   });
 

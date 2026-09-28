@@ -1,9 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { randomUUID } from "crypto";
-import { eq } from "drizzle-orm";
-import { db } from "../db/connection.js";
-import { projects, type ProjectRow } from "../db/schema.js";
+import type { ProjectRow } from "../db/schema.js";
 import { serializeProject } from "../serializers.js";
+import { getOwnedProject, updateProject } from "../services/projectStore.js";
 import {
   ScreenCreateSchema, ScreenUpdateSchema, GenerateUIXmlRequestSchema, RefineUIRequestSchema,
   BatchGenerateScreensRequestSchema, BatchDeleteScreensRequestSchema,
@@ -38,14 +37,7 @@ function getScreens(project: ProjectRow): Screen[] {
 }
 
 async function saveScreens(projectId: number, screens: Screen[]): Promise<ProjectRow> {
-  const [updated] = await db.update(projects).set({ uiScreens: JSON.stringify(screens) }).where(eq(projects.id, projectId)).returning();
-  return updated;
-}
-
-async function getOwnedProject(projectId: number, userId: number): Promise<ProjectRow> {
-  const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
-  if (!project || project.userId !== userId) throw new HttpError(404, "Project not found");
-  return project;
+  return updateProject(projectId, { uiScreens: JSON.stringify(screens) });
 }
 
 // Every OTHER screen in the project, so generation/refinement can wire up a real <navigate> instead

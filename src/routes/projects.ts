@@ -9,6 +9,7 @@ import { generateSql } from "../services/sqlGen.js";
 import { HttpError } from "../services/authService.js";
 import { syncSchemaInBackground, dropProjectDataInBackground } from "../runtime/neo4jStore.js";
 import { THEMES } from "../runtime/renderer.js";
+import { getOwnedProject, hydrateListEntities, updateProject, deleteWorkspace } from "../services/projectStore.js";
 
 function safeJson(text: string | null | undefined): any {
   if (!text) return null;
@@ -17,17 +18,6 @@ function safeJson(text: string | null | undefined): any {
   } catch {
     return null;
   }
-}
-
-// Port of routes/projects.py's `_get_project` — 404s if missing or not owned by this user.
-async function getOwnedProject(projectId: number, userId: number): Promise<ProjectRow> {
-  const [project] = await db
-    .select()
-    .from(projects)
-    .where(and(eq(projects.id, projectId), eq(projects.userId, userId)))
-    .limit(1);
-  if (!project) throw new HttpError(404, "Project not found");
-  return project;
 }
 
 // snake_case ProjectUpdate body -> the Drizzle row's camelCase column names, only for keys
@@ -45,7 +35,7 @@ export default async function projectRoutes(app: FastifyInstance) {
 
   app.get("/projects", async (req: FastifyRequest, reply: FastifyReply) => {
     const rows = await db.select().from(projects).where(eq(projects.userId, req.user.id)).orderBy(desc(projects.updatedAt));
-    return reply.send(rows.map(serializeProjectListItem));
+    return reply.send((await hydrateListEntities(rows)).map(serializeProjectListItem));
   });
 
   app.post("/projects", async (req, reply) => {
@@ -82,7 +72,7 @@ export default async function projectRoutes(app: FastifyInstance) {
       const drizzleKey = UPDATE_KEY_MAP[snakeKey];
       if (drizzleKey) update[drizzleKey] = value;
     }
-    const [updated] = await db.update(projects).set(update).where(eq(projects.id, project.id)).returning();
+    const updated = await updateProject(project.id, update as Partial<ProjectRow>);
     if (typeof update.entities === "string") syncSchemaInBackground(project.id, safeJson(update.entities));
     return reply.send(serializeProject(updated));
   });
@@ -90,6 +80,9 @@ export default async function projectRoutes(app: FastifyInstance) {
   app.delete("/projects/:id", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     const project = await getOwnedProject(Number(req.params.id), req.user.id);
     dropProjectDataInBackground(project.id, safeJson(project.entities));
+    // Awaited, and before the Postgres delete: if Neo4j is unreachable the delete aborts (503)
+    // rather than leaving this project's workspace orphaned in Neo4j.
+    await deleteWorkspace(project.id);
     await db.delete(promptLogs).where(eq(promptLogs.projectId, project.id));
     await db.delete(projects).where(eq(projects.id, project.id));
     return reply.status(204).send();

@@ -21,6 +21,11 @@ function getDriver(): Driver {
   return driver;
 }
 
+// A plain (auto-commit) session, for schema statements and other work that can't share a transaction.
+export function neo4jSession() {
+  return getDriver().session({ database: NEO4J_DATABASE });
+}
+
 export async function closeNeo4j(): Promise<void> {
   await driver?.close();
   driver = null;

@@ -19,6 +19,10 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
+// LEGACY: entities, validation_rules/code, ui_description/code/xml/html/api, er_diagram and ui_screens
+// are no longer read or written — a project's work lives in Neo4j (see services/projectStore.ts).
+// The columns stay as a backup of what existed before the move; they are copied into Neo4j the first
+// time each old project is opened.
 export const projects = pgTable("projects", {
   id: serial("id").primaryKey(),
   name: varchar("name").notNull(),

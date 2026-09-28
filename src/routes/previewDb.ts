@@ -1,7 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { eq } from "drizzle-orm";
-import { db } from "../db/connection.js";
-import { projects, type ProjectRow } from "../db/schema.js";
+import type { ProjectRow } from "../db/schema.js";
+import { getOwnedProject } from "../services/projectStore.js";
 import { PreviewRowsRequestSchema, RunEventRequestSchema } from "../models/schemas.js";
 import { requireAuth } from "./authGuard.js";
 import { HttpError } from "../services/authService.js";
@@ -18,12 +17,6 @@ function getScreens(project: ProjectRow): Screen[] {
   } catch {
     return [];
   }
-}
-
-async function getOwnedProject(projectId: number, userId: number): Promise<ProjectRow> {
-  const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
-  if (!project || project.userId !== userId) throw new HttpError(404, "Project not found");
-  return project;
 }
 
 // The project's data lives in Neo4j, namespaced by the Proj<id>_ label prefix — these routes are the

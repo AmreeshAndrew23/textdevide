@@ -1,8 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { eq } from "drizzle-orm";
-import { db } from "../db/connection.js";
-import { projects, type ProjectRow } from "../db/schema.js";
+import type { ProjectRow } from "../db/schema.js";
 import { getCurrentUser, HttpError } from "../services/authService.js";
+import { getOwnedProject } from "../services/projectStore.js";
 import { parseScreenModel, ScreenParseError } from "../runtime/screenModel.js";
 import { renderScreen } from "../runtime/renderer.js";
 
@@ -37,8 +36,7 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
         if (!token) throw new HttpError(401, "Missing token");
         const user = await getCurrentUser(token);
 
-        const [project] = await db.select().from(projects).where(eq(projects.id, Number(req.params.id))).limit(1);
-        if (!project || project.userId !== user.id) throw new HttpError(404, "Project not found");
+        const project = await getOwnedProject(Number(req.params.id), user.id);
 
         const allScreens = getScreens(project);
         const screen = allScreens.find((s) => s.id === req.params.screenId);
