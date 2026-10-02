@@ -7,7 +7,7 @@
 import { DOMParser } from "@xmldom/xmldom";
 import type { Element as XmlElement } from "@xmldom/xmldom";
 import { type Entities, columnType, coerceValue } from "./values.js";
-import { isElement, childElements } from "./screenModel.js";
+import { type FieldRule, isElement, childElements } from "./screenModel.js";
 
 export type QueryResult = { rows: Record<string, unknown>[]; count: number };
 export type QueryExecutor = (statement: string, params: Record<string, unknown>) => Promise<QueryResult>;
@@ -131,6 +131,80 @@ function parseFieldPersistence(root: XmlElement): Map<string, [string, string]> 
   return mapping;
 }
 
+type FieldMeta = { label: string; type: string; rules: FieldRule[] };
+
+// fieldId -> {label, type, rules} straight off the <field> elements — same shape screenModel.ts
+// parses for rendering, re-read here independently (engine.ts works off the raw XML, not a
+// ScreenModel) so server-side validation enforces exactly what the rendered HTML already declares.
+function parseFieldMeta(root: XmlElement): Map<string, FieldMeta> {
+  const meta = new Map<string, FieldMeta>();
+  for (const el of Array.from(root.getElementsByTagName("field"))) {
+    const id = el.getAttribute("id");
+    if (!id) continue;
+    const rules: FieldRule[] = childElements(el, "rule").map((r) => {
+      const rule: FieldRule = {};
+      if (r.getAttribute("required") === "true") rule.required = true;
+      const pattern = r.getAttribute("pattern");
+      if (pattern) rule.pattern = pattern;
+      const maxLength = r.getAttribute("maxLength");
+      if (maxLength) rule.maxLength = Number(maxLength);
+      const minValue = r.getAttribute("minValue");
+      if (minValue) rule.minValue = Number(minValue);
+      const maxValue = r.getAttribute("maxValue");
+      if (maxValue) rule.maxValue = Number(maxValue);
+      return rule;
+    });
+    meta.set(id, { label: el.getAttribute("label") || id, type: el.getAttribute("type") || "text", rules });
+  }
+  return meta;
+}
+
+const WRITE_STATEMENT_RE = /\b(CREATE|MERGE|SET|REMOVE|DELETE)\b/i;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const isEmptyValue = (v: unknown) => v === null || v === undefined || (typeof v === "string" && v.trim() === "");
+
+// Validates exactly the fields that SOURCE this query's parameters — derived purely from existing
+// metadata (a query's own `source="field:x"` params + that field's <rule>s), never from an entity
+// name or button label. A read-only query (search/filter/sort) never triggers this, so typing in a
+// search box can never be blocked by an unrelated required field elsewhere on the same screen.
+function validateWriteFields(query: ParsedQuery, fieldValues: Record<string, unknown>, fieldMeta: Map<string, FieldMeta>): EventAction[] {
+  const violations: EventAction[] = [];
+  const say = (label: string, msg: string) => violations.push({ type: "message", messageType: "error", value: `${label} ${msg}` });
+  for (const source of Object.values(query.params)) {
+    if (!source.startsWith("field:")) continue;
+    const meta = fieldMeta.get(source.slice("field:".length));
+    if (!meta || !meta.rules.length) continue;
+    const value = fieldValues[source.slice("field:".length)];
+    for (const rule of meta.rules) {
+      if (rule.required && isEmptyValue(value)) {
+        say(meta.label, "is required.");
+        continue;
+      }
+      if (isEmptyValue(value)) continue; // other rules only constrain a value that's actually present
+      const str = String(value);
+      if (rule.pattern) {
+        try {
+          if (!new RegExp(rule.pattern).test(str)) say(meta.label, "is not in a valid format.");
+        } catch {
+          console.warn(`Unparseable validation pattern on field ${JSON.stringify(source)}: ${JSON.stringify(rule.pattern)}`);
+        }
+      }
+      if (rule.maxLength !== undefined && str.length > rule.maxLength) say(meta.label, `must be at most ${rule.maxLength} characters.`);
+      if (meta.type === "number" || rule.minValue !== undefined || rule.maxValue !== undefined) {
+        const num = Number(value);
+        if (!Number.isFinite(num)) {
+          say(meta.label, "must be a number.");
+        } else {
+          if (rule.minValue !== undefined && num < rule.minValue) say(meta.label, `must be at least ${rule.minValue}.`);
+          if (rule.maxValue !== undefined && num > rule.maxValue) say(meta.label, `must be at most ${rule.maxValue}.`);
+        }
+      }
+      if (meta.type === "email" && !EMAIL_RE.test(str)) say(meta.label, "must be a valid email address.");
+    }
+  }
+  return violations;
+}
+
 // Equivalent of ElementTree's `for el in root.iter(): if el.get("id") == element_id`.
 function findElementById(root: XmlElement, elementId: string): XmlElement | null {
   const stack: XmlElement[] = [root];
@@ -145,7 +219,7 @@ function findElementById(root: XmlElement, elementId: string): XmlElement | null
 
 function resolveQueryParams(
   queryParams: Record<string, string>, fieldValues: Record<string, unknown>,
-  fieldPersistence: Map<string, [string, string]>, entities: Entities
+  fieldPersistence: Map<string, [string, string]>, entities: Entities, fieldMeta: Map<string, FieldMeta>
 ): Record<string, unknown> {
   const resolved: Record<string, unknown> = {};
   for (const [pname, source] of Object.entries(queryParams)) {
@@ -156,6 +230,12 @@ function resolveQueryParams(
       if (persistence) {
         const [table, col] = persistence;
         raw = coerceValue(raw, columnType(entities, table, col));
+      } else if (fieldMeta.get(fid)?.type === "number" && typeof raw === "string" && raw.trim() !== "") {
+        // A browser <input type="number">'s .value is always a string, but a field with no
+        // persistenceMapping (a pagination skip/pageSize, a numeric filter) has no column type to
+        // coerce by above — Cypher's SKIP/LIMIT and numeric comparisons need a real number, not "0".
+        const num = Number(raw);
+        if (Number.isFinite(num)) raw = num;
       }
       resolved[pname] = raw;
     } else {
@@ -220,6 +300,7 @@ export async function runEvent(
 
   const queries = parseQueries(root);
   const fieldPersistence = parseFieldPersistence(root);
+  const fieldMeta = parseFieldMeta(root);
   const element = findElementById(root, elementId);
   if (!element) throw new Error(`No element with id ${JSON.stringify(elementId)} on this screen`);
 
@@ -243,7 +324,7 @@ export async function runEvent(
 
   for (const step of childElements(event)) {
     if (step.tagName === "execute") {
-      const stopped = await runExecute(trackedExec, queries, fieldPersistence, entities, siblingScreens, step, values, actions);
+      const stopped = await runExecute(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, values, actions);
       if (stopped) break; // a <stop/> or <navigate/> anywhere inside cancels any later top-level step
     } else if (step.tagName === "navigate") {
       runNavigate(step, siblingScreens, actions);
@@ -251,7 +332,7 @@ export async function runEvent(
     } else if (step.tagName === "message" || step.tagName === "set" || step.tagName === "stop") {
       // e.g. a closing <message type="success" value="Saved."/> written after the executes. It has
       // no query result of its own, so ${result.*} placeholders resolve to empty.
-      if (await runStep(trackedExec, queries, fieldPersistence, entities, siblingScreens, step, { rows: [], count: 0 }, values, actions)) break;
+      if (await runStep(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, { rows: [], count: 0 }, values, actions)) break;
     }
   }
   if (write.kind && !actions.some((a) => a.type === "message" || a.type === "navigate")) {
@@ -265,7 +346,8 @@ export async function runEvent(
 // the caller knows to stop walking any later sibling.
 async function runExecute(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
-  entities: Entities, siblingScreens: SiblingScreen[], executeEl: XmlElement, fieldValues: Record<string, unknown>, actions: EventAction[]
+  entities: Entities, siblingScreens: SiblingScreen[], fieldMeta: Map<string, FieldMeta>,
+  executeEl: XmlElement, fieldValues: Record<string, unknown>, actions: EventAction[]
 ): Promise<boolean> {
   const queryId = executeEl.getAttribute("query");
   const query = queryId ? queries.get(queryId) : undefined;
@@ -273,7 +355,17 @@ async function runExecute(
     console.warn(`run_event: unknown query id ${JSON.stringify(queryId)}`);
     return false;
   }
-  const params = resolveQueryParams(query.params, fieldValues, fieldPersistence, entities);
+  // Validated before a write ever reaches the database — same transaction, so a rejected write
+  // leaves nothing partially applied. A read-only query (list/search/filter/sort) never matches
+  // WRITE_STATEMENT_RE, so this never blocks anything but an actual save/delete.
+  if (WRITE_STATEMENT_RE.test(query.statement)) {
+    const violations = validateWriteFields(query, fieldValues, fieldMeta);
+    if (violations.length) {
+      actions.push(...violations, { type: "stop" });
+      return true;
+    }
+  }
+  const params = resolveQueryParams(query.params, fieldValues, fieldPersistence, entities, fieldMeta);
   const result = await exec(query.statement, params);
 
   const children = childElements(executeEl);
@@ -292,7 +384,7 @@ async function runExecute(
       actions.push({ type: "map", target, value });
     } else if (child.tagName === "when") {
       if (!evaluateCondition(child.getAttribute("condition") || "", result, fieldValues)) continue;
-      if (await runWhenBody(exec, queries, fieldPersistence, entities, siblingScreens, child, result, fieldValues, actions)) {
+      if (await runWhenBody(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions)) {
         return true;
       }
     } else if (child.tagName === "execute" || child.tagName === "set" || child.tagName === "message" || child.tagName === "navigate" || child.tagName === "stop") {
@@ -300,7 +392,7 @@ async function runExecute(
       // directly inside the first (no <when> around it). Silently skipping it meant a successful
       // save never refreshed the grid or confirmed anything — so an unconditional step runs the
       // same way a step inside a matched <when> does.
-      if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, child, result, fieldValues, actions)) return true;
+      if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions)) return true;
     }
   }
   return false;
@@ -313,10 +405,11 @@ async function runExecute(
 // <navigate/> fired.
 async function runWhenBody(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
-  entities: Entities, siblingScreens: SiblingScreen[], whenEl: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[]
+  entities: Entities, siblingScreens: SiblingScreen[], fieldMeta: Map<string, FieldMeta>,
+  whenEl: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[]
 ): Promise<boolean> {
   for (const inner of childElements(whenEl)) {
-    if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, inner, result, fieldValues, actions)) return true;
+    if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, result, fieldValues, actions)) return true;
   }
   return false;
 }
@@ -325,7 +418,8 @@ async function runWhenBody(
 // unconditional step directly inside an <execute>. Returns true if a <stop/> or <navigate/> fired.
 async function runStep(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
-  entities: Entities, siblingScreens: SiblingScreen[], inner: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[]
+  entities: Entities, siblingScreens: SiblingScreen[], fieldMeta: Map<string, FieldMeta>,
+  inner: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[]
 ): Promise<boolean> {
   if (inner.tagName === "set") {
     const target = inner.getAttribute("target") || "";
@@ -345,7 +439,7 @@ async function runStep(
     actions.push({ type: "stop" });
     return true;
   } else if (inner.tagName === "execute") {
-    if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, inner, fieldValues, actions)) return true;
+    if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, fieldValues, actions)) return true;
   }
   return false;
 }

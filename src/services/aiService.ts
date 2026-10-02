@@ -252,16 +252,45 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
 
 5. <ui> — the screen's visible elements, each with a stable id, in the order they should appear:
    - <field id="fieldId" label="..." type="text|number|date|select|checkbox|password|email|textarea"
-     persistenceMapping="table.column" readonly="true|false"/> — persistenceMapping names the REAL
+     persistenceMapping="table.column" readonly="true|false" default="initial value"/> — default is
+     baked into the rendered control as its starting value (checked="true" for a checkbox, the
+     matching <option> selected for a select) and is REQUIRED on any field that feeds a query
+     parameter but has no natural starting value the first time the screen loads without user input
+     — most commonly a pagination "skip" field (default="0") and "pageSize" (e.g. default="20"): if
+     you omit it, that field is an empty string on first load and SKIP/LIMIT would receive an empty
+     string instead of a number. A search box or filter does NOT need one — "" already means "no
+     filter" in the WHERE pattern below. persistenceMapping names the REAL
      table.column this field reads from/writes to; omit it for a field that only ever holds an
-     in-memory value (e.g. a search box). <rule> (required, pattern, unique, maxLength, minValue,
-     maxValue) and <hint> children work as before. Related fields may be visually grouped inside a
-     <fieldset legend="..."> — this is purely cosmetic grouping, not a new data concept.
+     in-memory value (e.g. a search box, a filter, a sort choice, a page offset). <rule> (required,
+     pattern, unique, maxLength, minValue, maxValue) and <hint> children work as before — these are
+     ENFORCED server-side before any save/update/delete query runs, so get them right, not just
+     decorative. Related fields may be visually grouped inside a <fieldset legend="..."> — this is
+     purely cosmetic grouping, not a new data concept.
+   - A type="select" field with a FIXED set of choices (a filter, a status dropdown) renders a real
+     dropdown when given <option value="..." label="..."/> children:
+       <field id="courseFilter" label="Course" type="select">
+         <option value="" label="All"/>
+         <option value="CSE" label="CSE"/>
+         <option value="ECE" label="ECE"/>
+       </field>
+     Always include an empty-value "All"/unfiltered option first unless every record must have a
+     value. A select with no <option> children falls back to a plain text input — only use type="select"
+     when you're listing the actual <option> choices.
    - <grid id="gridId" label="..." readonly="true|false" emptyMessage="...">
        <column id="colId" header="..." binding="resultColumn" persistenceMapping="table.column"/>
+       <actions>
+         <action type="edit"/>                                         -- optional: labels the
+                                                                            existing row-click-to-
+                                                                            populate-the-form behavior
+         <action type="delete" target="deleteButtonId" confirm="Delete this record?"/>
+       </actions>
      </grid> — a grid never references a query directly; it is populated only when some field's or
      button's event <map>s a result onto "grid:gridId" (rule 6). Do not include sampleData — grids
-     render real rows at runtime.
+     render real rows at runtime. <actions> is optional and only makes sense once the screen has a
+     working list — add an edit/delete action only when the grid shows editable/deletable records (a
+     read-only lookup grid doesn't need one). A delete <action>'s target MUST be the id of a real
+     <button> in this screen that has its own <event type="click"> doing the actual delete — see the
+     worked pattern after rule 6.
    - <button id="buttonId" label="..." style="primary|secondary|danger|ghost"/>
    There is no separate <form> or <toolbar> wrapper — fields, grids, and buttons live directly
    under <ui>. NEVER generate radio buttons — use type="select" for choices, type="checkbox" for a
@@ -345,6 +374,49 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
        <event type="load" element="theScreenId">
          <execute query="listRows"><map result="rows" target="grid:gridId"/></execute>
        </event>
+
+   - A screen whose list needs to SEARCH, FILTER, SORT, or PAGE does all of it with real Neo4j
+     queries (never by loading everything and filtering client-side) — every one of these is the
+     SAME <field>/<event>/<query> machinery above, not a different mechanism:
+       * SEARCH: a text field with no persistenceMapping (in-memory only) whose change event re-runs
+         the list query with an extra WHERE, e.g.
+         MATCH (s:Student) WHERE toLower(s.firstName) CONTAINS toLower($q) RETURN ... — bind $q to
+         field:searchField. Empty search should still return everything: WHERE $q = '' OR toLower(s.firstName) CONTAINS toLower($q).
+       * FILTER: a type="select" field (rule 5) with <option>s for the real distinct values; its
+         change event re-runs the list query with WHERE ($course = '' OR s.course = $course).
+       * SORT: Cypher cannot bind a column name or ASC/DESC through a parameter, so sorting by a
+         user choice needs one query PER sort order, selected with <when>: a sortBy field (e.g.
+         values "name_asc"/"name_desc") whose change event does
+         <execute query="listSortedByNameAsc"><when condition="field:sortBy == 'name_asc'">...</when></execute>
+         — or simpler, put the <when> branches directly around separate <execute>s for each order.
+       * PAGINATION: a "skip" field (default="0", no persistenceMapping) and a "pageSize" field
+         (e.g. default="20") — see default="..." in rule 5, REQUIRED here so the very first load has
+         real numbers to bind. The
+         list query: MATCH (s:Student) RETURN ... ORDER BY s.firstName SKIP $skip LIMIT $pageSize —
+         to know whether Next/Previous makes sense, run a second query
+         MATCH (s:Student) RETURN count(s) AS total mapped to a (readonly) total field. \${...}
+         placeholders only substitute text (rule 6) — there is no arithmetic in them — so a Next
+         button's event instead has the list query's own RETURN compute the next offset in Cypher,
+         e.g. RETURN ..., $skip + $pageSize AS nextSkip, then
+         <set target="field:skip" value="\${result.nextSkip}"/> so the NEXT click's SKIP uses it. A
+         Previous button's query computes prevSkip the same way, clamped to 0 in Cypher:
+         RETURN ..., CASE WHEN $skip - $pageSize &lt; 0 THEN 0 ELSE $skip - $pageSize END AS prevSkip.
+     Search/filter/sort/pagination fields never need persistenceMapping (they're query inputs, not
+     saved data) and never trigger the server-side validation in rule 5 (validation only runs on a
+     field that feeds a CREATE/MERGE/SET/DELETE query — a plain MATCH...RETURN list query never
+     does), so they can never be blocked by an unrelated required field elsewhere on the form.
+   - DELETE (from a grid row's <actions><action type="delete" target="deleteButtonId"/>, rule 5):
+     give the screen a real button (it can be visually hidden if you don't want a page-level Delete
+     button too — style="danger" is fine either way) with its own event:
+       <event type="click" element="deleteButtonId">
+         <execute query="deleteRow"/>                         -- MATCH (s:Student) WHERE s.regNo = $regNo DELETE s
+         <execute query="listRows"><map result="rows" target="grid:gridId"/></execute>
+         <message type="success" value="Deleted."/>
+       </event>
+     The runtime fires this event with the CLICKED ROW's own values (matched by persistenceMapping),
+     not the form's current values, so deleteRow's parameters should source from the same field ids
+     the form uses for that row's key (e.g. source="field:regNo") — you do not need to do anything
+     special in the XML for this, it already works the same as any other button event.
 
 7. <dataBindings> — <entity name="EntityName" operations="SELECT, INSERT, UPDATE, DELETE"/> for
    every real table this screen's queries touch (documentation only — actual permissions come from

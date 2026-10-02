@@ -19,6 +19,8 @@ export function childElements(parent: XmlElement, tagName?: string): XmlElement[
 
 export type FieldRule = { required?: boolean; pattern?: string; maxLength?: number; minValue?: number; maxValue?: number };
 
+export type FieldOption = { value: string; label: string };
+
 export type FieldItem = {
   kind: "field";
   id: string;
@@ -29,10 +31,26 @@ export type FieldItem = {
   rules: FieldRule[];
   hint: string | null;
   eventTypes: string[];
+  // <option value="..." label="..."/> children of a type="select" field — a real dropdown when
+  // present; omitted/empty keeps today's plain-text-input fallback (no options source available).
+  options: FieldOption[];
+  // default="..." — the field's initial value, baked into the rendered control. Needed for any
+  // field that isn't backed by a saved column (search/filter/sort/pagination inputs) but still has
+  // to carry a sensible starting value the very first time the screen loads, e.g. a pagination
+  // "skip" field defaulting to "0" so the first SKIP $skip in Cypher isn't an empty string.
+  defaultValue: string | null;
 };
 
 export type GridColumn = { id: string; header: string; binding: string; persistenceMapping: string | null };
-export type GridItem = { kind: "grid"; id: string; label: string; emptyMessage: string; columns: GridColumn[]; eventTypes: string[] };
+// <action type="edit"/> is a labeled affordance for the row-click-to-populate-form behavior the
+// client script already does for every grid — it carries no target/confirm of its own.
+// <action type="delete" target="buttonId" confirm="..."/> fires that REAL button's own <event>
+// (declared normally in <events>, same as any other button) using the clicked row's
+// persistence-mapped values instead of the form's current field values.
+export type GridAction = { type: "edit" } | { type: "delete"; target: string; confirm: string | null };
+export type GridItem = {
+  kind: "grid"; id: string; label: string; emptyMessage: string; columns: GridColumn[]; eventTypes: string[]; actions: GridAction[];
+};
 export type ButtonItem = { kind: "button"; id: string; label: string; style: string; eventTypes: string[] };
 export type FieldsetItem = { kind: "fieldset"; legend: string; items: UiItem[] };
 export type UiItem = FieldItem | GridItem | ButtonItem | FieldsetItem;
@@ -79,6 +97,10 @@ function parseRules(fieldEl: XmlElement): FieldRule[] {
   });
 }
 
+function parseOptions(fieldEl: XmlElement): FieldOption[] {
+  return childElements(fieldEl, "option").map((o) => ({ value: attr(o, "value"), label: attr(o, "label", attr(o, "value")) }));
+}
+
 function parseField(el: XmlElement, eventsByElement: Map<string, string[]>): FieldItem {
   const id = attr(el, "id");
   return {
@@ -91,12 +113,29 @@ function parseField(el: XmlElement, eventsByElement: Map<string, string[]>): Fie
     rules: parseRules(el),
     hint: text(firstChild(el, "hint")) || null,
     eventTypes: eventsByElement.get(id) || [],
+    options: parseOptions(el),
+    defaultValue: el.getAttribute("default"),
   };
 }
 
 function parseButton(el: XmlElement, eventsByElement: Map<string, string[]>): ButtonItem {
   const id = attr(el, "id");
   return { kind: "button", id, label: attr(el, "label", id), style: attr(el, "style", "primary"), eventTypes: eventsByElement.get(id) || [] };
+}
+
+function parseGridActions(el: XmlElement): GridAction[] {
+  const actionsEl = firstChild(el, "actions");
+  if (!actionsEl) return [];
+  const out: GridAction[] = [];
+  for (const a of childElements(actionsEl, "action")) {
+    const type = attr(a, "type");
+    if (type === "edit") out.push({ type: "edit" });
+    else if (type === "delete") {
+      const target = attr(a, "target");
+      if (target) out.push({ type: "delete", target, confirm: a.getAttribute("confirm") });
+    }
+  }
+  return out;
 }
 
 function parseGrid(el: XmlElement, eventsByElement: Map<string, string[]>): GridItem {
@@ -107,7 +146,10 @@ function parseGrid(el: XmlElement, eventsByElement: Map<string, string[]>): Grid
     binding: attr(c, "binding", attr(c, "id")),
     persistenceMapping: c.getAttribute("persistenceMapping"),
   }));
-  return { kind: "grid", id, label: attr(el, "label", id), emptyMessage: attr(el, "emptyMessage", "No records."), columns, eventTypes: eventsByElement.get(id) || [] };
+  return {
+    kind: "grid", id, label: attr(el, "label", id), emptyMessage: attr(el, "emptyMessage", "No records."),
+    columns, eventTypes: eventsByElement.get(id) || [], actions: parseGridActions(el),
+  };
 }
 
 function parseUiItems(parent: XmlElement, eventsByElement: Map<string, string[]>): UiItem[] {

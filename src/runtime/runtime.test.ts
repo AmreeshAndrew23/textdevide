@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { labelFor, prepareCypher, validateCypherStatic } from "./cypher.js";
 import { coerceValue } from "./values.js";
 import { evaluateCondition, resolveTemplate, runEvent, type QueryExecutor } from "./engine.js";
@@ -447,5 +447,152 @@ describe("renderer: buttons that name another screen become links", () => {
     expect(html).toMatch(/id="toDash" data-button data-nav-href="http:\/\/x\/runtime\/projects\/1\/screens\/s_dash\?token=t"/);
     expect(html).toMatch(/id="save" data-button data-click class=/);
     expect(html).not.toMatch(/id="save"[^>]*data-nav-href/);
+  });
+});
+
+describe("engine: server-side field validation (before any write query runs)", () => {
+  const xml = `<screen id="s" title="S">
+  <queries>
+    <query id="ins"><statement>CREATE (s:Student {regNo: $regNo, email: $email, age: $age})</statement>
+      <parameters><parameter name="regNo" source="field:regNo"/><parameter name="email" source="field:email"/><parameter name="age" source="field:age"/></parameters></query>
+    <query id="search"><statement>MATCH (s:Student) WHERE toLower(s.firstName) CONTAINS toLower($q) RETURN s.regNo AS regNo</statement>
+      <parameters><parameter name="q" source="field:q"/></parameters></query>
+  </queries>
+  <ui>
+    <field id="regNo" label="Reg No" type="text"><rule required="true" maxLength="6"/></field>
+    <field id="email" label="Email" type="email"><rule required="true"/></field>
+    <field id="age" label="Age" type="number"><rule minValue="1" maxValue="120"/></field>
+    <field id="q" label="Search" type="text"/>
+    <button id="save" label="Save"/>
+    <button id="search" label="Search"/>
+    <grid id="g" label="G"><column id="a" header="Id" binding="regNo"/></grid>
+  </ui>
+  <events>
+    <event type="click" element="save"><execute query="ins"/></event>
+    <event type="change" element="q"><execute query="search"><map result="rows" target="grid:g"/></execute></event>
+  </events>
+</screen>`;
+  const entities = { tables: [{ name: "Student", columns: [{ name: "regNo", type: "VARCHAR(6)" }] }] };
+  let seen: string[] = [];
+  const exec: QueryExecutor = async (statement, params) => {
+    seen.push(statement.split(" ")[0]);
+    return { rows: [], count: 0 };
+  };
+  beforeEach(() => { seen = []; });
+
+  it("blocks a save with an empty required field and never runs the write query", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { regNo: "", email: "a@b.com", age: "20" });
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Reg No is required." });
+    expect(seen).toEqual([]);
+  });
+  it("blocks an invalid email and a too-long value, with meaningful separate messages", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { regNo: "TOOLONG1", email: "not-an-email", age: "20" });
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Email must be a valid email address." });
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Reg No must be at most 6 characters." });
+    expect(seen).toEqual([]);
+  });
+  it("blocks an out-of-range number with a meaningful message", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { regNo: "R1", email: "a@b.com", age: "999" });
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Age must be at most 120." });
+    expect(seen).toEqual([]);
+  });
+  it("a valid save runs the write query with no validation messages", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { regNo: "R1", email: "a@b.com", age: "20" });
+    expect(actions.filter((a) => a.type === "message" && a.messageType === "error")).toEqual([]);
+    expect(seen).toEqual(["CREATE"]);
+  });
+  it("never validates fields for a read-only event, even with an empty required field elsewhere on the screen", async () => {
+    const actions = await runEvent(exec, entities, xml, "q", "change", { regNo: "", email: "", age: "", q: "ar" });
+    expect(actions.filter((a) => a.type === "message" && a.messageType === "error")).toEqual([]);
+    expect(seen).toEqual(["MATCH"]);
+  });
+});
+
+describe("screenModel + renderer: real <select> dropdowns", () => {
+  const xml = `<screen id="s" title="S"><ui>
+    <field id="course" label="Course" type="select"><option value="" label="All"/><option value="CSE" label="CSE"/></field>
+    <field id="plain" label="Plain" type="select"/>
+  </ui><events/></screen>`;
+  const model = parseScreenModel(xml);
+  it("parses <option> children into FieldItem.options", () => {
+    expect(model.fields.find((f) => f.id === "course")?.options).toEqual([{ value: "", label: "All" }, { value: "CSE", label: "CSE" }]);
+    expect(model.fields.find((f) => f.id === "plain")?.options).toEqual([]);
+  });
+  it("renders a real <select> with options, and falls back to a text input with none", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(html).toContain('<select id="course" name="course">');
+    expect(html).toContain('<option value="">All</option><option value="CSE">CSE</option></select>');
+    expect(html).toMatch(/<input type="text" id="plain"/);
+  });
+});
+
+describe("screenModel + renderer: grid row actions (edit/delete)", () => {
+  const xml = `<screen id="s" title="S"><ui>
+    <field id="regNo" label="Reg No" type="text" persistenceMapping="Student.regNo"/>
+    <button id="deleteBtn" label="Delete" style="danger"/>
+    <grid id="g" label="Students">
+      <column id="a" header="Reg No" binding="regNo" persistenceMapping="Student.regNo"/>
+      <actions><action type="edit"/><action type="delete" target="deleteBtn" confirm="Really delete?"/></actions>
+    </grid>
+  </ui><events><event type="click" element="deleteBtn"><execute query="q"/></event></events></screen>`;
+  const model = parseScreenModel(xml);
+  it("parses the <actions> block", () => {
+    expect(model.grids[0].actions).toEqual([{ type: "edit" }, { type: "delete", target: "deleteBtn", confirm: "Really delete?" }]);
+  });
+  it("renders an Actions column header and bakes GRID_ACTIONS for the client script", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(html).toContain('<th class="actions-col">Actions</th>');
+    expect(html).toContain('var GRID_ACTIONS = {"g":[{"type":"edit"},{"type":"delete","target":"deleteBtn","confirm":"Really delete?"}]};');
+    expect(html).toContain("data-row-delete");
+    expect(html).toContain("data-row-target");
+  });
+  it("a grid with no <actions> renders no Actions column and an empty GRID_ACTIONS entry", () => {
+    const plain = parseScreenModel(`<screen id="s2" title="S"><ui><grid id="g2" label="G"><column id="a" header="A" binding="a"/></grid></ui><events/></screen>`);
+    const html = renderScreen(plain, { apiBase: "x", projectId: 1, screenId: "s2", token: "t" });
+    expect(html).not.toContain('<th class="actions-col">');
+    expect(html).toContain("var GRID_ACTIONS = {};");
+  });
+});
+
+describe("screenModel + renderer: field default values", () => {
+  const xml = `<screen id="s" title="S"><ui>
+    <field id="skip" label="Skip" type="number" default="0"/>
+    <field id="pageSize" label="Page Size" type="number" default="20"/>
+    <field id="sortDir" label="Sort" type="select" default="desc"><option value="asc" label="Asc"/><option value="desc" label="Desc"/></field>
+    <field id="active" label="Active" type="checkbox" default="true"/>
+    <field id="name" label="Name" type="text"/>
+  </ui><events/></screen>`;
+  const model = parseScreenModel(xml);
+  it("parses the default attribute", () => {
+    expect(model.fields.find((f) => f.id === "skip")?.defaultValue).toBe("0");
+    expect(model.fields.find((f) => f.id === "name")?.defaultValue).toBeNull();
+  });
+  it("bakes the default into the rendered control so the first load has real values to bind", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(html).toContain('<input type="number" id="skip" name="skip" value="0">');
+    expect(html).toContain('<input type="number" id="pageSize" name="pageSize" value="20">');
+    expect(html).toContain('<option value="desc" selected>Desc</option>');
+    expect(html).not.toContain('<option value="asc" selected>');
+    expect(html).toContain('<input type="checkbox" id="active" name="active" checked>');
+    expect(html).toContain('<input type="text" id="name" name="name">');
+  });
+});
+
+describe("engine: numeric fields with no persistenceMapping are coerced before binding", () => {
+  const xml = `<screen id="s" title="S">
+  <queries><query id="page"><statement>MATCH (s:Student) RETURN s.regNo AS regNo SKIP $skip LIMIT $pageSize</statement>
+    <parameters><parameter name="skip" source="field:skip"/><parameter name="pageSize" source="field:pageSize"/></parameters></query></queries>
+  <ui><field id="skip" label="Skip" type="number" default="0"/><field id="pageSize" label="Page Size" type="number" default="20"/>
+    <grid id="g" label="G"><column id="a" header="A" binding="regNo"/></grid></ui>
+  <events><event type="load" element="s"><execute query="page"><map result="rows" target="grid:g"/></execute></event></events>
+</screen>`;
+  const entities = {};
+  it("sends real numbers (not the browser's string input values) as $skip/$pageSize", async () => {
+    let seenParams: Record<string, unknown> = {};
+    const exec: QueryExecutor = async (statement, params) => { seenParams = params; return { rows: [], count: 0 }; };
+    // Exactly what a real browser's allFieldValues() sends: <input type="number">.value is always a string.
+    await runEvent(exec, entities, xml, "s", "load", { skip: "0", pageSize: "20" });
+    expect(seenParams).toEqual({ skip: 0, pageSize: 20 });
+    expect(typeof seenParams.skip).toBe("number");
   });
 });

@@ -6,7 +6,7 @@
  * blur-commit vs immediate-commit, map/set treated identically, message replaces, stop is a
  * server-only concept the client never sees).
  */
-import type { ButtonItem, FieldItem, GridItem, ScreenModel, UiItem } from "./screenModel.js";
+import type { ButtonItem, FieldItem, GridAction, GridItem, ScreenModel, UiItem } from "./screenModel.js";
 
 function esc(s: string): string {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -18,33 +18,47 @@ function escAttr(s: string): string {
 
 const BUTTON_CLASS: Record<string, string> = { primary: "btn-primary", secondary: "btn-secondary", danger: "btn-danger", ghost: "btn-ghost" };
 
-// Every field type this vocabulary defines maps 1:1 to a native input, EXCEPT "select" — the
-// current XML schema has no options source for it (no <option>, no dataSource/lookupEntity
-// attribute), so — matching XmlScreenRenderer.jsx's NewFieldInput exactly — it falls back to a
-// plain text input rather than rendering a dropdown with nothing in it.
+// Every field type this vocabulary defines maps 1:1 to a native input. "select" renders a real
+// <select> when the XML supplies <option value="..." label="..."/> children (e.g. a filter's fixed
+// choice list); with no options source it falls back to a plain text input rather than rendering a
+// dropdown with nothing in it — matching XmlScreenRenderer.jsx's NewFieldInput for that case.
 function renderField(f: FieldItem): string {
   const required = f.rules.some((r) => r.required);
   const rule = f.rules[0] || {};
   const disabled = f.readonly ? " disabled" : "";
-  const commitEvent = f.type === "checkbox" ? "change" : "blur";
+  // A <select>'s natural commit moment is choosing an option ("change"), not losing focus — same as
+  // a checkbox, and unlike a text input where "blur" is what distinguishes "done typing" from every
+  // keystroke.
+  const commitEvent = f.type === "checkbox" || f.type === "select" ? "change" : "blur";
   const wiredEvents = f.eventTypes.filter((t) => t === "change").length ? ` data-commit-event="${commitEvent}"` : "";
 
+  const def = f.defaultValue;
   let control: string;
   if (f.type === "checkbox") {
-    control = `<input type="checkbox" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${disabled}${wiredEvents}>`;
+    const checked = def === "true" ? " checked" : "";
+    control = `<input type="checkbox" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${checked}${disabled}${wiredEvents}>`;
+  } else if (f.type === "select" && f.options.length) {
+    // A real dropdown only when the XML supplies <option> children (e.g. a filter's fixed choice
+    // list) — a select with no options source still falls through to the plain-text-input fallback
+    // below, exactly as before.
+    const opts = f.options.map((o) => `<option value="${escAttr(o.value)}"${def !== null && o.value === def ? " selected" : ""}>${esc(o.label)}</option>`).join("");
+    control = `<select id="${escAttr(f.id)}" name="${escAttr(f.id)}"${disabled}${wiredEvents}>${opts}</select>`;
   } else if (f.type === "textarea") {
-    control = `<textarea id="${escAttr(f.id)}" name="${escAttr(f.id)}" rows="3"${disabled}${wiredEvents}></textarea>`;
+    control = `<textarea id="${escAttr(f.id)}" name="${escAttr(f.id)}" rows="3"${disabled}${wiredEvents}>${def ? esc(def) : ""}</textarea>`;
   } else if (f.type === "number") {
     const min = rule.minValue !== undefined ? ` min="${rule.minValue}"` : "";
     const max = rule.maxValue !== undefined ? ` max="${rule.maxValue}"` : "";
-    control = `<input type="number" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${min}${max}${disabled}${wiredEvents}>`;
+    const value = def !== null ? ` value="${escAttr(def)}"` : "";
+    control = `<input type="number" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${min}${max}${value}${disabled}${wiredEvents}>`;
   } else if (["date", "time", "email", "url", "color", "password"].includes(f.type)) {
-    control = `<input type="${escAttr(f.type)}" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${disabled}${wiredEvents}>`;
+    const value = def !== null ? ` value="${escAttr(def)}"` : "";
+    control = `<input type="${escAttr(f.type)}" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${value}${disabled}${wiredEvents}>`;
   } else {
-    // "select" and any other/unknown type — see comment above.
+    // "select" with no options, and any other/unknown type — see comment above.
     const maxLength = rule.maxLength !== undefined ? ` maxlength="${rule.maxLength}"` : "";
     const pattern = rule.pattern ? ` pattern="${escAttr(rule.pattern)}"` : "";
-    control = `<input type="text" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${maxLength}${pattern}${disabled}${wiredEvents}>`;
+    const value = def !== null ? ` value="${escAttr(def)}"` : "";
+    control = `<input type="text" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${maxLength}${pattern}${value}${disabled}${wiredEvents}>`;
   }
 
   const hint = f.hint ? `<div class="hint">${esc(f.hint)}</div>` : "";
@@ -56,13 +70,14 @@ function renderField(f: FieldItem): string {
 }
 
 function renderGrid(g: GridItem): string {
-  const headers = g.columns.map((c) => `<th>${esc(c.header)}</th>`).join("");
+  const headers = g.columns.map((c) => `<th>${esc(c.header)}</th>`).join("") + (g.actions.length ? `<th class="actions-col">Actions</th>` : "");
+  const colCount = g.columns.length + (g.actions.length ? 1 : 0);
   return `<div class="card grid-wrap" data-grid="${escAttr(g.id)}" data-empty="${escAttr(g.emptyMessage)}">
   <div class="card-header"><h3>${esc(g.label)}</h3></div>
   <div class="table-scroll">
   <table>
     <thead><tr>${headers}</tr></thead>
-    <tbody><tr class="empty-row"><td colspan="${g.columns.length || 1}">${esc(g.emptyMessage)}</td></tr></tbody>
+    <tbody><tr class="empty-row"><td colspan="${colCount || 1}">${esc(g.emptyMessage)}</td></tr></tbody>
   </table>
   </div>
 </div>`;
@@ -157,6 +172,14 @@ function gridColumnsJson(model: ScreenModel): string {
   return JSON.stringify(map);
 }
 
+// Per-row action defs (edit/delete), keyed by grid id — baked in exactly like GRID_COLUMNS so the
+// client script can render each row's action buttons without re-parsing the XML.
+function gridActionsJson(model: ScreenModel): string {
+  const map: Record<string, GridAction[]> = {};
+  for (const g of model.grids) if (g.actions.length) map[g.id] = g.actions;
+  return JSON.stringify(map);
+}
+
 // Which "table.column" each grid column / form field is bound to — lets clicking a grid row fill
 // the form fields that map to the same column (edit-in-place), with no AI involvement.
 function mappingsJson(model: ScreenModel): { grid: string; field: string } {
@@ -177,18 +200,23 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
   var SCREEN_ID = ${JSON.stringify(opts.screenId)};
   var TOKEN = ${JSON.stringify(opts.token)};
   var GRID_COLUMNS = ${gridColumnsJson(model)};
+  var GRID_ACTIONS = ${gridActionsJson(model)};
   var GRID_MAPPINGS = ${mappings.grid};
   var FIELD_MAPPINGS = ${mappings.field};
   var LOAD_ELEMENTS = ${JSON.stringify(model.loadElements)};
   var GRID_ROWS = {};
   var root = document;
 
-  function fieldEl(id) { return root.querySelector('[data-field="' + id + '"] input, [data-field="' + id + '"] textarea'); }
+  var FIELD_CONTROL_SELECTOR = "input, textarea, select";
+  function fieldEl(id) {
+    var wrap = root.querySelector('[data-field="' + id + '"]');
+    return wrap ? wrap.querySelector(FIELD_CONTROL_SELECTOR) : null;
+  }
   function fieldValue(el) { return el.type === "checkbox" ? el.checked : el.value; }
   function allFieldValues() {
     var values = {};
     root.querySelectorAll("[data-field]").forEach(function (wrap) {
-      var el = wrap.querySelector("input, textarea");
+      var el = wrap.querySelector(FIELD_CONTROL_SELECTOR);
       if (el) values[wrap.getAttribute("data-field")] = fieldValue(el);
     });
     return values;
@@ -237,45 +265,84 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     if (navigateTo) window.location.href = navigateUrl(navigateTo);
   }
 
+  function attrEscape(s) {
+    var d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML.replace(/"/g, "&quot;");
+  }
+
+  // Values of the form fields bound (by persistenceMapping) to the same columns as this grid —
+  // shared by edit-in-place (apply to the DOM) and a row's Delete action (send as fieldValues).
+  function mappedRowValues(gridId, row) {
+    var bindings = GRID_COLUMNS[gridId] || [];
+    var mappings = GRID_MAPPINGS[gridId] || [];
+    var values = {};
+    bindings.forEach(function (binding, i) {
+      if (!mappings[i]) return;
+      Object.keys(FIELD_MAPPINGS).forEach(function (fieldId) {
+        if (FIELD_MAPPINGS[fieldId] === mappings[i]) values[fieldId] = row[binding];
+      });
+    });
+    return values;
+  }
+
   function renderGridRows(gridId, rows) {
     var wrap = root.querySelector('[data-grid="' + gridId + '"]');
     if (!wrap) return;
     var tbody = wrap.querySelector("tbody");
     var bindings = GRID_COLUMNS[gridId] || [];
+    var actions = GRID_ACTIONS[gridId] || [];
     GRID_ROWS[gridId] = rows;
     if (!rows.length) {
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="' + Math.max(bindings.length, 1) + '">' + (wrap.getAttribute("data-empty") || "") + "</td></tr>";
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="' + Math.max(bindings.length + (actions.length ? 1 : 0), 1) + '">' + (wrap.getAttribute("data-empty") || "") + "</td></tr>";
       return;
     }
     tbody.innerHTML = rows.map(function (row, i) {
-      return '<tr data-row="' + i + '">' + bindings.map(function (b) {
+      var cells = bindings.map(function (b) {
         var v = row[b];
         var span = document.createElement("span"); span.textContent = v == null ? "" : String(v);
         return "<td>" + span.innerHTML + "</td>";
-      }).join("") + "</tr>";
+      }).join("");
+      if (actions.length) {
+        cells += '<td class="row-actions">' + actions.map(function (a) {
+          if (a.type === "edit") return '<button type="button" class="row-action-btn" data-row-edit="' + i + '">Edit</button>';
+          var confirmAttr = a.confirm ? ' data-row-confirm="' + attrEscape(a.confirm) + '"' : "";
+          return '<button type="button" class="row-action-btn row-action-danger" data-row-delete="' + i + '" data-row-target="' + attrEscape(a.target) + '"' + confirmAttr + ">Delete</button>";
+        }).join("") + "</td>";
+      }
+      return '<tr data-row="' + i + '">' + cells + "</tr>";
     }).join("");
   }
 
   // Clicking a grid row copies its values into every form field bound to the same table.column
   // (edit-in-place) — the matching is by persistenceMapping, so it works for any generated screen.
+  // A click on a row's Delete button instead fires that button's own <event> (wired normally in
+  // <events>, same as any other button) using THIS row's values, after an optional confirm().
   root.querySelectorAll("[data-grid]").forEach(function (wrap) {
     wrap.addEventListener("click", function (e) {
+      var gridId = wrap.getAttribute("data-grid");
+      var delBtn = e.target.closest && e.target.closest("[data-row-delete]");
+      if (delBtn) {
+        var delRow = (GRID_ROWS[gridId] || [])[Number(delBtn.getAttribute("data-row-delete"))];
+        if (!delRow) return;
+        var confirmMsg = delBtn.getAttribute("data-row-confirm");
+        if (confirmMsg && !window.confirm(confirmMsg)) return;
+        var merged = allFieldValues();
+        var rowValues = mappedRowValues(gridId, delRow);
+        Object.keys(rowValues).forEach(function (k) { merged[k] = rowValues[k]; });
+        fireEvent(delBtn.getAttribute("data-row-target"), "click", merged);
+        return;
+      }
       var tr = e.target.closest && e.target.closest("tr[data-row]");
       if (!tr) return;
-      var gridId = wrap.getAttribute("data-grid");
       var row = (GRID_ROWS[gridId] || [])[Number(tr.getAttribute("data-row"))];
       if (!row) return;
-      var bindings = GRID_COLUMNS[gridId] || [];
-      var mappings = GRID_MAPPINGS[gridId] || [];
-      bindings.forEach(function (binding, i) {
-        if (!mappings[i]) return;
-        Object.keys(FIELD_MAPPINGS).forEach(function (fieldId) {
-          if (FIELD_MAPPINGS[fieldId] !== mappings[i]) return;
-          var el = fieldEl(fieldId);
-          if (!el) return;
-          var v = row[binding];
-          if (el.type === "checkbox") el.checked = Boolean(v); else el.value = v == null ? "" : v;
-        });
+      var values = mappedRowValues(gridId, row);
+      Object.keys(values).forEach(function (fieldId) {
+        var el = fieldEl(fieldId);
+        if (!el) return;
+        var v = values[fieldId];
+        if (el.type === "checkbox") el.checked = Boolean(v); else el.value = v == null ? "" : v;
       });
       wrap.querySelectorAll("tr.selected").forEach(function (r) { r.classList.remove("selected"); });
       tr.classList.add("selected");
@@ -298,7 +365,7 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
 
   root.querySelectorAll("[data-field]").forEach(function (wrap) {
     var fieldId = wrap.getAttribute("data-field");
-    var el = wrap.querySelector("input, textarea");
+    var el = wrap.querySelector(FIELD_CONTROL_SELECTOR);
     if (!el || !el.hasAttribute("data-commit-event")) return;
     var commitEvent = el.getAttribute("data-commit-event");
     var lastCommitted = fieldValue(el);
@@ -466,15 +533,15 @@ export function renderScreen(
   .field-wrap:last-of-type { margin-bottom: 4px; }
   .field-wrap label { font-size: 13px; font-weight: 600; color: var(--clr-text); }
   .req { color: var(--clr-danger); }
-  .field-wrap input, .field-wrap textarea {
+  .field-wrap input, .field-wrap textarea, .field-wrap select {
     padding: 9px 13px; border: 1.5px solid var(--clr-border); border-radius: 8px;
     font-size: 14px; font-family: inherit; color: var(--clr-text); background: var(--clr-surface);
     transition: border-color 0.12s, box-shadow 0.12s;
   }
-  .field-wrap input:focus, .field-wrap textarea:focus {
+  .field-wrap input:focus, .field-wrap textarea:focus, .field-wrap select:focus {
     outline: none; border-color: var(--clr-primary); box-shadow: 0 0 0 3px var(--clr-primary-light);
   }
-  .field-wrap input:disabled, .field-wrap textarea:disabled { background: #f1f5f9; color: #94a3b8; cursor: not-allowed; }
+  .field-wrap input:disabled, .field-wrap textarea:disabled, .field-wrap select:disabled { background: #f1f5f9; color: #94a3b8; cursor: not-allowed; }
   .field-wrap input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--clr-primary); }
   .hint { font-size: 12px; color: var(--clr-muted); }
 
@@ -491,6 +558,15 @@ export function renderScreen(
   tbody tr[data-row] { cursor: pointer; }
   tbody tr.selected td { background: var(--clr-primary-light); }
   .empty-row td { color: var(--clr-muted); font-style: italic; text-align: center; padding: 28px 20px; }
+  .actions-col { width: 1%; white-space: nowrap; }
+  .row-actions { white-space: nowrap; }
+  .row-action-btn {
+    font-family: inherit; font-size: 12px; font-weight: 600; padding: 5px 10px; margin-right: 6px;
+    border-radius: 6px; border: 1.5px solid var(--clr-border); background: var(--clr-surface); color: var(--clr-text); cursor: pointer;
+  }
+  .row-action-btn:hover { background: var(--clr-bg); }
+  .row-action-danger { color: var(--clr-danger); border-color: #fecaca; }
+  .row-action-danger:hover { background: #fef2f2; }
 
   .toolbar { margin-bottom: 20px; }
   button { font-family: inherit; padding: 9px 20px; border-radius: 8px; font-size: 13.5px; font-weight: 600; cursor: pointer; margin-right: 8px; margin-top: 4px; transition: filter 0.12s, box-shadow 0.12s; }
