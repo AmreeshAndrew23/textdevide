@@ -113,7 +113,10 @@ function renderButton(b: ButtonItem, linkFor: Linker): string {
   // runs real queries must never be hijacked just because its label contains a screen's name.
   const href = wired ? null : linkFor(b.label);
   const link = href ? ` data-nav-href="${escAttr(href)}"` : "";
-  return `<button type="button" id="${escAttr(b.id)}" data-button${wired}${link} class="${cls}">${esc(b.label)}</button>`;
+  // A click that runs a real query can take a visible moment (especially against a cold/slow
+  // database) — a spinner on the SPECIFIC button clicked, not just a page-wide disable, is what
+  // tells the user their click registered and something is actually happening.
+  return `<button type="button" id="${escAttr(b.id)}" data-button${wired}${link} class="${cls}"><span class="btn-spinner" hidden></span><span class="btn-label">${esc(b.label)}</span></button>`;
 }
 
 function renderOne(it: UiItem, linkFor: Linker): string {
@@ -233,8 +236,12 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     });
   }
 
-  function setBusy(busy) {
+  function setBusy(busy, triggerBtn) {
     root.querySelectorAll("[data-button]").forEach(function (b) { b.disabled = busy; });
+    if (triggerBtn) {
+      var spinner = triggerBtn.querySelector(".btn-spinner");
+      if (spinner) spinner.hidden = !busy;
+    }
   }
 
   function navigateUrl(screenId) {
@@ -307,7 +314,7 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
         cells += '<td class="row-actions">' + actions.map(function (a) {
           if (a.type === "edit") return '<button type="button" class="row-action-btn" data-row-edit="' + i + '">Edit</button>';
           var confirmAttr = a.confirm ? ' data-row-confirm="' + attrEscape(a.confirm) + '"' : "";
-          return '<button type="button" class="row-action-btn row-action-danger" data-row-delete="' + i + '" data-row-target="' + attrEscape(a.target) + '"' + confirmAttr + ">Delete</button>";
+          return '<button type="button" class="row-action-btn row-action-danger" data-row-delete="' + i + '" data-row-target="' + attrEscape(a.target) + '"' + confirmAttr + '><span class="btn-spinner" hidden></span>Delete</button>';
         }).join("") + "</td>";
       }
       return '<tr data-row="' + i + '">' + cells + "</tr>";
@@ -330,7 +337,7 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
         var merged = allFieldValues();
         var rowValues = mappedRowValues(gridId, delRow);
         Object.keys(rowValues).forEach(function (k) { merged[k] = rowValues[k]; });
-        fireEvent(delBtn.getAttribute("data-row-target"), "click", merged);
+        fireEvent(delBtn.getAttribute("data-row-target"), "click", merged, delBtn);
         return;
       }
       var tr = e.target.closest && e.target.closest("tr[data-row]");
@@ -349,8 +356,8 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     });
   });
 
-  function fireEvent(elementId, eventType, valuesOverride) {
-    setBusy(true);
+  function fireEvent(elementId, eventType, valuesOverride, triggerBtn) {
+    setBusy(true, triggerBtn);
     showMessages([]);
     return fetch(API_BASE + "/api/projects/" + PROJECT_ID + "/screens/" + SCREEN_ID + "/run-event", {
       method: "POST",
@@ -360,7 +367,7 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
       .then(function (res) { return res.json(); })
       .then(function (data) { applyActions(data.actions || []); })
       .catch(function () { showMessages([{ messageType: "error", value: "Something went wrong — please try again." }]); })
-      .finally(function () { setBusy(false); });
+      .finally(function () { setBusy(false, triggerBtn); });
   }
 
   root.querySelectorAll("[data-field]").forEach(function (wrap) {
@@ -380,7 +387,7 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
   });
 
   root.querySelectorAll("[data-click]").forEach(function (btn) {
-    btn.addEventListener("click", function () { fireEvent(btn.id, "click"); });
+    btn.addEventListener("click", function () { fireEvent(btn.id, "click", undefined, btn); });
   });
 
   // A handler-less button whose label names another screen is a plain link to that screen.
@@ -579,6 +586,13 @@ export function renderScreen(
   .btn-danger:not(:disabled):hover { filter: brightness(1.08); }
   .btn-ghost { background: transparent; color: var(--clr-primary); border: 1.5px solid var(--clr-primary); }
   .btn-ghost:not(:disabled):hover { background: var(--clr-primary-light); }
+  .btn-spinner {
+    display: inline-block; width: 12px; height: 12px; margin-right: 7px; vertical-align: -2px;
+    border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    opacity: 0.85; animation: btn-spin 0.6s linear infinite;
+  }
+  .btn-spinner[hidden] { display: none; }
+  @keyframes btn-spin { to { transform: rotate(360deg); } }
 
   #screen-messages:empty { display: none; }
   #screen-messages { margin-bottom: 18px; }
