@@ -37,6 +37,12 @@ function renderField(f: FieldItem): string {
   if (f.type === "checkbox") {
     const checked = def === "true" ? " checked" : "";
     control = `<input type="checkbox" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${checked}${disabled}${wiredEvents}>`;
+  } else if (f.type === "select" && f.optionsBinding) {
+    // Populated from a REAL query's rows (e.g. picking an existing Exam), not a fixed list — this
+    // is only the initial shell; the client script replaces it once the screen's load event (or
+    // whatever event the XML wires) maps rows onto "field:fieldId:options", same spirit as a grid's
+    // emptyMessage row before ITS load event fires.
+    control = `<select id="${escAttr(f.id)}" name="${escAttr(f.id)}"${disabled}${wiredEvents}><option value="">Select…</option></select>`;
   } else if (f.type === "select" && f.options.length) {
     // A real dropdown only when the XML supplies <option> children (e.g. a filter's fixed choice
     // list) — a select with no options source still falls through to the plain-text-input fallback
@@ -183,6 +189,14 @@ function gridActionsJson(model: ScreenModel): string {
   return JSON.stringify(map);
 }
 
+// Value/label column bindings for every data-backed select field, keyed by field id — lets the
+// client script turn a mapped query's rows into real <option>s without re-parsing the XML.
+function fieldOptionsJson(model: ScreenModel): string {
+  const map: Record<string, { value: string; label: string }> = {};
+  for (const f of model.fields) if (f.optionsBinding) map[f.id] = { value: f.optionsBinding.valueColumn, label: f.optionsBinding.labelColumn };
+  return JSON.stringify(map);
+}
+
 // Which "table.column" each grid column / form field is bound to — lets clicking a grid row fill
 // the form fields that map to the same column (edit-in-place), with no AI involvement.
 function mappingsJson(model: ScreenModel): { grid: string; field: string } {
@@ -204,6 +218,7 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
   var TOKEN = ${JSON.stringify(opts.token)};
   var GRID_COLUMNS = ${gridColumnsJson(model)};
   var GRID_ACTIONS = ${gridActionsJson(model)};
+  var FIELD_OPTIONS = ${fieldOptionsJson(model)};
   var GRID_MAPPINGS = ${mappings.grid};
   var FIELD_MAPPINGS = ${mappings.field};
   var LOAD_ELEMENTS = ${JSON.stringify(model.loadElements)};
@@ -252,7 +267,9 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     var messages = [];
     var navigateTo = null;
     (actions || []).forEach(function (a) {
-      if ((a.type === "map" || a.type === "set") && typeof a.target === "string" && a.target.indexOf("field:") === 0) {
+      if ((a.type === "map" || a.type === "set") && typeof a.target === "string" && a.target.indexOf("field:") === 0 && a.target.slice(-8) === ":options" && Array.isArray(a.value)) {
+        renderFieldOptions(a.target.slice(6, -8), a.value);
+      } else if ((a.type === "map" || a.type === "set") && typeof a.target === "string" && a.target.indexOf("field:") === 0) {
         var el = fieldEl(a.target.slice(6));
         if (el) { if (el.type === "checkbox") el.checked = Boolean(a.value); else el.value = a.value == null ? "" : a.value; }
       } else if ((a.type === "map" || a.type === "set") && typeof a.target === "string" && a.target.indexOf("grid:") === 0 && Array.isArray(a.value)) {
@@ -319,6 +336,23 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
       }
       return '<tr data-row="' + i + '">' + cells + "</tr>";
     }).join("");
+  }
+
+  // Rebuilds a data-backed select's <option> list from a mapped query's rows — the sibling of
+  // renderGridRows, for a dropdown instead of a table. A leading blank option is always included so
+  // nothing is silently pre-selected; FIELD_OPTIONS[fieldId] names which row property is the value
+  // and which is the label.
+  function renderFieldOptions(fieldId, rows) {
+    var binding = FIELD_OPTIONS[fieldId];
+    var el = fieldEl(fieldId);
+    if (!binding || !el || el.tagName !== "SELECT") return;
+    var opts = '<option value="">Select…</option>' + rows.map(function (row) {
+      var v = row[binding.value];
+      var l = row[binding.label];
+      var span = document.createElement("span"); span.textContent = l == null ? "" : String(l);
+      return '<option value="' + attrEscape(v == null ? "" : String(v)) + '">' + span.innerHTML + "</option>";
+    }).join("");
+    el.innerHTML = opts;
   }
 
   // Clicking a grid row copies its values into every form field bound to the same table.column

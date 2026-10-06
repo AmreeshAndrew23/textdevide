@@ -596,3 +596,30 @@ describe("engine: numeric fields with no persistenceMapping are coerced before b
     expect(typeof seenParams.skip).toBe("number");
   });
 });
+
+describe("screenModel + renderer: data-backed select (options populated from a query's rows)", () => {
+  const xml = `<screen id="s" title="S"><ui>
+    <field id="examId" label="Exam" type="select" optionValue="examId" optionLabel="examName"/>
+    <field id="status" label="Status" type="select"><option value="" label="All"/><option value="open" label="Open"/></field>
+  </ui><events/></screen>`;
+  const model = parseScreenModel(xml);
+  it("parses optionValue/optionLabel into optionsBinding", () => {
+    expect(model.fields.find((f) => f.id === "examId")?.optionsBinding).toEqual({ valueColumn: "examId", labelColumn: "examName" });
+    expect(model.fields.find((f) => f.id === "status")?.optionsBinding).toBeNull();
+  });
+  it("renders a placeholder shell for a data-backed select and bakes FIELD_OPTIONS", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(html).toContain('<select id="examId" name="examId"><option value="">Select…</option></select>');
+    expect(html).toContain('var FIELD_OPTIONS = {"examId":{"value":"examId","label":"examName"}};');
+  });
+  it("a static-option select is completely unaffected", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(html).toContain('<select id="status" name="status"><option value="">All</option><option value="open">Open</option></select>');
+  });
+  it("dynamic wins over static when a field somehow declares both", () => {
+    const both = parseScreenModel(`<screen id="s" title="S"><ui><field id="x" label="X" type="select" optionValue="a" optionLabel="b"><option value="z" label="Z"/></field></ui><events/></screen>`);
+    const html = renderScreen(both, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(html).toContain('<select id="x" name="x"><option value="">Select…</option></select>');
+    expect(html).not.toContain(">Z</option>");
+  });
+});

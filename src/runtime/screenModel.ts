@@ -39,6 +39,12 @@ export type FieldItem = {
   // to carry a sensible starting value the very first time the screen loads, e.g. a pagination
   // "skip" field defaulting to "0" so the first SKIP $skip in Cypher isn't an empty string.
   defaultValue: string | null;
+  // optionValue="col" optionLabel="col" on a type="select" field — marks it as populated from a
+  // REAL query's rows (e.g. picking an existing Exam to register for) instead of a fixed list the
+  // AI wrote into the XML. Populated the same way a grid is: <map result="rows"
+  // target="field:fieldId:options"/>. Takes priority over static <option> children when both
+  // happen to be present.
+  optionsBinding: { valueColumn: string; labelColumn: string } | null;
 };
 
 export type GridColumn = { id: string; header: string; binding: string; persistenceMapping: string | null };
@@ -115,6 +121,11 @@ function parseField(el: XmlElement, eventsByElement: Map<string, string[]>): Fie
     eventTypes: eventsByElement.get(id) || [],
     options: parseOptions(el),
     defaultValue: el.getAttribute("default"),
+    optionsBinding: (() => {
+      const valueColumn = el.getAttribute("optionValue");
+      const labelColumn = el.getAttribute("optionLabel");
+      return valueColumn && labelColumn ? { valueColumn, labelColumn } : null;
+    })(),
   };
 }
 

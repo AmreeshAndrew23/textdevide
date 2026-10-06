@@ -266,16 +266,36 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      ENFORCED server-side before any save/update/delete query runs, so get them right, not just
      decorative. Related fields may be visually grouped inside a <fieldset legend="..."> — this is
      purely cosmetic grouping, not a new data concept.
-   - A type="select" field with a FIXED set of choices (a filter, a status dropdown) renders a real
-     dropdown when given <option value="..." label="..."/> children:
-       <field id="courseFilter" label="Course" type="select">
+   - A type="select" field with a FIXED, small set of choices that will never come from a table
+     (Status: Active/Inactive, a Yes/No) renders a real dropdown when given
+     <option value="..." label="..."/> children:
+       <field id="status" label="Status" type="select">
          <option value="" label="All"/>
-         <option value="CSE" label="CSE"/>
-         <option value="ECE" label="ECE"/>
+         <option value="active" label="Active"/>
+         <option value="inactive" label="Inactive"/>
        </field>
      Always include an empty-value "All"/unfiltered option first unless every record must have a
-     value. A select with no <option> children falls back to a plain text input — only use type="select"
-     when you're listing the actual <option> choices.
+     value. A select with no <option> children and no optionValue/optionLabel (below) falls back to
+     a plain text input.
+   - A type="select" field that lets the user pick an EXISTING RECORD FROM ANOTHER TABLE — an Exam
+     to register for, a Department for a Student, a Course for an Exam, any filter whose choices are
+     real rows rather than a fixed enum — MUST be data-backed, never a hardcoded <option> list (a
+     hardcoded list goes stale the moment a new row is added on another screen). Use
+     optionValue="column" optionLabel="column" instead of <option> children, and populate it exactly
+     like a grid: a query, and a <map> onto "field:fieldId:options" instead of "grid:gridId":
+       <field id="examId" label="Exam" type="select" optionValue="examId" optionLabel="examName"/>
+       ...
+       <query id="listExamOptions"><dataSource ref="mainDB"/>
+         <statement>MATCH (e:Exam) RETURN e.examId AS examId, e.examName AS examName ORDER BY e.examName</statement></query>
+       ...
+       <event type="load" element="theScreenId">
+         <execute query="listExamOptions"><map result="rows" target="field:examId:options"/></execute>
+       </event>
+     Populate it from the screen's own load event (it runs once, automatically, same as a grid's
+     load-populated list) — add it alongside whatever else that load event already does. If this
+     same screen ALSO creates rows in the referenced table, re-run the same query/map after that
+     save too so a newly-added row shows up without a reload. optionValue/optionLabel take priority
+     over <option> children if a field somehow has both — don't combine them.
    - <grid id="gridId" label="..." readonly="true|false" emptyMessage="...">
        <column id="colId" header="..." binding="resultColumn" persistenceMapping="table.column"/>
        <actions>
@@ -382,8 +402,11 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
          the list query with an extra WHERE, e.g.
          MATCH (s:Student) WHERE toLower(s.firstName) CONTAINS toLower($q) RETURN ... — bind $q to
          field:searchField. Empty search should still return everything: WHERE $q = '' OR toLower(s.firstName) CONTAINS toLower($q).
-       * FILTER: a type="select" field (rule 5) with <option>s for the real distinct values; its
-         change event re-runs the list query with WHERE ($course = '' OR s.course = $course).
+       * FILTER: a type="select" field (rule 5). If its choices come from another table's real
+         values (e.g. filter by Course), make it data-backed with optionValue/optionLabel, NOT a
+         hardcoded <option> list — the same staleness problem as any cross-table dropdown. A small
+         fixed enum (e.g. filter by Status) can stay a plain <option> list. Either way, its change
+         event re-runs the list query with WHERE ($course = '' OR s.course = $course).
        * SORT: Cypher cannot bind a column name or ASC/DESC through a parameter, so sorting by a
          user choice needs one query PER sort order, selected with <when>: a sortBy field (e.g.
          values "name_asc"/"name_desc") whose change event does
