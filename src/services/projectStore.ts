@@ -7,7 +7,12 @@
  * updateProject() (which routes each field to the right database), so the API JSON is unchanged.
  *
  * Neo4j model (labels are NOT prefixed "Proj", so no user/AI query can reach them — see cypher.ts):
- *   (:TdWorkspace {projectId})                      marker: this project's workspace lives in Neo4j
+ *   (:TdWorkspace {projectId, userId, projectName}) marker: this project's workspace lives in Neo4j.
+ *     userId/projectName are NOT the access-control mechanism (ownership is enforced in Postgres by
+ *     getOwnedProject below, on every route, before Neo4j is ever touched) — they're a lookup/legend
+ *     so a human browsing Neo4j directly can tell which user and project a Proj<id>_ label prefix
+ *     belongs to, without cross-referencing Postgres. e.g. MATCH (w:TdWorkspace {userId: 12}) RETURN
+ *     w.projectId, w.projectName lists everything a given user owns.
  *   (:TdArtifact  {projectId, kind, content})       one per non-screen artifact (entities, er_diagram, ...)
  *   (:TdScreen    {projectId, screenId, name, position, json})   one per screen
  */
@@ -173,7 +178,9 @@ async function migrateInTx(tx: Transaction, row: ProjectRow): Promise<void> {
     console.warn(`Project ${row.id}: legacy ui_screens is not a valid screen array — screens were not migrated`);
   }
   await writeScreens(tx, row.id, nodes);
-  await tx.run("MERGE (w:TdWorkspace {projectId: $pid}) SET w.migratedAt = datetime()", { pid: pid(row.id) });
+  await tx.run("MERGE (w:TdWorkspace {projectId: $pid}) SET w.migratedAt = datetime(), w.userId = $userId, w.projectName = $projectName", {
+    pid: pid(row.id), userId: neo4j.int(row.userId), projectName: row.name,
+  });
 }
 
 async function ensureMigrated(row: ProjectRow): Promise<void> {
@@ -285,6 +292,16 @@ export async function updateProject(projectId: number, patch: Partial<ProjectRow
   let row = current;
   if (Object.keys(pg).length) {
     [row] = await db.update(projects).set(pg).where(eq(projects.id, projectId)).returning();
+  }
+  if (typeof pg.name === "string" && pg.name !== current.name) {
+    // Best-effort — keeps the TdWorkspace lookup node's display name in sync with a rename. Never
+    // blocks or fails this request: the rename already succeeded in Postgres, and this field is a
+    // browsing convenience, not something anything else reads.
+    try {
+      await withTx((tx) => tx.run("MATCH (w:TdWorkspace {projectId: $pid}) SET w.projectName = $name", { pid: pid(projectId), name: pg.name }));
+    } catch (e) {
+      console.warn(`Failed to refresh TdWorkspace.projectName for project ${projectId}: ${e instanceof Error ? e.message : e}`);
+    }
   }
   return overlayWorkspace(row, ws);
 }
