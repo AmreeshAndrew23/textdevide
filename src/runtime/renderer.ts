@@ -345,7 +345,20 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
   function renderFieldOptions(fieldId, rows) {
     var binding = FIELD_OPTIONS[fieldId];
     var el = fieldEl(fieldId);
-    if (!binding || !el || el.tagName !== "SELECT") return;
+    if (!binding || !el || el.tagName !== "SELECT") {
+      // Silent otherwise: a mapped "field:x:options" that can't be applied looks exactly like a
+      // dropdown that "sometimes doesn't work" with nothing in the console to explain why — this is
+      // almost always a mismatch between this query's map target and the field's own id, or a
+      // missing optionValue/optionLabel on a select-type field (it then falls back to a plain text
+      // input per renderField's comment above, so there is no dropdown at all).
+      console.warn(
+        "Dropdown options for field '" + fieldId + "' not applied: " +
+        (!binding ? "no optionValue/optionLabel binding for this field id (check the <map target> matches a real <field optionValue optionLabel> id)."
+          : !el ? "no field with this id found on the screen."
+          : "field '" + fieldId + "' is not rendered as a dropdown (optionValue/optionLabel may be missing on it).")
+      );
+      return;
+    }
     var opts = '<option value="">Select…</option>' + rows.map(function (row) {
       var v = row[binding.value];
       var l = row[binding.label];

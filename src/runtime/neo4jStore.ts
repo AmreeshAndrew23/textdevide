@@ -259,12 +259,68 @@ export async function replaceAllRows(
 // Query execution for screen events
 // ---------------------------------------------------------------------------
 
+// Matches a single node pattern right after CREATE/MERGE — (var:Label {k: $p, ...}) — which is the
+// only node-pattern shape this app's Cypher grammar allows (prepareCypher forbids relationships and
+// subqueries, so a write clause is always one or more comma-separated standalone node patterns).
+// Captures: [1] clause keyword, [2] optional var, [3] label, [4] optional inline {..} property map.
+const CREATE_MERGE_NODE_RE = /(CREATE|MERGE)\s*\(\s*([A-Za-z_]\w*)?\s*:\s*([A-Za-z_]\w*)\s*(\{[^{}]*\})?\s*\)/g;
+const COLUMN_IDENT_RE = /^[A-Za-z_]\w*$/;
+
+// A screen's own CREATE/MERGE statement has no way to supply a value for an autonumber column —
+// there's no form field for it (it's generated, never user-entered), so the AI-authored query never
+// declares a parameter for it either, and the node gets created without that property at all. This
+// fills in any autonumber column missing from a write statement's node pattern(s) the same way
+// replaceAllRows seeds one for a bulk preview-grid save: read the column's already-stored values,
+// work out the next one, and splice it into the statement/params as if the query had asked for it
+// all along. Runs before prepareCypher, so labels in `statement` are still the plain table names.
+async function injectAutonumberDefaults(
+  tx: Transaction, projectId: number, entities: Entities, statement: string, params: Record<string, unknown>
+): Promise<{ statement: string; params: Record<string, unknown> }> {
+  const tables = entities.tables || [];
+  const matches = Array.from(statement.matchAll(CREATE_MERGE_NODE_RE));
+  if (!matches.length) return { statement, params };
+
+  const nextParams = { ...params };
+  const edits: { start: number; end: number; text: string }[] = [];
+  let seq = 0;
+
+  for (const m of matches) {
+    const table = tables.find((t) => t.name === m[3]);
+    const autonumberCols = (table?.columns || []).filter((c) => c.autonumber && COLUMN_IDENT_RE.test(c.name));
+    if (!autonumberCols.length) continue;
+    const propMapText = m[4] || "";
+    const additions: string[] = [];
+    for (const col of autonumberCols) {
+      if (new RegExp(`(^|[{,]\\s*)${col.name}\\s*:`).test(propMapText)) continue; // query already supplies it
+      const res = await tx.run(`MATCH (n:${labelFor(projectId, m[3])}) RETURN n.${col.name} AS v`);
+      const existing = res.records.map((r) => fromDriverValue(r.get("v"))).filter((v) => v !== null && v !== undefined && v !== "");
+      const [next] = autonumberSeed(col.autonumber!, existing);
+      const paramName = `__autonum_${col.name}_${seq++}`;
+      nextParams[paramName] = formatAutonumber(col.autonumber!, next);
+      additions.push(`${col.name}: $${paramName}`);
+    }
+    if (!additions.length) continue;
+    const newPropMap = propMapText
+      ? propMapText.replace(/\}\s*$/, `${propMapText.trim() === "{}" ? "" : ", "}${additions.join(", ")}}`)
+      : ` {${additions.join(", ")}}`;
+    const insertAt = propMapText ? m[0].lastIndexOf(propMapText) : m[0].lastIndexOf(")");
+    edits.push({ start: m.index! + insertAt, end: m.index! + insertAt + propMapText.length, text: newPropMap });
+  }
+
+  if (!edits.length) return { statement, params: nextParams };
+  edits.sort((a, b) => b.start - a.start); // apply right-to-left so earlier offsets stay valid
+  let out = statement;
+  for (const e of edits) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return { statement: out, params: nextParams };
+}
+
 export async function executeQuery(
   tx: Transaction, projectId: number, entities: Entities, statement: string, params: Record<string, unknown>
 ): Promise<QueryResult> {
   const tables = new Set((entities.tables || []).map((t) => t.name));
-  const cypher = prepareCypher(statement, projectId, tables, new Set(Object.keys(params)));
-  const bound = Object.fromEntries(Object.entries(params).map(([k, v]) => [k, toDriverValue(v)]));
+  const withDefaults = await injectAutonumberDefaults(tx, projectId, entities, statement, params);
+  const cypher = prepareCypher(withDefaults.statement, projectId, tables, new Set(Object.keys(withDefaults.params)));
+  const bound = Object.fromEntries(Object.entries(withDefaults.params).map(([k, v]) => [k, toDriverValue(v)]));
   const res = await tx.run(cypher, bound);
   const rows = res.records.map((r) => fromDriverValue(r.toObject()) as Record<string, unknown>);
   const c = res.summary.counters.updates();

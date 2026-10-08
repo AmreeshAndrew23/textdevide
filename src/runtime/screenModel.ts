@@ -17,7 +17,7 @@ export function childElements(parent: XmlElement, tagName?: string): XmlElement[
   return tagName ? els.filter((el) => el.tagName === tagName) : els;
 }
 
-export type FieldRule = { required?: boolean; pattern?: string; maxLength?: number; minValue?: number; maxValue?: number };
+export type FieldRule = { required?: boolean; pattern?: string; maxLength?: number; minValue?: number; maxValue?: number; unique?: boolean };
 
 export type FieldOption = { value: string; label: string };
 
@@ -91,6 +91,7 @@ function parseRules(fieldEl: XmlElement): FieldRule[] {
     const rule: FieldRule = {};
     const requiredAttr = attr(r, "required");
     if (requiredAttr === "true") rule.required = true;
+    if (attr(r, "unique") === "true") rule.unique = true;
     const pattern = attr(r, "pattern");
     if (pattern) rule.pattern = pattern;
     const maxLength = attr(r, "maxLength");

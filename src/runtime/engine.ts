@@ -6,7 +6,7 @@
  */
 import { DOMParser } from "@xmldom/xmldom";
 import type { Element as XmlElement } from "@xmldom/xmldom";
-import { type Entities, columnType, coerceValue } from "./values.js";
+import { type Entities, columnType, coerceValue, findTable } from "./values.js";
 import { type FieldRule, isElement, childElements } from "./screenModel.js";
 
 export type QueryResult = { rows: Record<string, unknown>[]; count: number };
@@ -144,6 +144,7 @@ function parseFieldMeta(root: XmlElement): Map<string, FieldMeta> {
     const rules: FieldRule[] = childElements(el, "rule").map((r) => {
       const rule: FieldRule = {};
       if (r.getAttribute("required") === "true") rule.required = true;
+      if (r.getAttribute("unique") === "true") rule.unique = true;
       const pattern = r.getAttribute("pattern");
       if (pattern) rule.pattern = pattern;
       const maxLength = r.getAttribute("maxLength");
@@ -163,18 +164,52 @@ const WRITE_STATEMENT_RE = /\b(CREATE|MERGE|SET|REMOVE|DELETE)\b/i;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isEmptyValue = (v: unknown) => v === null || v === undefined || (typeof v === "string" && v.trim() === "");
 
+const IDENT_RE = /^[A-Za-z_]\w*$/;
+
+// True when some OTHER row already has this value for the field's persisted column — "other"
+// meaning excluded by the table's own primary key when this write is an update (read off whichever
+// field's persistenceMapping names that pk column; empty/absent means there's no row to exclude, so
+// this is an insert). Goes through the same QueryExecutor every other screen statement runs
+// through, so it gets the same label-prefixing/validation as an AI-authored existence check.
+async function valueTaken(
+  fieldId: string, value: unknown, fieldPersistence: Map<string, [string, string]>, entities: Entities,
+  fieldValues: Record<string, unknown>, exec: QueryExecutor
+): Promise<boolean> {
+  const mapping = fieldPersistence.get(fieldId);
+  if (!mapping) return false;
+  const [table, column] = mapping;
+  if (!IDENT_RE.test(table) || !IDENT_RE.test(column)) return false;
+  const params: Record<string, unknown> = { __uniqueVal: value };
+  let exclude = "";
+  const pkColumn = findTable(entities, table)?.columns?.find((c) => c.pk)?.name;
+  if (pkColumn && IDENT_RE.test(pkColumn)) {
+    const pkFieldId = [...fieldPersistence.entries()].find(([, m]) => m[0] === table && m[1] === pkColumn)?.[0];
+    const pkValue = pkFieldId ? fieldValues[pkFieldId] : undefined;
+    if (!isEmptyValue(pkValue)) {
+      exclude = ` AND n.${pkColumn} <> $__uniquePk`;
+      params.__uniquePk = pkValue;
+    }
+  }
+  const result = await exec(`MATCH (n:${table}) WHERE n.${column} = $__uniqueVal${exclude} RETURN count(n) AS cnt`, params);
+  return Number(result.rows[0]?.cnt ?? 0) > 0;
+}
+
 // Validates exactly the fields that SOURCE this query's parameters — derived purely from existing
 // metadata (a query's own `source="field:x"` params + that field's <rule>s), never from an entity
 // name or button label. A read-only query (search/filter/sort) never triggers this, so typing in a
 // search box can never be blocked by an unrelated required field elsewhere on the same screen.
-function validateWriteFields(query: ParsedQuery, fieldValues: Record<string, unknown>, fieldMeta: Map<string, FieldMeta>): EventAction[] {
+async function validateWriteFields(
+  query: ParsedQuery, fieldValues: Record<string, unknown>, fieldMeta: Map<string, FieldMeta>,
+  fieldPersistence: Map<string, [string, string]>, entities: Entities, exec: QueryExecutor
+): Promise<EventAction[]> {
   const violations: EventAction[] = [];
   const say = (label: string, msg: string) => violations.push({ type: "message", messageType: "error", value: `${label} ${msg}` });
   for (const source of Object.values(query.params)) {
     if (!source.startsWith("field:")) continue;
-    const meta = fieldMeta.get(source.slice("field:".length));
+    const fieldId = source.slice("field:".length);
+    const meta = fieldMeta.get(fieldId);
     if (!meta || !meta.rules.length) continue;
-    const value = fieldValues[source.slice("field:".length)];
+    const value = fieldValues[fieldId];
     for (const rule of meta.rules) {
       if (rule.required && isEmptyValue(value)) {
         say(meta.label, "is required.");
@@ -200,6 +235,9 @@ function validateWriteFields(query: ParsedQuery, fieldValues: Record<string, unk
         }
       }
       if (meta.type === "email" && !EMAIL_RE.test(str)) say(meta.label, "must be a valid email address.");
+      if (rule.unique && (await valueTaken(fieldId, value, fieldPersistence, entities, fieldValues, exec))) {
+        say(meta.label, "is already in use.");
+      }
     }
   }
   return violations;
@@ -359,7 +397,7 @@ async function runExecute(
   // leaves nothing partially applied. A read-only query (list/search/filter/sort) never matches
   // WRITE_STATEMENT_RE, so this never blocks anything but an actual save/delete.
   if (WRITE_STATEMENT_RE.test(query.statement)) {
-    const violations = validateWriteFields(query, fieldValues, fieldMeta);
+    const violations = await validateWriteFields(query, fieldValues, fieldMeta, fieldPersistence, entities, exec);
     if (violations.length) {
       actions.push(...violations, { type: "stop" });
       return true;
