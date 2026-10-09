@@ -288,7 +288,43 @@ export type EventAction =
   | { type: "set"; target: string; value: unknown }
   | { type: "message"; messageType: string; value: string }
   | { type: "navigate"; screenId: string; screenName: string }
+  | { type: "session"; action: "start" | "end" }
   | { type: "stop" };
+
+// <event ... allowAnonymous="true"> marks an event as safe to run with no identity at all — the
+// ONLY way an unauthenticated caller is allowed to do anything (see previewDb.ts's run-event dual
+// auth). Only ever a login check or an account-creation/signup, by convention documented in the AI
+// prompt; the engine itself enforces nothing about what such an event may contain, same as any
+// other event — this just answers "is this specific element+type pair marked safe".
+export function isAnonymousEvent(screenXml: string, elementId: string, eventType: string): boolean {
+  let root: XmlElement;
+  try {
+    const doc = new DOMParser().parseFromString(screenXml, "text/xml");
+    if (!doc.documentElement) return false;
+    root = doc.documentElement;
+  } catch {
+    return false;
+  }
+  const event = Array.from(root.getElementsByTagName("event")).find(
+    (ev) => ev.getAttribute("element") === elementId && ev.getAttribute("type") === eventType
+  );
+  return event?.getAttribute("allowAnonymous") === "true";
+}
+
+// Whether this screen has AT LEAST ONE allowAnonymous event — i.e. it's a genuine entry point (a
+// Login/Signup screen) and may be rendered with no identity at all. Every other screen stays
+// private (requires a builder token or a real app session) even if its id is guessed.
+export function hasAnonymousEntry(screenXml: string): boolean {
+  let root: XmlElement;
+  try {
+    const doc = new DOMParser().parseFromString(screenXml, "text/xml");
+    if (!doc.documentElement) return false;
+    root = doc.documentElement;
+  } catch {
+    return false;
+  }
+  return Array.from(root.getElementsByTagName("event")).some((ev) => ev.getAttribute("allowAnonymous") === "true");
+}
 
 // A project's OTHER screens (never includes the one currently running) — a <navigate screen="..">
 // is resolved against this, real id first, then a case-insensitive name match, so navigation only
@@ -367,7 +403,7 @@ export async function runEvent(
     } else if (step.tagName === "navigate") {
       runNavigate(step, siblingScreens, actions);
       break; // navigating away ends the chain, same as <stop>
-    } else if (step.tagName === "message" || step.tagName === "set" || step.tagName === "stop") {
+    } else if (step.tagName === "message" || step.tagName === "set" || step.tagName === "stop" || step.tagName === "session") {
       // e.g. a closing <message type="success" value="Saved."/> written after the executes. It has
       // no query result of its own, so ${result.*} placeholders resolve to empty.
       if (await runStep(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, { rows: [], count: 0 }, values, actions)) break;
@@ -425,7 +461,7 @@ async function runExecute(
       if (await runWhenBody(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions)) {
         return true;
       }
-    } else if (child.tagName === "execute" || child.tagName === "set" || child.tagName === "message" || child.tagName === "navigate" || child.tagName === "stop") {
+    } else if (child.tagName === "execute" || child.tagName === "set" || child.tagName === "message" || child.tagName === "navigate" || child.tagName === "stop" || child.tagName === "session") {
       // The model routinely writes "insert, THEN reload the list" as a second <execute> nested
       // directly inside the first (no <when> around it). Silently skipping it meant a successful
       // save never refreshed the grid or confirmed anything — so an unconditional step runs the
@@ -476,6 +512,11 @@ async function runStep(
   } else if (inner.tagName === "stop") {
     actions.push({ type: "stop" });
     return true;
+  } else if (inner.tagName === "session") {
+    const action = inner.getAttribute("action");
+    if (action === "start" || action === "end") actions.push({ type: "session", action });
+    // Deliberately does NOT return true — a login success is typically <session action="start"/>
+    // immediately followed by a sibling <navigate>, and both need to run in the same chain.
   } else if (inner.tagName === "execute") {
     if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, fieldValues, actions)) return true;
   }

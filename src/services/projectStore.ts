@@ -245,6 +245,16 @@ export async function getOwnedProject(projectId: number, userId: number): Promis
   return hydrate(row);
 }
 
+// NO ownership check — the one deliberate exception. Used ONLY for rendering a screen that has
+// already proven (via hasAnonymousEntry, see engine.ts) to be a genuine public entry point (a
+// Login/Signup screen) for a request with no identity at all, since there's nothing to check
+// ownership against yet. Never used for run-event or anything that reads/writes real data.
+export async function getProjectPublic(projectId: number): Promise<ProjectRow> {
+  const [row] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+  if (!row) throw new HttpError(404, "Project not found");
+  return hydrate(row);
+}
+
 // The project list only needs each project's table schema. One query for all of them; a project not
 // migrated yet still shows its legacy Postgres schema, and if Neo4j is down the list still loads
 // (without table info) instead of failing.

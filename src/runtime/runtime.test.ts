@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { labelFor, prepareCypher, validateCypherStatic } from "./cypher.js";
 import { coerceValue } from "./values.js";
-import { evaluateCondition, resolveTemplate, runEvent, type QueryExecutor } from "./engine.js";
+import { evaluateCondition, resolveTemplate, runEvent, isAnonymousEvent, hasAnonymousEntry, type QueryExecutor } from "./engine.js";
 import { lintScreenXml } from "../services/aiService.js";
 import { parseScreenModel } from "./screenModel.js";
 import { renderScreen, THEMES, findScreenForLabel } from "./renderer.js";
@@ -621,5 +621,51 @@ describe("screenModel + renderer: data-backed select (options populated from a q
     const html = renderScreen(both, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
     expect(html).toContain('<select id="x" name="x"><option value="">Select…</option></select>');
     expect(html).not.toContain(">Z</option>");
+  });
+});
+
+describe("engine: <session> action + allowAnonymous gating", () => {
+  const xml = `<screen id="s" title="S">
+  <queries>
+    <query id="check"><statement>MATCH (a:Account) WHERE a.username = $u AND a.password = $p RETURN count(a) AS count</statement>
+      <parameters><parameter name="u" source="field:u"/><parameter name="p" source="field:p"/></parameters></query>
+  </queries>
+  <ui><field id="u" label="User" type="text"/><field id="p" label="Pass" type="password"/><button id="loginBtn" label="Login"/><button id="other" label="Other"/></ui>
+  <events>
+    <event type="click" element="loginBtn" allowAnonymous="true">
+      <execute query="check">
+        <when condition="result.count == 0"><message type="error" value="Invalid."/><stop/></when>
+        <when condition="result.count > 0"><session action="start"/><navigate screen="Dashboard"/></when>
+      </execute>
+    </event>
+    <event type="click" element="other"><session action="end"/></event>
+  </events>
+</screen>`;
+  const entities = {};
+
+  it("isAnonymousEvent is true only for the marked event", () => {
+    expect(isAnonymousEvent(xml, "loginBtn", "click")).toBe(true);
+    expect(isAnonymousEvent(xml, "other", "click")).toBe(false);
+    expect(isAnonymousEvent(xml, "missing", "click")).toBe(false);
+  });
+  it("hasAnonymousEntry is true for a screen with at least one such event", () => {
+    expect(hasAnonymousEntry(xml)).toBe(true);
+    expect(hasAnonymousEntry(`<screen id="x"><ui/><events><event type="click" element="a"/></events></screen>`)).toBe(false);
+  });
+  it("a successful login produces session:start then navigate, in order, in the same chain", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [{ count: 1 }], count: 1 });
+    const actions = await runEvent(exec, entities, xml, "loginBtn", "click", { u: "a", p: "b" }, [{ id: "d1", name: "Dashboard" }]);
+    expect(actions).toEqual([{ type: "session", action: "start" }, { type: "navigate", screenId: "d1", screenName: "Dashboard" }]);
+  });
+  it("a failed login produces no session action", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [{ count: 0 }], count: 1 });
+    const actions = await runEvent(exec, entities, xml, "loginBtn", "click", { u: "a", p: "wrong" });
+    expect(actions.some((a) => a.type === "session")).toBe(false);
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Invalid." });
+  });
+  it("<session action=\"end\"/> alone does not stop the chain (no following steps here, but it must not throw or short-circuit silently)", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [], count: 0 });
+    const actions = await runEvent(exec, entities, xml, "other", "click", {});
+    expect(actions).toEqual([{ type: "session", action: "end" }]);
   });
 });

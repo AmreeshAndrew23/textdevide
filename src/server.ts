@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import cookie from "@fastify/cookie";
 import { ZodError } from "zod";
 import { HttpError } from "./services/authService.js";
 import authRoutes from "./routes/auth.js";
@@ -18,6 +19,10 @@ export async function buildServer() {
   // else this API uses (PUT, DELETE) was silently blocked by the browser's preflight check before
   // ever reaching a route handler. Every verb the API actually serves must be listed explicitly.
   await app.register(cors, { origin: true, methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] });
+  // The generated app's own session cookie (see services/appSession.ts) — set/read by run-event and
+  // the runtime render route. No signing option passed: appSession.ts signs/verifies the whole JWT
+  // itself, this plugin only needs to parse/serialize the Cookie/Set-Cookie headers.
+  await app.register(cookie);
 
   app.get("/api/health", async () => ({ status: "ok" }));
 

@@ -355,6 +355,43 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      id or exact name of one of THIS PROJECT'S OTHER SCREENS listed below — never invent a screen
      that isn't in that list. Whatever runs after a <navigate> in the same chain never executes
      (same as <stop>), since the page is about to leave.
+   - THE APP HAS ITS OWN REAL LOGIN, separate from anything else — nobody can use any screen until
+     they log in (or sign up, if they have no account yet), every single time they open the app.
+     Two pieces make this work:
+     * <event ... allowAnonymous="true"> marks an event as safe to run before anyone is logged in —
+       use this ONLY on a Login button's event and a Signup/Create Account button's event, NEVER on
+       anything else (every other event always requires a real session, enforced by the runtime,
+       not by you). A screen with at least one allowAnonymous event is the only kind of screen
+       reachable before login — so the Login screen (and a Signup screen, if the app has one) is the
+       ONLY screen that may have one.
+     * <session action="start"/> establishes the real session once a login or signup succeeds — put
+       it right before the <navigate> that sends the user into the app, e.g.
+       <when condition="result.count > 0"><session action="start"/><navigate screen="Dashboard"/></when>.
+       <session action="end"/> ends it — put this on a Log out button's event, followed by
+       <navigate screen="Login"/>. Neither stops the chain by itself (unlike <navigate>/<stop>), so
+       they combine naturally with whatever runs right after them.
+     The worked pattern every app with login needs:
+       <event type="click" element="loginBtn" allowAnonymous="true">
+         <execute query="checkLogin">                      -- MATCH (a:Account) WHERE a.username = $u AND a.password = $p RETURN count(a) AS count
+           <when condition="result.count == 0"><message type="error" value="Invalid username or password."/><stop/></when>
+           <when condition="result.count > 0"><session action="start"/><navigate screen="Dashboard"/></when>
+         </execute>
+       </event>
+       <event type="click" element="signupBtn" allowAnonymous="true">
+         <execute query="checkUsernameTaken">                -- MATCH (a:Account) WHERE a.username = $u RETURN count(a) AS count
+           <when condition="result.count > 0"><message type="error" value="That username is already taken."/><stop/></when>
+         </execute>
+         <execute query="createAccount"/>                    -- CREATE (a:Account {username: $u, password: $p})
+         <session action="start"/>
+         <navigate screen="Dashboard"/>
+       </event>
+       <event type="click" element="logoutBtn"><session action="end"/><navigate screen="Login"/></event>
+     A Login screen needs a Username/Email field and a Password field (type="password"), a Login
+     button, and — if the app supports signing up — a Signup button or a "Create Account" link to a
+     separate Signup screen (which needs the same fields plus whatever else a new account requires).
+     Every other screen in the app (Dashboard, and everything reachable from it) needs NO changes
+     for this — they already only run once someone has a real session; just make sure a "Log out"
+     button exists somewhere reachable, normally in the app shell/Dashboard.
    - condition is one comparison: a left operand, one of == != > &lt; >= &lt;=, and a right
      operand — a bare "<" is invalid inside an XML attribute value, so write it as "&lt;" (a bare
      ">" is fine unescaped, as used above). Operands are: result.count / result.rows.length (row
