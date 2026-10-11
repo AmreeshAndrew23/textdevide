@@ -5,7 +5,7 @@ import { getOwnedProject, getProjectPublic } from "../services/projectStore.js";
 import { parseScreenModel, ScreenParseError } from "../runtime/screenModel.js";
 import { hasAnonymousEntry } from "../runtime/engine.js";
 import { renderScreen } from "../runtime/renderer.js";
-import { cookieName, verifyAppSession } from "../services/appSession.js";
+import { cookieName, verifyAppSession, APP_SESSION_COOKIE_OPTS } from "../services/appSession.js";
 
 type Screen = { id: string; name?: string; xml?: string };
 
@@ -73,6 +73,20 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
           throw new HttpError(500, e instanceof ScreenParseError ? e.message : String(e));
         }
 
+        // Real application, not a bundle of jump-anywhere pages: before logging in, the nav shows
+        // ONLY the other genuine entry points (Login/Signup/Forgot Password), never the whole app —
+        // same reasoning hasAnonymousEntry already applies to which screens even render at all.
+        // Once logged in, the full nav returns (identical to the Studio's own preview).
+        const navScreens = identified ? allScreens : allScreens.filter((s) => s.xml && hasAnonymousEntry(s.xml));
+
+        // A real app session (not the builder's own Studio preview, not an anonymous entry render)
+        // gets the shell's built-in "Log out" control, pointed at a real sibling login screen if the
+        // project has one.
+        const loggedIn = identified && !token;
+        const loginScreen =
+          allScreens.find((s) => s.xml && hasAnonymousEntry(s.xml) && /\blogin\b/i.test(s.name || "")) ||
+          allScreens.find((s) => s.xml && hasAnonymousEntry(s.xml));
+
         // Prefer the Host header a proxy (Railway) sets over the raw socket's local port, so the
         // client script's fetch() calls hit the same public origin the browser actually navigated to.
         const proto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0] || req.protocol;
@@ -80,8 +94,8 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
         const apiBase = `${proto}://${host}`;
         const html = renderScreen(model, {
           apiBase, projectId: project.id, screenId: screen.id, token,
-          appName: project.name, screens: allScreens.map((s) => ({ id: s.id, name: s.name || "" })),
-          theme: project.uiTheme,
+          appName: project.name, screens: navScreens.map((s) => ({ id: s.id, name: s.name || "" })),
+          theme: project.uiTheme, loggedIn, loginScreenId: loginScreen?.id ?? null,
         });
         return reply.type("text/html; charset=utf-8").send(html);
       } catch (e) {
@@ -92,4 +106,12 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
       }
     }
   );
+
+  // The shell's built-in "Log out" control calls this — a plain session clear, no Cypher/engine
+  // involvement at all (there's nothing to "run", just forget the session). Always succeeds: a
+  // logout for a session that's already gone is a no-op, not an error.
+  app.post("/runtime/projects/:id/logout", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    reply.clearCookie(cookieName(Number(req.params.id)), { path: APP_SESSION_COOKIE_OPTS.path });
+    return reply.status(204).send();
+  });
 }

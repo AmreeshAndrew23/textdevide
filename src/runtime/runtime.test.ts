@@ -669,3 +669,24 @@ describe("engine: <session> action + allowAnonymous gating", () => {
     expect(actions).toEqual([{ type: "session", action: "end" }]);
   });
 });
+
+describe("renderer: shell's built-in Log out control", () => {
+  const model = parseScreenModel(`<screen id="dash" title="Dashboard"><ui><button id="b" label="Do thing"/></ui><events/></screen>`);
+  const screens = [{ id: "dash", name: "Dashboard" }, { id: "login", name: "Login" }];
+  it("renders a Log out control pointed at the real login screen when loggedIn and a login screen exists", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: true, loginScreenId: "login" });
+    expect(html).toMatch(/<button type="button" class="app-topbar-logout" data-app-logout data-login-url="[^"]*\/screens\/login\?/);
+  });
+  it("renders no Log out control when not logged in (anonymous or builder preview)", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: false, loginScreenId: "login" });
+    expect(html).not.toContain('class="app-topbar-logout"');
+  });
+  it("renders no Log out control when logged in but the project has no login screen", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: true, loginScreenId: null });
+    expect(html).not.toContain('class="app-topbar-logout"');
+  });
+  it("defaults to no Log out control when the caller omits loggedIn/loginScreenId entirely", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "t", screens });
+    expect(html).not.toContain('class="app-topbar-logout"');
+  });
+});

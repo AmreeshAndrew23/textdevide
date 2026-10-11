@@ -442,6 +442,19 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     btn.addEventListener("click", function () { window.location.href = btn.getAttribute("data-nav-href"); });
   });
 
+  // The shell's built-in "Log out" control — structural, present automatically on every screen a
+  // real app session is logged into, no XML/AI involvement needed. Clears the session server-side
+  // (a plain cookie clear, not a Cypher event) then always navigates to the login screen, even if
+  // the request itself fails — a stale cookie is harmless (it just won't verify on the next call).
+  root.querySelectorAll("[data-app-logout]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var loginUrl = btn.getAttribute("data-login-url");
+      fetch(API_BASE + "/runtime/projects/" + PROJECT_ID + "/logout", { method: "POST" })
+        .catch(function () {})
+        .then(function () { window.location.href = loginUrl; });
+    });
+  });
+
   // <event type="load"> handlers run once when the page opens, one after another (each finishes
   // before the next starts) — e.g. to fill a grid with the rows already saved.
   LOAD_ELEMENTS.reduce(function (chain, id) {
@@ -457,7 +470,14 @@ function shellUrl(opts: { apiBase: string; projectId: number; token: string }, s
   return `${opts.apiBase}/runtime/projects/${opts.projectId}/screens/${screenId}?token=${encodeURIComponent(opts.token)}`;
 }
 
-type ShellOpts = { apiBase: string; projectId: number; screenId: string; token: string; appName: string; screens: ShellScreen[] };
+type ShellOpts = {
+  apiBase: string; projectId: number; screenId: string; token: string; appName: string; screens: ShellScreen[];
+  // loggedIn is true ONLY for a real app session (never the builder's own Studio preview, never an
+  // anonymous entry render) — that's when a structural, zero-AI-involvement "Log out" control
+  // appears in the shell. loginScreenId (a sibling that hasAnonymousEntry) is where it sends the
+  // user after logging out; null (no logout control rendered) if the project has no such screen.
+  loggedIn: boolean; loginScreenId: string | null;
+};
 
 // Same top-bar + left-nav layout as frontend/src/components/AppShell.jsx — moved here so it's part
 // of what actually ships (every screen carries its own copy), not preview-only React chrome that
@@ -465,7 +485,11 @@ type ShellOpts = { apiBase: string; projectId: number; screenId: string; token: 
 function renderTopBar(opts: ShellOpts): string {
   const name = opts.appName || "App";
   const mark = esc(name.trim().charAt(0).toUpperCase() || "A");
-  return `<a class="app-topbar-brand" href="${escAttr(shellUrl(opts, opts.screenId))}"><span class="app-mark">${mark}</span><span class="app-topbar-title">${esc(name)}</span></a>`;
+  const brand = `<a class="app-topbar-brand" href="${escAttr(shellUrl(opts, opts.screenId))}"><span class="app-mark">${mark}</span><span class="app-topbar-title">${esc(name)}</span></a>`;
+  const logout = opts.loggedIn && opts.loginScreenId
+    ? `<button type="button" class="app-topbar-logout" data-app-logout data-login-url="${escAttr(shellUrl(opts, opts.loginScreenId))}">Log out</button>`
+    : "";
+  return brand + logout;
 }
 
 // Plain <a href> links (real navigation, no JS needed for this part) — the active screen renders
@@ -524,9 +548,15 @@ export function resolveTheme(key: string | null | undefined) {
 
 export function renderScreen(
   model: ScreenModel,
-  opts: { apiBase: string; projectId: number; screenId: string; token: string; appName?: string; screens?: ShellScreen[]; theme?: string | null }
+  opts: {
+    apiBase: string; projectId: number; screenId: string; token: string; appName?: string; screens?: ShellScreen[]; theme?: string | null;
+    loggedIn?: boolean; loginScreenId?: string | null;
+  }
 ): string {
-  const shellOpts: ShellOpts = { ...opts, appName: opts.appName || "App", screens: opts.screens || [] };
+  const shellOpts: ShellOpts = {
+    ...opts, appName: opts.appName || "App", screens: opts.screens || [],
+    loggedIn: opts.loggedIn ?? false, loginScreenId: opts.loginScreenId ?? null,
+  };
   const t = resolveTheme(opts.theme);
   return `<!doctype html>
 <html lang="en">
@@ -562,6 +592,11 @@ export function renderScreen(
     color: #fff; font-weight: 700; font-size: 14px; display: flex; align-items: center; justify-content: center;
   }
   .app-topbar-title { font-weight: 700; font-size: 15px; color: #fff; letter-spacing: 0.01em; }
+  .app-topbar-logout {
+    margin-left: auto; background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25);
+    padding: 7px 14px; border-radius: 7px; font-size: 12.5px; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .app-topbar-logout:hover { background: rgba(255,255,255,0.22); }
 
   .app-body { display: flex; flex: 1; min-height: 0; }
   .app-nav { width: 210px; flex-shrink: 0; background: var(--clr-surface); border-right: 1px solid var(--clr-border); padding: 16px 12px; overflow-y: auto; }
@@ -656,6 +691,8 @@ export function renderScreen(
   }
   body[data-header="light"] .app-mark { background: var(--clr-primary); color: #fff; }
   body[data-header="light"] .app-topbar-title { color: var(--clr-text); }
+  body[data-header="light"] .app-topbar-logout { background: var(--clr-bg); color: var(--clr-text); border-color: var(--clr-border); }
+  body[data-header="light"] .app-topbar-logout:hover { background: var(--clr-border); }
 
   /* nav: left (default, above) | top — a genuinely different app shell, not just tighter spacing */
   body[data-nav="top"] .app-body { flex-direction: column; }
