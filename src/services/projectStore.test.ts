@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ARTIFACT_KINDS, nodesToScreens, overlayWorkspace, screensToNodes, splitPatch } from "./projectStore.js";
+import { ARTIFACT_KINDS, entitiesToNodes, nodesToEntities, nodesToScreens, overlayWorkspace, screensToNodes, splitPatch } from "./projectStore.js";
 import { prepareCypher } from "../runtime/cypher.js";
 import type { ProjectRow } from "../db/schema.js";
 
@@ -50,6 +50,31 @@ describe("projectStore: screens <-> Neo4j nodes", () => {
   });
 });
 
+describe("projectStore: one TdEntityTable node per table (not one shared blob)", () => {
+  const schema = JSON.stringify({
+    tables: [
+      { name: "Course", columns: [{ name: "courseCode", type: "VARCHAR(10)" }] },
+      { name: "Student", columns: [{ name: "regNo", type: "VARCHAR(10)" }], description: "keep me" },
+    ],
+  });
+  it("splits the whole schema into one node per table, in order, keeping every field", () => {
+    const nodes = entitiesToNodes(schema);
+    expect(nodes.map((n) => [n.tableName, n.position])).toEqual([["Course", 0], ["Student", 1]]);
+    const shuffled = [nodes[1], nodes[0]]; // Neo4j returns rows in any order
+    expect(JSON.parse(nodesToEntities(shuffled)!)).toEqual(JSON.parse(schema));
+  });
+  it("an empty/missing schema stores no nodes and reads back as null", () => {
+    expect(entitiesToNodes(JSON.stringify({ tables: [] }))).toEqual([]);
+    expect(entitiesToNodes(null)).toEqual([]);
+    expect(nodesToEntities([])).toBeNull();
+  });
+  it("rejects bad input before anything is written", () => {
+    expect(() => entitiesToNodes("not json")).toThrow(/tables array/);
+    expect(() => entitiesToNodes('{"a":1}')).toThrow(/tables array/);
+    expect(() => entitiesToNodes('{"tables":[{"columns":[]}]}')).toThrow(/needs a string name/);
+  });
+});
+
 describe("projectStore: overlaying Neo4j data on the Postgres row", () => {
   const row = { id: 1, name: "P", entities: "LEGACY", uiScreens: "LEGACY", uiXml: "LEGACY", status: "draft" } as unknown as ProjectRow;
   it("replaces every moved field, and nulls the ones Neo4j has nothing for", () => {
@@ -65,7 +90,7 @@ describe("projectStore: overlaying Neo4j data on the Postgres row", () => {
 describe("workspace labels are unreachable from user/AI queries", () => {
   it("prepareCypher rejects Td* labels (only a project's own tables are allowed)", () => {
     const tables = new Set(["Student"]);
-    for (const label of ["TdArtifact", "TdScreen", "TdWorkspace"]) {
+    for (const label of ["TdArtifact", "TdEntityTable", "TdScreen", "TdWorkspace"]) {
       expect(() => prepareCypher(`MATCH (n:${label}) RETURN n.content AS c`, 7, tables, new Set())).toThrow();
     }
   });

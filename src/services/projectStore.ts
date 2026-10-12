@@ -13,7 +13,15 @@
  *     so a human browsing Neo4j directly can tell which user and project a Proj<id>_ label prefix
  *     belongs to, without cross-referencing Postgres. e.g. MATCH (w:TdWorkspace {userId: 12}) RETURN
  *     w.projectId, w.projectName lists everything a given user owns.
- *   (:TdArtifact  {projectId, kind, content})       one per non-screen artifact (entities, er_diagram, ...)
+ *   (:TdArtifact   {projectId, kind, content})       one per non-screen, non-entity artifact
+ *     (er_diagram, validation_rules/code, ui_description/code/xml/html/api)
+ *   (:TdEntityTable {projectId, tableName, position, content})   one per TABLE in the schema — even
+ *     though a whole schema is generated from one prompt, each entity (Student, Course, ...) is its
+ *     own node, not one shared blob; reassembled back into the same {tables:[...]} JSON every
+ *     consumer already expects (engine.ts, cypher.ts, the AI prompt) — the split is invisible
+ *     outside this file. projectId is also stamped onto every DATA ROW these tables describe (see
+ *     cypher.ts's prepareCypher) so a project's whole footprint — schema AND data — can be found by
+ *     projectId alone, not just by already knowing every Proj<id>_ label.
  *   (:TdScreen    {projectId, screenId, name, position, json})   one per screen
  */
 import { and, eq } from "drizzle-orm";
@@ -87,6 +95,35 @@ export function nodesToScreens(nodes: { position: number; json: string }[]): str
   return JSON.stringify(ordered.map((n) => JSON.parse(n.json)));
 }
 
+export type EntityTableNode = { tableName: string; position: number; content: string };
+
+// Same shape/purpose as screensToNodes — splits the whole-schema {tables:[...]} JSON into one
+// per-table node, preserving order via position (so splitting storage never silently reorders a
+// project's tables).
+export function entitiesToNodes(json: string | null | undefined): EntityTableNode[] {
+  if (!json) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new HttpError(400, "entities must be a JSON object with a tables array");
+  }
+  const tables = (parsed as { tables?: unknown })?.tables;
+  if (!Array.isArray(tables)) throw new HttpError(400, "entities must be a JSON object with a tables array");
+  return tables.map((t, position) => {
+    if (!t || typeof t !== "object" || typeof (t as { name?: unknown }).name !== "string" || !(t as { name: string }).name) {
+      throw new HttpError(400, "every table needs a string name");
+    }
+    return { tableName: (t as { name: string }).name, position, content: JSON.stringify(t) };
+  });
+}
+
+export function nodesToEntities(nodes: { position: number; content: string }[]): string | null {
+  if (!nodes.length) return null;
+  const ordered = [...nodes].sort((a, b) => a.position - b.position);
+  return JSON.stringify({ tables: ordered.map((n) => JSON.parse(n.content)) });
+}
+
 export function overlayWorkspace(row: ProjectRow, ws: Workspace): ProjectRow {
   const out: ProjectRow = { ...row, uiScreens: ws.screens };
   for (const field of ARTIFACT_FIELDS) out[field] = ws.artifacts.get(ARTIFACT_KINDS[field]) ?? null;
@@ -136,6 +173,20 @@ async function writeArtifact(tx: Transaction, projectId: number, kind: string, c
   });
 }
 
+async function writeEntityTables(tx: Transaction, projectId: number, nodes: EntityTableNode[]): Promise<void> {
+  await tx.run("MATCH (e:TdEntityTable {projectId: $pid}) DELETE e", { pid: pid(projectId) });
+  if (!nodes.length) return;
+  await tx.run(
+    "UNWIND $nodes AS n CREATE (e:TdEntityTable {projectId: $pid, tableName: n.tableName, position: n.position, content: n.content})",
+    { pid: pid(projectId), nodes: nodes.map((n) => toDriverValue(n)) }
+  );
+}
+
+async function readEntityTables(tx: Transaction, projectId: number): Promise<string | null> {
+  const res = await tx.run("MATCH (e:TdEntityTable {projectId: $pid}) RETURN e.position AS position, e.content AS content", { pid: pid(projectId) });
+  return nodesToEntities(res.records.map((r) => ({ position: Number(fromDriverValue(r.get("position"))), content: String(r.get("content")) })));
+}
+
 async function writeScreens(tx: Transaction, projectId: number, nodes: ScreenNode[]): Promise<void> {
   await tx.run("MATCH (s:TdScreen {projectId: $pid}) DELETE s", { pid: pid(projectId) });
   if (!nodes.length) return;
@@ -152,6 +203,8 @@ async function readWorkspace(tx: Transaction, projectId: number): Promise<Worksp
     const content = r.get("content");
     if (typeof content === "string") artifacts.set(String(r.get("kind")), content);
   }
+  const entitiesJson = await readEntityTables(tx, projectId);
+  if (entitiesJson !== null) artifacts.set("entities", entitiesJson);
   const scr = await tx.run("MATCH (s:TdScreen {projectId: $pid}) RETURN s.position AS position, s.json AS json", { pid: pid(projectId) });
   const screens = nodesToScreens(scr.records.map((r) => ({ position: Number(fromDriverValue(r.get("position"))), json: String(r.get("json")) })));
   return { artifacts, screens };
@@ -168,8 +221,16 @@ async function migrateInTx(tx: Transaction, row: ProjectRow): Promise<void> {
   const marker = await tx.run("MATCH (w:TdWorkspace {projectId: $pid}) RETURN count(w) AS c", { pid: pid(row.id) });
   if (Number(fromDriverValue(marker.records[0].get("c"))) > 0) return;
   for (const field of ARTIFACT_FIELDS) {
+    if (field === "entities") continue; // one node per table, not one blob — handled just below
     const legacy = row[field];
     if (typeof legacy === "string" && legacy !== "") await writeArtifact(tx, row.id, ARTIFACT_KINDS[field], legacy);
+  }
+  if (typeof row.entities === "string" && row.entities !== "") {
+    try {
+      await writeEntityTables(tx, row.id, entitiesToNodes(row.entities));
+    } catch (e) {
+      console.warn(`Project ${row.id}: legacy entities is not a valid schema — entities were not migrated: ${e instanceof Error ? e.message : e}`);
+    }
   }
   let nodes: ScreenNode[] = [];
   try {
@@ -201,6 +262,7 @@ export async function ensureWorkspaceSchema(): Promise<void> {
   const statements = [
     "CREATE CONSTRAINT td_workspace_key IF NOT EXISTS FOR (w:TdWorkspace) REQUIRE w.projectId IS UNIQUE",
     "CREATE CONSTRAINT td_artifact_key IF NOT EXISTS FOR (a:TdArtifact) REQUIRE (a.projectId, a.kind) IS UNIQUE",
+    "CREATE CONSTRAINT td_entity_table_key IF NOT EXISTS FOR (e:TdEntityTable) REQUIRE (e.projectId, e.tableName) IS UNIQUE",
     "CREATE CONSTRAINT td_screen_key IF NOT EXISTS FOR (s:TdScreen) REQUIRE (s.projectId, s.screenId) IS UNIQUE",
   ];
   for (const stmt of statements) {
@@ -264,10 +326,25 @@ export async function hydrateListEntities(rows: ProjectRow[]): Promise<ProjectRo
     const ids = rows.map((r) => pid(r.id));
     const { migratedIds, entities } = await withTx(async (tx) => {
       const m = await tx.run("MATCH (w:TdWorkspace) WHERE w.projectId IN $ids RETURN w.projectId AS id", { ids });
-      const e = await tx.run("MATCH (a:TdArtifact {kind: 'entities'}) WHERE a.projectId IN $ids RETURN a.projectId AS id, a.content AS content", { ids });
+      const e = await tx.run(
+        "MATCH (ent:TdEntityTable) WHERE ent.projectId IN $ids RETURN ent.projectId AS id, ent.position AS position, ent.content AS content",
+        { ids }
+      );
+      const byProject = new Map<number, { position: number; content: string }[]>();
+      for (const r of e.records) {
+        const projId = Number(fromDriverValue(r.get("id")));
+        const list = byProject.get(projId) ?? [];
+        list.push({ position: Number(fromDriverValue(r.get("position"))), content: String(r.get("content")) });
+        byProject.set(projId, list);
+      }
+      const entities = new Map<number, string>();
+      for (const [projId, nodes] of byProject) {
+        const json = nodesToEntities(nodes);
+        if (json !== null) entities.set(projId, json);
+      }
       return {
         migratedIds: new Set(m.records.map((r) => Number(fromDriverValue(r.get("id"))))),
-        entities: new Map(e.records.map((r) => [Number(fromDriverValue(r.get("id"))), String(r.get("content"))] as const)),
+        entities,
       };
     });
     return rows.map((r) => (migratedIds.has(r.id) ? { ...r, entities: entities.get(r.id) ?? null } : r));
@@ -284,14 +361,17 @@ export async function updateProject(projectId: number, patch: Partial<ProjectRow
   if (!current) throw new HttpError(404, "Project not found");
   const { pg, artifacts, screens } = splitPatch(patch);
   const screenNodes = screens === undefined ? undefined : screensToNodes(screens); // validates before anything is written
+  const entityNodes = artifacts.entities === undefined ? undefined : entitiesToNodes(artifacts.entities); // validates before anything is written
 
   const ws = await guard(() =>
     withProjectLock(projectId, async () => {
       await ensureMigrated(current);
       return withTx(async (tx) => {
         for (const [field, content] of Object.entries(artifacts) as [ArtifactField, string | null][]) {
+          if (field === "entities") continue; // one node per table, not one blob — handled just below
           await writeArtifact(tx, projectId, ARTIFACT_KINDS[field], content);
         }
+        if (entityNodes !== undefined) await writeEntityTables(tx, projectId, entityNodes);
         if (screenNodes !== undefined) await writeScreens(tx, projectId, screenNodes);
         return readWorkspace(tx, projectId);
       });
@@ -319,7 +399,7 @@ export async function updateProject(projectId: number, patch: Partial<ProjectRow
 export async function deleteWorkspace(projectId: number): Promise<void> {
   await guard(async () => {
     await withTx(async (tx) => {
-      for (const label of ["TdArtifact", "TdScreen", "TdWorkspace"]) {
+      for (const label of ["TdArtifact", "TdEntityTable", "TdScreen", "TdWorkspace"]) {
         await tx.run(`MATCH (n:${label} {projectId: $pid}) DETACH DELETE n`, { pid: pid(projectId) });
       }
     });

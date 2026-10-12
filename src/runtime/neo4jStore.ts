@@ -314,13 +314,84 @@ async function injectAutonumberDefaults(
   return { statement: out, params: nextParams };
 }
 
+export const PROJECT_ID_PARAM = "__tdProjectId";
+
+// Same-length literal mask: a quoted value's interior becomes 'x's (never a brace/paren/comma/
+// keyword), so a scan over the masked text can never mistake quoted content for structure, while
+// every index still lines up 1:1 with the original statement for splicing.
+function maskLiteralsSameLength(s: string): string {
+  return s.replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g, (lit) => lit[0] + "x".repeat(lit.length - 2) + lit[0]);
+}
+
+// Parses one node pattern starting at `start` (the index of its '(') against literal-masked text.
+// Property maps here are always flat (no nested {..}, same assumption CREATE_MERGE_NODE_RE above
+// already makes), so on masked text the first '}' after the map opens is always its close.
+function parseNodePattern(masked: string, start: number): { end: number; propMap: { start: number; end: number } | null } | null {
+  const m = /^\(\s*(?:[A-Za-z_]\w*)?\s*:\s*[A-Za-z_]\w*\s*/.exec(masked.slice(start));
+  if (!m) return null;
+  let i = start + m[0].length;
+  let propMap: { start: number; end: number } | null = null;
+  if (masked[i] === "{") {
+    const close = masked.indexOf("}", i);
+    if (close === -1) return null;
+    propMap = { start: i, end: close + 1 };
+    i = close + 1;
+  }
+  while (/\s/.test(masked[i] || "")) i++;
+  if (masked[i] !== ")") return null;
+  return { end: i + 1, propMap };
+}
+
+// A project's rows are already isolated by their Proj<id>_<Table> label, but that id is only
+// readable if you already know every table name in the project. Stamping the same id onto every
+// row as a plain `projectId` property makes the whole project's data footprint findable by that
+// property alone — run alongside injectAutonumberDefaults just above, before prepareCypher.
+// Walks the literal-masked statement itself (rather than reusing CREATE_MERGE_NODE_RE's property-
+// map capture, which only tolerates a flat map with no braces hiding inside a string value) so a
+// property value like {bio: "Uses {braces}"} can never be mistaken for the map's own close.
+export function injectProjectId(
+  projectId: number, statement: string, params: Record<string, unknown>
+): { statement: string; params: Record<string, unknown> } {
+  const masked = maskLiteralsSameLength(statement);
+  const addition = `projectId: $${PROJECT_ID_PARAM}`;
+  const edits: { start: number; end: number; text: string }[] = [];
+
+  const keywordRe = /(?:CREATE|MERGE)\s*(?=\()/g;
+  let km: RegExpExecArray | null;
+  while ((km = keywordRe.exec(masked))) {
+    let pos = km.index + km[0].length;
+    for (;;) {
+      const parsed = parseNodePattern(masked, pos);
+      if (!parsed) break;
+      if (parsed.propMap) {
+        const hasContent = masked.slice(parsed.propMap.start + 1, parsed.propMap.end - 1).trim().length > 0;
+        const at = parsed.propMap.end - 1;
+        edits.push({ start: at, end: at, text: `${hasContent ? ", " : ""}${addition}` });
+      } else {
+        const at = parsed.end - 1;
+        edits.push({ start: at, end: at, text: ` {${addition}}` });
+      }
+      pos = parsed.end;
+      const chain = /^\s*,\s*(?=\()/.exec(masked.slice(pos));
+      if (!chain) break;
+      pos += chain[0].length;
+    }
+  }
+  if (!edits.length) return { statement, params };
+  edits.sort((a, b) => b.start - a.start); // apply right-to-left so earlier offsets stay valid
+  let out = statement;
+  for (const e of edits) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return { statement: out, params: { ...params, [PROJECT_ID_PARAM]: projectId } };
+}
+
 export async function executeQuery(
   tx: Transaction, projectId: number, entities: Entities, statement: string, params: Record<string, unknown>
 ): Promise<QueryResult> {
   const tables = new Set((entities.tables || []).map((t) => t.name));
   const withDefaults = await injectAutonumberDefaults(tx, projectId, entities, statement, params);
-  const cypher = prepareCypher(withDefaults.statement, projectId, tables, new Set(Object.keys(withDefaults.params)));
-  const bound = Object.fromEntries(Object.entries(withDefaults.params).map(([k, v]) => [k, toDriverValue(v)]));
+  const withProjectId = injectProjectId(projectId, withDefaults.statement, withDefaults.params);
+  const cypher = prepareCypher(withProjectId.statement, projectId, tables, new Set(Object.keys(withProjectId.params)));
+  const bound = Object.fromEntries(Object.entries(withProjectId.params).map(([k, v]) => [k, toDriverValue(v)]));
   const res = await tx.run(cypher, bound);
   const rows = res.records.map((r) => fromDriverValue(r.toObject()) as Record<string, unknown>);
   const c = res.summary.counters.updates();
