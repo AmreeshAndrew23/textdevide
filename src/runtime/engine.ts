@@ -257,11 +257,16 @@ function findElementById(root: XmlElement, elementId: string): XmlElement | null
 
 function resolveQueryParams(
   queryParams: Record<string, string>, fieldValues: Record<string, unknown>,
-  fieldPersistence: Map<string, [string, string]>, entities: Entities, fieldMeta: Map<string, FieldMeta>
+  fieldPersistence: Map<string, [string, string]>, entities: Entities, fieldMeta: Map<string, FieldMeta>,
+  sessionIdentity: string | null
 ): Record<string, unknown> {
   const resolved: Record<string, unknown> = {};
   for (const [pname, source] of Object.entries(queryParams)) {
-    if (source.startsWith("field:")) {
+    if (source === "session:identity") {
+      // From the VERIFIED session cookie only — never from fieldValues (the request body), so a
+      // client can never spoof "I am someone else" by submitting a field of the same name.
+      resolved[pname] = sessionIdentity;
+    } else if (source.startsWith("field:")) {
       const fid = source.slice("field:".length);
       let raw = fieldValues[fid];
       const persistence = fieldPersistence.get(fid);
@@ -288,7 +293,7 @@ export type EventAction =
   | { type: "set"; target: string; value: unknown }
   | { type: "message"; messageType: string; value: string }
   | { type: "navigate"; screenId: string; screenName: string }
-  | { type: "session"; action: "start" | "end" }
+  | { type: "session"; action: "start" | "end"; identity?: string }
   | { type: "stop" };
 
 // <event ... allowAnonymous="true"> marks an event as safe to run with no identity at all — the
@@ -361,7 +366,7 @@ function runNavigate(el: XmlElement, siblingScreens: SiblingScreen[], actions: E
 export async function runEvent(
   exec: QueryExecutor, entities: Entities, screenXml: string,
   elementId: string, eventType: string, fieldValues: Record<string, unknown>,
-  siblingScreens: SiblingScreen[] = []
+  siblingScreens: SiblingScreen[] = [], sessionIdentity: string | null = null
 ): Promise<EventAction[]> {
   let root: XmlElement;
   try {
@@ -398,7 +403,7 @@ export async function runEvent(
 
   for (const step of childElements(event)) {
     if (step.tagName === "execute") {
-      const stopped = await runExecute(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, values, actions);
+      const stopped = await runExecute(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, values, actions, sessionIdentity);
       if (stopped) break; // a <stop/> or <navigate/> anywhere inside cancels any later top-level step
     } else if (step.tagName === "navigate") {
       runNavigate(step, siblingScreens, actions);
@@ -406,7 +411,7 @@ export async function runEvent(
     } else if (step.tagName === "message" || step.tagName === "set" || step.tagName === "stop" || step.tagName === "session") {
       // e.g. a closing <message type="success" value="Saved."/> written after the executes. It has
       // no query result of its own, so ${result.*} placeholders resolve to empty.
-      if (await runStep(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, { rows: [], count: 0 }, values, actions)) break;
+      if (await runStep(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, { rows: [], count: 0 }, values, actions, sessionIdentity)) break;
     }
   }
   if (write.kind && !actions.some((a) => a.type === "message" || a.type === "navigate")) {
@@ -421,7 +426,7 @@ export async function runEvent(
 async function runExecute(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
   entities: Entities, siblingScreens: SiblingScreen[], fieldMeta: Map<string, FieldMeta>,
-  executeEl: XmlElement, fieldValues: Record<string, unknown>, actions: EventAction[]
+  executeEl: XmlElement, fieldValues: Record<string, unknown>, actions: EventAction[], sessionIdentity: string | null
 ): Promise<boolean> {
   const queryId = executeEl.getAttribute("query");
   const query = queryId ? queries.get(queryId) : undefined;
@@ -439,7 +444,7 @@ async function runExecute(
       return true;
     }
   }
-  const params = resolveQueryParams(query.params, fieldValues, fieldPersistence, entities, fieldMeta);
+  const params = resolveQueryParams(query.params, fieldValues, fieldPersistence, entities, fieldMeta, sessionIdentity);
   const result = await exec(query.statement, params);
 
   const children = childElements(executeEl);
@@ -458,7 +463,7 @@ async function runExecute(
       actions.push({ type: "map", target, value });
     } else if (child.tagName === "when") {
       if (!evaluateCondition(child.getAttribute("condition") || "", result, fieldValues)) continue;
-      if (await runWhenBody(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions)) {
+      if (await runWhenBody(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions, sessionIdentity)) {
         return true;
       }
     } else if (child.tagName === "execute" || child.tagName === "set" || child.tagName === "message" || child.tagName === "navigate" || child.tagName === "stop" || child.tagName === "session") {
@@ -466,7 +471,7 @@ async function runExecute(
       // directly inside the first (no <when> around it). Silently skipping it meant a successful
       // save never refreshed the grid or confirmed anything — so an unconditional step runs the
       // same way a step inside a matched <when> does.
-      if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions)) return true;
+      if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions, sessionIdentity)) return true;
     }
   }
   return false;
@@ -480,20 +485,20 @@ async function runExecute(
 async function runWhenBody(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
   entities: Entities, siblingScreens: SiblingScreen[], fieldMeta: Map<string, FieldMeta>,
-  whenEl: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[]
+  whenEl: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[], sessionIdentity: string | null
 ): Promise<boolean> {
   for (const inner of childElements(whenEl)) {
-    if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, result, fieldValues, actions)) return true;
+    if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, result, fieldValues, actions, sessionIdentity)) return true;
   }
   return false;
 }
 
-// One <set>/<message>/<navigate>/<stop>/<execute> step, shared by a matched <when> and an
+// One <set>/<message>/<navigate>/<stop>/<session>/<execute> step, shared by a matched <when> and an
 // unconditional step directly inside an <execute>. Returns true if a <stop/> or <navigate/> fired.
 async function runStep(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
   entities: Entities, siblingScreens: SiblingScreen[], fieldMeta: Map<string, FieldMeta>,
-  inner: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[]
+  inner: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[], sessionIdentity: string | null
 ): Promise<boolean> {
   if (inner.tagName === "set") {
     const target = inner.getAttribute("target") || "";
@@ -514,11 +519,19 @@ async function runStep(
     return true;
   } else if (inner.tagName === "session") {
     const action = inner.getAttribute("action");
-    if (action === "start" || action === "end") actions.push({ type: "session", action });
+    if (action === "start" || action === "end") {
+      // identity="field:x" (only meaningful on "start") — resolved the SAME way any other operand
+      // is (field:/result./literal), via the existing resolveOperand, so a login/signup's identity
+      // is whatever field the AI names (usually the username field just submitted).
+      const identitySource = action === "start" ? inner.getAttribute("identity") : null;
+      const resolved = identitySource ? resolveOperand(identitySource, result, fieldValues) : null;
+      const identity = resolved !== null && resolved !== undefined && resolved !== "" ? String(resolved) : undefined;
+      actions.push(identity !== undefined ? { type: "session", action, identity } : { type: "session", action });
+    }
     // Deliberately does NOT return true — a login success is typically <session action="start"/>
     // immediately followed by a sibling <navigate>, and both need to run in the same chain.
   } else if (inner.tagName === "execute") {
-    if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, fieldValues, actions)) return true;
+    if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, fieldValues, actions, sessionIdentity)) return true;
   }
   return false;
 }

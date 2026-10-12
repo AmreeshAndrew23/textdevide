@@ -73,19 +73,24 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
           throw new HttpError(500, e instanceof ScreenParseError ? e.message : String(e));
         }
 
-        // Real application, not a bundle of jump-anywhere pages: before logging in, the nav shows
-        // ONLY the other genuine entry points (Login/Signup/Forgot Password), never the whole app —
-        // same reasoning hasAnonymousEntry already applies to which screens even render at all.
-        // Once logged in, the full nav returns (identical to the Studio's own preview).
-        const navScreens = identified ? allScreens : allScreens.filter((s) => s.xml && hasAnonymousEntry(s.xml));
-
         // A real app session (not the builder's own Studio preview, not an anonymous entry render)
         // gets the shell's built-in "Log out" control, pointed at a real sibling login screen if the
-        // project has one.
+        // project has one — and a "Profile" link too, if the project has a screen by that name
+        // (zero AI wiring needed for either; both are purely structural, same pattern).
         const loggedIn = identified && !token;
         const loginScreen =
           allScreens.find((s) => s.xml && hasAnonymousEntry(s.xml) && /\blogin\b/i.test(s.name || "")) ||
           allScreens.find((s) => s.xml && hasAnonymousEntry(s.xml));
+        const profileScreen = allScreens.find((s) => s.xml && /\bprofile\b/i.test(s.name || ""));
+
+        // Real application, not a bundle of jump-anywhere pages: before logging in, the nav shows
+        // ONLY the other genuine entry points (Login/Signup/Forgot Password), never the whole app —
+        // same reasoning hasAnonymousEntry already applies to which screens even render at all.
+        // Once logged in, the full nav returns (identical to the Studio's own preview) MINUS
+        // Profile, which already gets its own dedicated spot next to Log out — the same way a real
+        // app keeps account actions out of the main nav.
+        const navScreens = (identified ? allScreens : allScreens.filter((s) => s.xml && hasAnonymousEntry(s.xml)))
+          .filter((s) => s.id !== profileScreen?.id);
 
         // Prefer the Host header a proxy (Railway) sets over the raw socket's local port, so the
         // client script's fetch() calls hit the same public origin the browser actually navigated to.
@@ -95,7 +100,7 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
         const html = renderScreen(model, {
           apiBase, projectId: project.id, screenId: screen.id, token,
           appName: project.name, screens: navScreens.map((s) => ({ id: s.id, name: s.name || "" })),
-          theme: project.uiTheme, loggedIn, loginScreenId: loginScreen?.id ?? null,
+          theme: project.uiTheme, loggedIn, loginScreenId: loginScreen?.id ?? null, profileScreenId: profileScreen?.id ?? null,
         });
         return reply.type("text/html; charset=utf-8").send(html);
       } catch (e) {

@@ -29,7 +29,7 @@ function renderField(f: FieldItem): string {
   // A <select>'s natural commit moment is choosing an option ("change"), not losing focus — same as
   // a checkbox, and unlike a text input where "blur" is what distinguishes "done typing" from every
   // keystroke.
-  const commitEvent = f.type === "checkbox" || f.type === "select" ? "change" : "blur";
+  const commitEvent = f.type === "checkbox" || f.type === "select" || f.type === "image" ? "change" : "blur";
   const wiredEvents = f.eventTypes.filter((t) => t === "change").length ? ` data-commit-event="${commitEvent}"` : "";
 
   const def = f.defaultValue;
@@ -37,6 +37,13 @@ function renderField(f: FieldItem): string {
   if (f.type === "checkbox") {
     const checked = def === "true" ? " checked" : "";
     control = `<input type="checkbox" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${checked}${disabled}${wiredEvents}>`;
+  } else if (f.type === "image") {
+    // Read client-side into a data-URL (see clientScript's image-field wiring below) — no server
+    // upload endpoint; the only "value" the engine ever sees is that data-URL string, bound into a
+    // query straight into a Neo4j property, same approach the Studio itself already uses for screen
+    // reference images. Capped client-side at 2MB — a profile photo, not a full design upload. No
+    // default/pre-fill: browsers block programmatically setting a file input's value.
+    control = `<input type="file" accept="image/*" id="${escAttr(f.id)}" name="${escAttr(f.id)}" data-image-field${disabled}${wiredEvents}>`;
   } else if (f.type === "select" && f.optionsBinding) {
     // Populated from a REAL query's rows (e.g. picking an existing Exam), not a fixed list — this
     // is only the initial shell; the client script replaces it once the screen's load event (or
@@ -230,7 +237,13 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     var wrap = root.querySelector('[data-field="' + id + '"]');
     return wrap ? wrap.querySelector(FIELD_CONTROL_SELECTOR) : null;
   }
-  function fieldValue(el) { return el.type === "checkbox" ? el.checked : el.value; }
+  function fieldValue(el) {
+    if (el.type === "checkbox") return el.checked;
+    // A file input's own .value is just the filename, never the content — the real data-URL (read
+    // asynchronously by the change listener below) is cached on the element itself.
+    if (el.type === "file") return el.dataset.dataUrl || "";
+    return el.value;
+  }
   function allFieldValues() {
     var values = {};
     root.querySelectorAll("[data-field]").forEach(function (wrap) {
@@ -420,7 +433,12 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
   root.querySelectorAll("[data-field]").forEach(function (wrap) {
     var fieldId = wrap.getAttribute("data-field");
     var el = wrap.querySelector(FIELD_CONTROL_SELECTOR);
-    if (!el || !el.hasAttribute("data-commit-event")) return;
+    // A file input's own change fires synchronously, before the async FileReader read below ever
+    // finishes populating its real value — auto-committing from THIS listener would send an empty/
+    // stale value. Handled separately: no auto-commit, read into a data-URL only, submitted
+    // whenever the surrounding form's own Save/Upload button is clicked (allFieldValues() already
+    // picks the cached value up via fieldValue()'s el.type === "file" branch).
+    if (!el || el.type === "file" || !el.hasAttribute("data-commit-event")) return;
     var commitEvent = el.getAttribute("data-commit-event");
     var lastCommitted = fieldValue(el);
     el.addEventListener(commitEvent, function () {
@@ -430,6 +448,26 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
       var values = allFieldValues();
       values[fieldId] = next;
       fireEvent(fieldId, "change", values);
+    });
+  });
+
+  // Image fields (type="image" in the XML) — reads the chosen file into a data-URL client-side, the
+  // same approach the Studio itself already uses for screen reference images. 2MB cap: a profile
+  // photo, not a full design upload; rejected with a message rather than silently truncated.
+  root.querySelectorAll("[data-image-field]").forEach(function (el) {
+    el.addEventListener("change", function () {
+      var file = el.files && el.files[0];
+      if (!file) { delete el.dataset.dataUrl; return; }
+      if (file.size > 2 * 1024 * 1024) {
+        showMessages([{ messageType: "error", value: "Image is too large — please choose one under 2MB." }]);
+        el.value = "";
+        delete el.dataset.dataUrl;
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function () { el.dataset.dataUrl = reader.result; };
+      reader.onerror = function () { showMessages([{ messageType: "error", value: "Couldn't read that image file." }]); };
+      reader.readAsDataURL(file);
     });
   });
 
@@ -473,10 +511,12 @@ function shellUrl(opts: { apiBase: string; projectId: number; token: string }, s
 type ShellOpts = {
   apiBase: string; projectId: number; screenId: string; token: string; appName: string; screens: ShellScreen[];
   // loggedIn is true ONLY for a real app session (never the builder's own Studio preview, never an
-  // anonymous entry render) — that's when a structural, zero-AI-involvement "Log out" control
-  // appears in the shell. loginScreenId (a sibling that hasAnonymousEntry) is where it sends the
-  // user after logging out; null (no logout control rendered) if the project has no such screen.
-  loggedIn: boolean; loginScreenId: string | null;
+  // anonymous entry render) — that's when a structural, zero-AI-involvement "Log out" control (and
+  // a "Profile" link, if the project has a screen by that name) appears in the shell.
+  // loginScreenId (a sibling that hasAnonymousEntry) is where logout sends the user; null means no
+  // such screen exists (no logout control rendered). profileScreenId is null if there's no Profile
+  // screen (no Profile link rendered) — this is independent of loggedIn: never shown otherwise.
+  loggedIn: boolean; loginScreenId: string | null; profileScreenId: string | null;
 };
 
 // Same top-bar + left-nav layout as frontend/src/components/AppShell.jsx — moved here so it's part
@@ -486,10 +526,15 @@ function renderTopBar(opts: ShellOpts): string {
   const name = opts.appName || "App";
   const mark = esc(name.trim().charAt(0).toUpperCase() || "A");
   const brand = `<a class="app-topbar-brand" href="${escAttr(shellUrl(opts, opts.screenId))}"><span class="app-mark">${mark}</span><span class="app-topbar-title">${esc(name)}</span></a>`;
-  const logout = opts.loggedIn && opts.loginScreenId
-    ? `<button type="button" class="app-topbar-logout" data-app-logout data-login-url="${escAttr(shellUrl(opts, opts.loginScreenId))}">Log out</button>`
+  if (!opts.loggedIn) return brand;
+  const profile = opts.profileScreenId
+    ? `<a class="app-topbar-action" href="${escAttr(shellUrl(opts, opts.profileScreenId))}">Profile</a>`
     : "";
-  return brand + logout;
+  const logout = opts.loginScreenId
+    ? `<button type="button" class="app-topbar-action app-topbar-logout" data-app-logout data-login-url="${escAttr(shellUrl(opts, opts.loginScreenId))}">Log out</button>`
+    : "";
+  const actions = profile || logout ? `<div class="app-topbar-actions">${profile}${logout}</div>` : "";
+  return brand + actions;
 }
 
 // Plain <a href> links (real navigation, no JS needed for this part) — the active screen renders
@@ -550,12 +595,12 @@ export function renderScreen(
   model: ScreenModel,
   opts: {
     apiBase: string; projectId: number; screenId: string; token: string; appName?: string; screens?: ShellScreen[]; theme?: string | null;
-    loggedIn?: boolean; loginScreenId?: string | null;
+    loggedIn?: boolean; loginScreenId?: string | null; profileScreenId?: string | null;
   }
 ): string {
   const shellOpts: ShellOpts = {
     ...opts, appName: opts.appName || "App", screens: opts.screens || [],
-    loggedIn: opts.loggedIn ?? false, loginScreenId: opts.loginScreenId ?? null,
+    loggedIn: opts.loggedIn ?? false, loginScreenId: opts.loginScreenId ?? null, profileScreenId: opts.profileScreenId ?? null,
   };
   const t = resolveTheme(opts.theme);
   return `<!doctype html>
@@ -592,11 +637,13 @@ export function renderScreen(
     color: #fff; font-weight: 700; font-size: 14px; display: flex; align-items: center; justify-content: center;
   }
   .app-topbar-title { font-weight: 700; font-size: 15px; color: #fff; letter-spacing: 0.01em; }
-  .app-topbar-logout {
-    margin-left: auto; background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25);
-    padding: 7px 14px; border-radius: 7px; font-size: 12.5px; font-weight: 600; cursor: pointer; font-family: inherit;
+  .app-topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .app-topbar-action {
+    background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25);
+    padding: 7px 14px; border-radius: 7px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+    font-family: inherit; text-decoration: none; display: inline-block;
   }
-  .app-topbar-logout:hover { background: rgba(255,255,255,0.22); }
+  .app-topbar-action:hover { background: rgba(255,255,255,0.22); }
 
   .app-body { display: flex; flex: 1; min-height: 0; }
   .app-nav { width: 210px; flex-shrink: 0; background: var(--clr-surface); border-right: 1px solid var(--clr-border); padding: 16px 12px; overflow-y: auto; }
@@ -691,8 +738,8 @@ export function renderScreen(
   }
   body[data-header="light"] .app-mark { background: var(--clr-primary); color: #fff; }
   body[data-header="light"] .app-topbar-title { color: var(--clr-text); }
-  body[data-header="light"] .app-topbar-logout { background: var(--clr-bg); color: var(--clr-text); border-color: var(--clr-border); }
-  body[data-header="light"] .app-topbar-logout:hover { background: var(--clr-border); }
+  body[data-header="light"] .app-topbar-action { background: var(--clr-bg); color: var(--clr-text); border-color: var(--clr-border); }
+  body[data-header="light"] .app-topbar-action:hover { background: var(--clr-border); }
 
   /* nav: left (default, above) | top — a genuinely different app shell, not just tighter spacing */
   body[data-nav="top"] .app-body { flex-direction: column; }

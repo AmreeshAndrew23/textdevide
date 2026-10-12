@@ -16,21 +16,28 @@ export function cookieName(projectId: number): string {
   return `td_session_${projectId}`;
 }
 
-export function signAppSession(projectId: number): string {
-  return jwt.sign({ typ: APP_SESSION_TYP, projectId }, SECRET_KEY, { algorithm: ALGORITHM, expiresIn: `${APP_SESSION_HOURS}h` });
+// identity (optional) is WHICH account this session belongs to — e.g. the username a login/signup
+// resolved <session action="start" identity="field:x"/> against (see engine.ts). Opaque to this
+// module: just a string a generated screen's own queries later bind as source="session:identity"
+// to act on "the current user's own row", never trusting a client-submitted value of the same name.
+export function signAppSession(projectId: number, identity?: string | null): string {
+  return jwt.sign({ typ: APP_SESSION_TYP, projectId, identity: identity ?? null }, SECRET_KEY, { algorithm: ALGORITHM, expiresIn: `${APP_SESSION_HOURS}h` });
 }
+
+export type VerifiedAppSession = { identity: string | null };
 
 // Verifies the token AND that it's really an app-session token (not a builder JWT someone tried to
 // pass here) AND that it's for the project being asked about — returns null on any failure
 // (expired, wrong project, tampered, wrong token type) rather than throwing, since "no valid
 // session" is the normal/expected outcome for most requests, not an error.
-export function verifyAppSession(token: string | undefined, projectId: number): boolean {
-  if (!token) return false;
+export function verifyAppSession(token: string | undefined, projectId: number): VerifiedAppSession | null {
+  if (!token) return null;
   try {
     const payload = jwt.verify(token, SECRET_KEY, { algorithms: [ALGORITHM] }) as jwt.JwtPayload;
-    return payload.typ === APP_SESSION_TYP && Number(payload.projectId) === projectId;
+    if (payload.typ !== APP_SESSION_TYP || Number(payload.projectId) !== projectId) return null;
+    return { identity: typeof payload.identity === "string" ? payload.identity : null };
   } catch {
-    return false;
+    return null;
   }
 }
 

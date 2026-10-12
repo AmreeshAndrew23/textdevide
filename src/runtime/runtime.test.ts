@@ -670,23 +670,99 @@ describe("engine: <session> action + allowAnonymous gating", () => {
   });
 });
 
-describe("renderer: shell's built-in Log out control", () => {
+describe("renderer: shell's built-in Log out + Profile controls", () => {
   const model = parseScreenModel(`<screen id="dash" title="Dashboard"><ui><button id="b" label="Do thing"/></ui><events/></screen>`);
-  const screens = [{ id: "dash", name: "Dashboard" }, { id: "login", name: "Login" }];
+  const screens = [{ id: "dash", name: "Dashboard" }, { id: "login", name: "Login" }, { id: "prof", name: "Profile" }];
+  // The literal attribute pair below only appears on the real button (the client script also
+  // mentions "data-app-logout" alone, in a querySelectorAll call, so a bare substring check would
+  // false-positive on that).
+  const hasLogoutButton = (html: string) => html.includes('data-app-logout data-login-url="');
+
   it("renders a Log out control pointed at the real login screen when loggedIn and a login screen exists", () => {
     const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: true, loginScreenId: "login" });
-    expect(html).toMatch(/<button type="button" class="app-topbar-logout" data-app-logout data-login-url="[^"]*\/screens\/login\?/);
+    expect(hasLogoutButton(html)).toBe(true);
+    expect(html).toMatch(/data-app-logout data-login-url="[^"]*\/screens\/login\?/);
   });
   it("renders no Log out control when not logged in (anonymous or builder preview)", () => {
     const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: false, loginScreenId: "login" });
-    expect(html).not.toContain('class="app-topbar-logout"');
+    expect(hasLogoutButton(html)).toBe(false);
   });
   it("renders no Log out control when logged in but the project has no login screen", () => {
     const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: true, loginScreenId: null });
-    expect(html).not.toContain('class="app-topbar-logout"');
+    expect(hasLogoutButton(html)).toBe(false);
   });
   it("defaults to no Log out control when the caller omits loggedIn/loginScreenId entirely", () => {
     const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "t", screens });
-    expect(html).not.toContain('class="app-topbar-logout"');
+    expect(hasLogoutButton(html)).toBe(false);
+  });
+  it("renders a Profile link in the topbar when loggedIn and a Profile screen exists, none otherwise", () => {
+    // "Profile" (same name used by the sidebar nav's own real-screen listing, which is unrelated —
+    // excluding a screen from THAT list is runtimeRender.ts's job, not renderer.ts's) — so these
+    // checks target the specific topbar action link, not any occurrence of the word anywhere.
+    const topbarProfileLink = /<a class="app-topbar-action" href="[^"]*\/screens\/prof\?[^"]*">Profile<\/a>/;
+    const loggedInHtml = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: true, loginScreenId: "login", profileScreenId: "prof" });
+    expect(loggedInHtml).toMatch(topbarProfileLink);
+    const noneHtml = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: true, loginScreenId: "login", profileScreenId: null });
+    expect(noneHtml).not.toMatch(topbarProfileLink);
+    const anonHtml = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: false, profileScreenId: "prof" });
+    expect(anonHtml).not.toMatch(topbarProfileLink);
+  });
+});
+
+describe("engine: session identity + session:identity parameter source", () => {
+  const xml = `<screen id="s" title="S">
+  <queries>
+    <query id="check"><statement>MATCH (a:Account) WHERE a.username = $u AND a.password = $p RETURN count(a) AS count</statement>
+      <parameters><parameter name="u" source="field:u"/><parameter name="p" source="field:p"/></parameters></query>
+    <query id="updatePassword"><statement>MATCH (a:Account) WHERE a.username = $identity SET a.password = $newPassword</statement>
+      <parameters><parameter name="identity" source="session:identity"/><parameter name="newPassword" source="field:newPassword"/></parameters></query>
+  </queries>
+  <ui><field id="u" label="User" type="text"/><field id="p" label="Pass" type="password"/><field id="newPassword" label="New" type="password"/>
+    <field id="identity" label="Spoof" type="text"/>
+    <button id="loginBtn" label="Login"/><button id="saveBtn" label="Save"/></ui>
+  <events>
+    <event type="click" element="loginBtn" allowAnonymous="true">
+      <execute query="check"><when condition="result.count > 0"><session action="start" identity="field:u"/><navigate screen="Dashboard"/></when></execute>
+    </event>
+    <event type="click" element="saveBtn"><execute query="updatePassword"/></event>
+  </events>
+</screen>`;
+  const entities = {};
+
+  it("captures the resolved field value as the session's identity on a successful login", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [{ count: 1 }], count: 1 });
+    const actions = await runEvent(exec, entities, xml, "loginBtn", "click", { u: "alice", p: "x" }, [{ id: "d", name: "Dashboard" }]);
+    expect(actions).toContainEqual({ type: "session", action: "start", identity: "alice" });
+  });
+  it("captures no identity when the login fails (no session:start at all)", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [{ count: 0 }], count: 1 });
+    const actions = await runEvent(exec, entities, xml, "loginBtn", "click", { u: "alice", p: "wrong" });
+    expect(actions.some((a) => a.type === "session")).toBe(false);
+  });
+  it("session:identity resolves from the verified session passed into runEvent, not from fieldValues", async () => {
+    let seenParams: Record<string, unknown> = {};
+    const exec: QueryExecutor = async (statement, params) => { seenParams = params; return { rows: [], count: 0 }; };
+    // The client submits a field literally named "identity" trying to spoof someone else — must be ignored.
+    await runEvent(exec, entities, xml, "saveBtn", "click", { newPassword: "new1", identity: "attacker" }, [], "realuser");
+    expect(seenParams).toEqual({ identity: "realuser", newPassword: "new1" });
+  });
+  it("session:identity is null when no session was passed in", async () => {
+    let seenParams: Record<string, unknown> = {};
+    const exec: QueryExecutor = async (statement, params) => { seenParams = params; return { rows: [], count: 0 }; };
+    await runEvent(exec, entities, xml, "saveBtn", "click", { newPassword: "new1" });
+    expect(seenParams.identity).toBeNull();
+  });
+});
+
+describe("renderer: type=\"image\" field", () => {
+  const model = parseScreenModel(`<screen id="s" title="S"><ui><field id="pic" label="Picture" type="image"/></ui><events/></screen>`);
+  it("renders a real file picker, no value/default support", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(html).toContain('<input type="file" accept="image/*" id="pic" name="pic" data-image-field>');
+  });
+  it("is wired into the dedicated image-field FileReader handler, not the generic auto-commit path", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(html).toContain('querySelectorAll("[data-image-field]")');
+    expect(html).toContain("el.type === \"file\"");
   });
 });

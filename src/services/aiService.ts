@@ -389,9 +389,42 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      A Login screen needs a Username/Email field and a Password field (type="password"), a Login
      button, and — if the app supports signing up — a Signup button or a "Create Account" link to a
      separate Signup screen (which needs the same fields plus whatever else a new account requires).
-     Every other screen in the app (Dashboard, and everything reachable from it) needs NO changes
-     for this — they already only run once someone has a real session; just make sure a "Log out"
-     button exists somewhere reachable, normally in the app shell/Dashboard.
+     Every other screen in the app (Dashboard, and everything reachable from it) needs NO changes for
+     this — they already only run once someone has a real session. You do NOT need to add your own
+     Log out button anywhere — every screen's shell already carries one automatically once someone is
+     really logged in (it needs no event of yours, it already knows how to end the session and get
+     back to Login). The logoutBtn example above is only for a screen that wants its own custom one
+     in addition — not required.
+   - WHO IS LOGGED IN: <session action="start" identity="field:x"/> optionally remembers WHICH
+     account this session belongs to — add identity="field:u" (pointing at the username/email field
+     just submitted) on a Login or Signup event's <session action="start"/>. Later, on any screen,
+     source="session:identity" (instead of field:x or a literal) on a <parameter> resolves to that
+     remembered value, straight from the verified session — NEVER from a field the user could type
+     into, so it can't be spoofed. Use it whenever a screen needs to act on "my own account/row" —
+     most commonly a Profile screen changing the logged-in user's own password or picture:
+       <query id="verifyCurrentPassword"><statement>MATCH (a:Account) WHERE a.username = $identity AND a.password = $current RETURN count(a) AS count</statement>
+         <parameters><parameter name="identity" source="session:identity"/><parameter name="current" source="field:currentPassword"/></parameters></query>
+       <query id="updatePassword"><statement>MATCH (a:Account) WHERE a.username = $identity SET a.password = $newPassword</statement>
+         <parameters><parameter name="identity" source="session:identity"/><parameter name="newPassword" source="field:newPassword"/></parameters></query>
+     Change-password events are NOT allowAnonymous (you must already be logged in to reach a Profile
+     screen at all) — verify the CURRENT password first (<when condition="result.count == 0">
+     rejects with an error), only then run the update, same validate-then-write shape every save
+     already uses.
+   - PROFILE PICTURES: type="image" on a <field> renders a real file picker; the runtime reads it
+     into a data-URL client-side (no upload endpoint needed) and that string is the field's value —
+     treat it exactly like any other field's value in a query, e.g.
+       <query id="updatePicture"><statement>MATCH (a:Account) WHERE a.username = $identity SET a.picture = $pic</statement>
+         <parameters><parameter name="identity" source="session:identity"/><parameter name="pic" source="field:picture"/></parameters></query>
+     Add a "picture" column to the Account table (type TEXT) when the app needs this.
+   - PROFILE SCREEN: if the app should let a logged-in user change their own password and/or
+     picture, generate a screen named EXACTLY "Profile" — the shell links to it automatically
+     (structural, same as Log out — you don't wire this link up yourself), right next to Log out, on
+     every screen once someone is logged in. Give it a change-password section (current password,
+     new password, a Save button using the verify-then-update pattern above) and/or a change-picture
+     section (a type="image" field, a Save button using the updatePicture pattern above) — both are
+     normal protected events, not allowAnonymous. Only generate a Profile screen when the app
+     actually needs this (a login-based app with real user accounts) — skip it for an app with no
+     login at all.
    - condition is one comparison: a left operand, one of == != > &lt; >= &lt;=, and a right
      operand — a bare "<" is invalid inside an XML attribute value, so write it as "&lt;" (a bare
      ">" is fine unescaped, as used above). Operands are: result.count / result.rows.length (row

@@ -96,6 +96,11 @@ export default async function previewDbRoutes(app: FastifyInstance) {
 
     let project: ProjectRow | null = null;
     let authorized = false;
+    // Which Account this session belongs to (see services/appSession.ts) — null for a builder
+    // token (the Studio isn't "a user" of the generated app) or no session at all. Threaded into
+    // runEvent so a query can bind source="session:identity" to act on "my own row", resolved ONLY
+    // from this verified cookie, never from the request body.
+    let sessionIdentity: string | null = null;
     if (bearer) {
       try {
         const user = await getCurrentUser(bearer);
@@ -105,9 +110,13 @@ export default async function previewDbRoutes(app: FastifyInstance) {
         // Not a valid/owning builder token — fall through to the app-session check below.
       }
     }
-    if (!authorized && verifyAppSession(req.cookies?.[cookieName(projectId)], projectId)) {
-      project = await getProjectPublic(projectId);
-      authorized = true;
+    if (!authorized) {
+      const session = verifyAppSession(req.cookies?.[cookieName(projectId)], projectId);
+      if (session) {
+        project = await getProjectPublic(projectId);
+        authorized = true;
+        sessionIdentity = session.identity;
+      }
     }
     if (!project) project = await getProjectPublic(projectId); // just to read the screen's XML below
 
@@ -130,13 +139,18 @@ export default async function previewDbRoutes(app: FastifyInstance) {
     try {
       if ((entities.tables || []).length) await store.syncSchema(project.id, entities);
       const actions = await store.withTx((tx) =>
-        runEvent((statement, params) => store.executeQuery(tx, project.id, entities, statement, params), entities, screen.xml!, body.elementId, body.eventType, body.fieldValues, siblingScreens)
+        runEvent(
+          (statement, params) => store.executeQuery(tx, project.id, entities, statement, params),
+          entities, screen.xml!, body.elementId, body.eventType, body.fieldValues, siblingScreens, sessionIdentity
+        )
       );
       // <session action="start"/"end"/> is a server-only concern (set/clear the real app-session
       // cookie) — never forwarded to the client, same spirit as "stop" carrying no client meaning.
+      // A session started with no identity (no identity="..." on the XML, or it resolved empty)
+      // still signs a valid project-scoped session — identity is optional, access isn't gated by it.
       const clientActions = actions.filter((a) => {
         if (a.type !== "session") return true;
-        if (a.action === "start") reply.setCookie(cookieName(projectId), signAppSession(projectId), APP_SESSION_COOKIE_OPTS);
+        if (a.action === "start") reply.setCookie(cookieName(projectId), signAppSession(projectId, a.identity ?? null), APP_SESSION_COOKIE_OPTS);
         else reply.clearCookie(cookieName(projectId), { path: APP_SESSION_COOKIE_OPTS.path });
         return false;
       });
