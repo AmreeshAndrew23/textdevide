@@ -153,6 +153,10 @@ function parseFieldMeta(root: XmlElement): Map<string, FieldMeta> {
       if (minValue) rule.minValue = Number(minValue);
       const maxValue = r.getAttribute("maxValue");
       if (maxValue) rule.maxValue = Number(maxValue);
+      const minAge = r.getAttribute("minAge");
+      if (minAge) rule.minAge = Number(minAge);
+      const maxAge = r.getAttribute("maxAge");
+      if (maxAge) rule.maxAge = Number(maxAge);
       return rule;
     });
     meta.set(id, { label: el.getAttribute("label") || id, type: el.getAttribute("type") || "text", rules });
@@ -165,6 +169,21 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isEmptyValue = (v: unknown) => v === null || v === undefined || (typeof v === "string" && v.trim() === "");
 
 const IDENT_RE = /^[A-Za-z_]\w*$/;
+
+// Age in whole years as of `now`, computed from a birth-date-like value (an ISO date string, e.g.
+// what a type="date" field submits) — null if the value isn't a parseable date. Subtracts one year
+// if `now` falls before this year's birthday, so DOB 2003-06-15 is age 22 on 2026-01-01 but 23 on
+// 2026-06-15. Uses UTC accessors on both sides so the comparison doesn't depend on server timezone.
+export function computeAgeYears(value: unknown, now: Date = new Date()): number | null {
+  const dob = new Date(String(value));
+  if (Number.isNaN(dob.getTime())) return null;
+  let age = now.getUTCFullYear() - dob.getUTCFullYear();
+  const hadBirthdayThisYear =
+    now.getUTCMonth() > dob.getUTCMonth() ||
+    (now.getUTCMonth() === dob.getUTCMonth() && now.getUTCDate() >= dob.getUTCDate());
+  if (!hadBirthdayThisYear) age--;
+  return age;
+}
 
 // True when some OTHER row already has this value for the field's persisted column — "other"
 // meaning excluded by the table's own primary key when this write is an update (read off whichever
@@ -232,6 +251,15 @@ async function validateWriteFields(
         } else {
           if (rule.minValue !== undefined && num < rule.minValue) say(meta.label, `must be at least ${rule.minValue}.`);
           if (rule.maxValue !== undefined && num > rule.maxValue) say(meta.label, `must be at most ${rule.maxValue}.`);
+        }
+      }
+      if (rule.minAge !== undefined || rule.maxAge !== undefined) {
+        const age = computeAgeYears(value);
+        if (age === null) {
+          say(meta.label, "must be a valid date.");
+        } else {
+          if (rule.minAge !== undefined && age < rule.minAge) say(meta.label, `must indicate an age of at least ${rule.minAge}.`);
+          if (rule.maxAge !== undefined && age > rule.maxAge) say(meta.label, `must indicate an age of at most ${rule.maxAge}.`);
         }
       }
       if (meta.type === "email" && !EMAIL_RE.test(str)) say(meta.label, "must be a valid email address.");

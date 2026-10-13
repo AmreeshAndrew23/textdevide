@@ -17,7 +17,13 @@ export function childElements(parent: XmlElement, tagName?: string): XmlElement[
   return tagName ? els.filter((el) => el.tagName === tagName) : els;
 }
 
-export type FieldRule = { required?: boolean; pattern?: string; maxLength?: number; minValue?: number; maxValue?: number; unique?: boolean };
+// minAge/maxAge are for a type="date" field holding a birth date (or similar) — they don't compare
+// the stored value itself, they compare the AGE IN WHOLE YEARS computed from it against today, e.g.
+// <rule maxAge="23"/> on a date_of_birth field rejects anyone who has already turned 24.
+export type FieldRule = {
+  required?: boolean; pattern?: string; maxLength?: number; minValue?: number; maxValue?: number; unique?: boolean;
+  minAge?: number; maxAge?: number;
+};
 
 export type FieldOption = { value: string; label: string };
 
@@ -100,6 +106,10 @@ function parseRules(fieldEl: XmlElement): FieldRule[] {
     if (minValue) rule.minValue = Number(minValue);
     const maxValue = attr(r, "maxValue");
     if (maxValue) rule.maxValue = Number(maxValue);
+    const minAge = attr(r, "minAge");
+    if (minAge) rule.minAge = Number(minAge);
+    const maxAge = attr(r, "maxAge");
+    if (maxAge) rule.maxAge = Number(maxAge);
     return rule;
   });
 }

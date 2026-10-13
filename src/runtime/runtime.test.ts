@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { labelFor, prepareCypher, validateCypherStatic } from "./cypher.js";
 import { coerceValue } from "./values.js";
-import { evaluateCondition, resolveTemplate, runEvent, isAnonymousEvent, hasAnonymousEntry, type QueryExecutor } from "./engine.js";
+import { evaluateCondition, resolveTemplate, runEvent, isAnonymousEvent, hasAnonymousEntry, computeAgeYears, type QueryExecutor } from "./engine.js";
 import { lintScreenXml } from "../services/aiService.js";
 import { parseScreenModel } from "./screenModel.js";
 import { renderScreen, THEMES, findScreenForLabel } from "./renderer.js";
@@ -505,6 +505,68 @@ describe("engine: server-side field validation (before any write query runs)", (
     const actions = await runEvent(exec, entities, xml, "q", "change", { regNo: "", email: "", age: "", q: "ar" });
     expect(actions.filter((a) => a.type === "message" && a.messageType === "error")).toEqual([]);
     expect(seen).toEqual(["MATCH"]);
+  });
+});
+
+describe("computeAgeYears: whole-years age from a birth-date-like value", () => {
+  it("accounts for whether this year's birthday has already passed", () => {
+    const now = new Date("2026-06-15T00:00:00Z");
+    expect(computeAgeYears("2003-06-15", now)).toBe(23); // birthday is today
+    expect(computeAgeYears("2003-06-16", now)).toBe(22); // birthday is tomorrow, hasn't happened yet
+    expect(computeAgeYears("2003-06-14", now)).toBe(23); // birthday was yesterday
+    expect(computeAgeYears("2003-01-01", now)).toBe(23);
+    expect(computeAgeYears("2003-12-31", now)).toBe(22);
+  });
+  it("returns null for an unparseable or empty date value", () => {
+    expect(computeAgeYears("not-a-date")).toBeNull();
+    expect(computeAgeYears("")).toBeNull();
+  });
+});
+
+describe("engine: minAge/maxAge validation, computed from a date field (not the stored value itself)", () => {
+  const xml = `<screen id="s" title="S">
+  <queries>
+    <query id="ins"><statement>CREATE (s:Student {dob: $dob})</statement>
+      <parameters><parameter name="dob" source="field:dob"/></parameters></query>
+  </queries>
+  <ui>
+    <field id="dob" label="Date Of Birth" type="date"><rule maxAge="23"/></field>
+    <button id="save" label="Save"/>
+  </ui>
+  <events>
+    <event type="click" element="save"><execute query="ins"/></event>
+  </events>
+</screen>`;
+  const entities = { tables: [{ name: "Student", columns: [{ name: "dob", type: "DATE" }] }] };
+  let seen: string[] = [];
+  const exec: QueryExecutor = async (statement) => { seen.push(statement.split(" ")[0]); return { rows: [], count: 0 }; };
+  beforeEach(() => { seen = []; });
+
+  // Computed relative to the real current date, so the test stays correct no matter when it runs.
+  function dobForAge(years: number): string {
+    const now = new Date();
+    return new Date(Date.UTC(now.getUTCFullYear() - years, now.getUTCMonth(), now.getUTCDate())).toISOString().slice(0, 10);
+  }
+
+  it("blocks a save when the computed age exceeds maxAge", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { dob: dobForAge(24) });
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Date Of Birth must indicate an age of at most 23." });
+    expect(seen).toEqual([]);
+  });
+  it("allows a save when the computed age is exactly at the maxAge boundary", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { dob: dobForAge(23) });
+    expect(actions.filter((a) => a.type === "message" && a.messageType === "error")).toEqual([]);
+    expect(seen).toEqual(["CREATE"]);
+  });
+  it("blocks a save with an unparseable date value", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { dob: "not-a-date" });
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Date Of Birth must be a valid date." });
+    expect(seen).toEqual([]);
+  });
+  it("never validates an empty, non-required date field", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { dob: "" });
+    expect(actions.filter((a) => a.type === "message" && a.messageType === "error")).toEqual([]);
+    expect(seen).toEqual(["CREATE"]);
   });
 });
 

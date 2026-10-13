@@ -62,7 +62,7 @@ Table object shape:
   "audit_enabled": true|false,
   "history_enabled": true|false,
   "validations": [
-    {"column": "col_name", "type": "required|unique|pattern|minValue|maxValue|maxLength", "detail": "a regex or numeric bound specific to this rule, or empty string if not applicable"}
+    {"column": "col_name", "type": "required|unique|pattern|minValue|maxValue|maxLength|minAge|maxAge", "detail": "a regex or numeric bound specific to this rule, or empty string if not applicable"}
   ]
 }
 - Set "audit_enabled": true only when the user asks for auditing / tracking who created or
@@ -82,7 +82,10 @@ Table object shape:
   <TableName>_history companion table is generated downstream from this flag alone.
 - "validations" holds structured rules beyond what pk/fk/nullable/unique already express (format
   patterns, numeric bounds, cross-field rules) — do not duplicate a plain uniqueness rule that's
-  already captured by a column's "unique": true.
+  already captured by a column's "unique": true. minAge/maxAge go on a date-of-birth-like column and
+  bound the AGE IN WHOLE YEARS computed from it against today, not the stored date value itself —
+  use this instead of inventing a separate numeric "age" column when an age limit is requested and a
+  birth-date column already exists (or is the natural way to store that fact).
 
 If something is genuinely ambiguous in a way that would change the resulting schema (an unclear
 data type for a key field, a foreign key whose target table isn't described anywhere, contradictory
@@ -262,10 +265,16 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      filter" in the WHERE pattern below. persistenceMapping names the REAL
      table.column this field reads from/writes to; omit it for a field that only ever holds an
      in-memory value (e.g. a search box, a filter, a sort choice, a page offset). <rule> (required,
-     pattern, unique, maxLength, minValue, maxValue) and <hint> children work as before — these are
-     ENFORCED server-side before any save/update/delete query runs, so get them right, not just
-     decorative. Related fields may be visually grouped inside a <fieldset legend="..."> — this is
-     purely cosmetic grouping, not a new data concept.
+     pattern, unique, maxLength, minValue, maxValue, minAge, maxAge) and <hint> children work as
+     before — these are ENFORCED server-side before any save/update/delete query runs, so get them
+     right, not just decorative. minAge/maxAge go on a type="date" field holding a birth date (or
+     similar) — they do NOT compare the date value itself, they compare the AGE IN WHOLE YEARS
+     computed from it against today, e.g. <rule maxAge="23"/> on a date_of_birth field rejects anyone
+     who has already turned 24. Never invent a separate numeric "age" field/column just to validate
+     an age limit when a birth-date field already exists — use minAge/maxAge on that date field
+     instead; minValue/maxValue only compare a field's own numeric value and cannot express an age
+     computed from a date. Related fields may be visually grouped inside a <fieldset legend="..."> —
+     this is purely cosmetic grouping, not a new data concept.
    - A type="select" field with a FIXED, small set of choices that will never come from a table
      (Status: Active/Inactive, a Yes/No) renders a real dropdown when given
      <option value="..." label="..."/> children:
