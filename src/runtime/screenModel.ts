@@ -51,6 +51,11 @@ export type FieldItem = {
   // target="field:fieldId:options"/>. Takes priority over static <option> children when both
   // happen to be present.
   optionsBinding: { valueColumn: string; labelColumn: string } | null;
+  // visibleRoles="Admin,Manager" — null means visible to every logged-in session (today's default
+  // behavior); when set, only a session whose role is in this list gets the field rendered at all.
+  // Hiding it here is the UI half only — engine.ts separately rejects a write sourced from a hidden
+  // field server-side, since a client can always edit the DOM/request directly.
+  visibleRoles: string[] | null;
 };
 
 export type GridColumn = { id: string; header: string; binding: string; persistenceMapping: string | null };
@@ -118,6 +123,15 @@ function parseOptions(fieldEl: XmlElement): FieldOption[] {
   return childElements(fieldEl, "option").map((o) => ({ value: attr(o, "value"), label: attr(o, "label", attr(o, "value")) }));
 }
 
+// Same parsing engine.ts's own role-list attributes use — duplicated rather than imported, same
+// reasoning as FieldRule parsing already being independently re-read in both modules (this module
+// renders what the server separately, independently enforces).
+function parseRoleList(value: string | null): string[] | null {
+  if (!value) return null;
+  const roles = value.split(",").map((r) => r.trim()).filter(Boolean);
+  return roles.length ? roles : null;
+}
+
 function parseField(el: XmlElement, eventsByElement: Map<string, string[]>): FieldItem {
   const id = attr(el, "id");
   return {
@@ -137,6 +151,7 @@ function parseField(el: XmlElement, eventsByElement: Map<string, string[]>): Fie
       const labelColumn = el.getAttribute("optionLabel");
       return valueColumn && labelColumn ? { valueColumn, labelColumn } : null;
     })(),
+    visibleRoles: parseRoleList(el.getAttribute("visibleRoles")),
   };
 }
 

@@ -419,6 +419,49 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      screen at all) — verify the CURRENT password first (<when condition="result.count == 0">
      rejects with an error), only then run the update, same validate-then-write shape every save
      already uses.
+   - ROLES / PERMISSIONS (only when the description asks for roles, permissions, access levels, or
+     who-can-do-what — most apps don't need this): the account table (usually Account) gets a plain
+     "role" column (VARCHAR), and the schema gets its OWN Role table — {name, description} is
+     enough, every role the app needs is just a row in it, named for THIS app's domain (Teacher/
+     Registrar, Cashier/Manager, whatever the description implies — never a fixed Admin/Manager/
+     Staff set unless that's literally what was asked for). role="field:x"/role="result:col" on
+     <session action="start"/> captures it the SAME way identity does, resolved from the login
+     query's own result column (so checkLogin's statement must also RETURN a.role AS role):
+       <session action="start" identity="field:u" role="result.role"/>
+     Later, source="session:role" on a <parameter> resolves to it — same anti-spoofing guarantee as
+     session:identity, never from a field. session:role is also usable directly inside a <when
+     condition="...">, e.g. <when condition="session:role == 'Admin'">, to branch an event's
+     behavior by the current user's role without needing a lookup query at all.
+     * requiredRole="Admin,Manager" on a <screen> (comma-separated, exact role names) restricts the
+       WHOLE screen to those roles — anyone else can't open it at all, enforced by the runtime
+       before the screen is ever sent, not something you implement yourself.
+     * requiredRole="Admin" on a specific <event> restricts just THAT action (e.g. only Admin can
+       Delete, even though everyone can view the screen it's on) — same enforcement, per-event.
+     * visibleRoles="Admin,HR" on a <field> hides that field (and blocks saving a value into it)
+       for any other role — e.g. a Salary field only HR/Admin should see or edit. The runtime
+       enforces the save-blocking server-side on its own; you only declare the attribute.
+     BOOTSTRAPPING THE FIRST ADMIN: nobody exists yet to grant the first role, so the signup event
+     itself decides it — count existing accounts first, and set the field the create query reads
+     role from differently depending on whether this is the very first signup:
+       <event type="click" element="signupBtn" allowAnonymous="true">
+         <execute query="countAccounts">                     -- MATCH (a:Account) RETURN count(a) AS count
+           <when condition="result.count == 0"><set target="field:role" value="Admin"/></when>
+           <when condition="result.count &gt; 0"><set target="field:role" value="Staff"/></when>
+         </execute>
+         <execute query="createAccount"/>                    -- CREATE (a:Account {username: $u, password: $p, role: $role})
+         <session action="start" identity="field:u" role="field:role"/>
+         <navigate screen="Dashboard"/>
+       </event>
+     ("Staff" above is just an example default — use whatever this app's lowest/default role is
+     actually named.) Add a hidden-from-the-user "role" field (type="text", no <rule>, never shown
+     in any visible fieldset) to the Signup screen so <set target="field:role"> has somewhere to
+     write to — the user never sees or edits it directly.
+     ROLE MANAGEMENT / USER MANAGEMENT SCREENS: when an app has roles, also generate (or the request
+     is explicitly asking for) a Role Management screen (plain CRUD on the Role table, nothing
+     special) and a User Management screen — a grid of every Account with a type="select" field
+     (optionValue/optionLabel against the Role table, rule 5's data-backed select pattern) to change
+     a selected user's role, and requiredRole="<this app's top role>" on the screen itself so only
+     that role can reach it.
    - PROFILE PICTURES: type="image" on a <field> renders a real file picker; the runtime reads it
      into a data-URL client-side (no upload endpoint needed) and that string is the field's value —
      treat it exactly like any other field's value in a query, e.g.

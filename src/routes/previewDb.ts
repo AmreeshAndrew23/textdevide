@@ -4,7 +4,7 @@ import { getOwnedProject, getProjectPublic } from "../services/projectStore.js";
 import { PreviewRowsRequestSchema, RunEventRequestSchema } from "../models/schemas.js";
 import { requireAuth } from "./authGuard.js";
 import { getCurrentUser, HttpError } from "../services/authService.js";
-import { runEvent, isAnonymousEvent, type SiblingScreen } from "../runtime/engine.js";
+import { runEvent, isAnonymousEvent, eventRequiredRole, type SiblingScreen } from "../runtime/engine.js";
 import * as store from "../runtime/neo4jStore.js";
 import { raceAbort, requestAbortSignal, RequestAbortedError } from "../utils/requestAbort.js";
 import { cookieName, verifyAppSession, signAppSession, APP_SESSION_COOKIE_OPTS } from "../services/appSession.js";
@@ -96,16 +96,19 @@ export default async function previewDbRoutes(app: FastifyInstance) {
 
     let project: ProjectRow | null = null;
     let authorized = false;
-    // Which Account this session belongs to (see services/appSession.ts) — null for a builder
-    // token (the Studio isn't "a user" of the generated app) or no session at all. Threaded into
-    // runEvent so a query can bind source="session:identity" to act on "my own row", resolved ONLY
-    // from this verified cookie, never from the request body.
+    let isBuilderPreview = false;
+    // Which Account this session belongs to, and its role (see services/appSession.ts) — null for a
+    // builder token (the Studio isn't "a user" of the generated app) or no session at all. Threaded
+    // into runEvent so a query can bind source="session:identity"/"session:role" to act on "my own
+    // row"/"my own permissions", resolved ONLY from this verified cookie, never from the request body.
     let sessionIdentity: string | null = null;
+    let sessionRole: string | null = null;
     if (bearer) {
       try {
         const user = await getCurrentUser(bearer);
         project = await getOwnedProject(projectId, user.id);
         authorized = true;
+        isBuilderPreview = true;
       } catch {
         // Not a valid/owning builder token — fall through to the app-session check below.
       }
@@ -116,6 +119,7 @@ export default async function previewDbRoutes(app: FastifyInstance) {
         project = await getProjectPublic(projectId);
         authorized = true;
         sessionIdentity = session.identity;
+        sessionRole = session.role;
       }
     }
     if (!project) project = await getProjectPublic(projectId); // just to read the screen's XML below
@@ -129,6 +133,12 @@ export default async function previewDbRoutes(app: FastifyInstance) {
     if (!authorized && !isAnonymousEvent(screen.xml, body.elementId, body.eventType)) {
       throw new HttpError(401, "Please log in.");
     }
+    // The builder's own Studio preview always has full access, same as the allowAnonymous bypass
+    // above — a real end-user session must have a role in this specific event's requiredRole list.
+    const required = eventRequiredRole(screen.xml, body.elementId, body.eventType);
+    if (required && !isBuilderPreview && (!sessionRole || !required.includes(sessionRole))) {
+      throw new HttpError(403, "You don't have permission to do this.");
+    }
 
     const entities = project.entities ? JSON.parse(project.entities) : {};
     // Fetched fresh on every call (not baked into the XML at generation time) so a <navigate>
@@ -141,17 +151,19 @@ export default async function previewDbRoutes(app: FastifyInstance) {
       const actions = await store.withTx((tx) =>
         runEvent(
           (statement, params) => store.executeQuery(tx, project.id, entities, statement, params),
-          entities, screen.xml!, body.elementId, body.eventType, body.fieldValues, siblingScreens, sessionIdentity
+          entities, screen.xml!, body.elementId, body.eventType, body.fieldValues, siblingScreens, sessionIdentity, sessionRole
         )
       );
       // <session action="start"/"end"/> is a server-only concern (set/clear the real app-session
       // cookie) — never forwarded to the client, same spirit as "stop" carrying no client meaning.
-      // A session started with no identity (no identity="..." on the XML, or it resolved empty)
-      // still signs a valid project-scoped session — identity is optional, access isn't gated by it.
+      // A session started with no identity/role (no identity="..."/role="..." on the XML, or either
+      // resolved empty) still signs a valid project-scoped session — both are optional, access isn't
+      // gated by either one unless a screen/event declares requiredRole.
       const clientActions = actions.filter((a) => {
         if (a.type !== "session") return true;
-        if (a.action === "start") reply.setCookie(cookieName(projectId), signAppSession(projectId, a.identity ?? null), APP_SESSION_COOKIE_OPTS);
-        else reply.clearCookie(cookieName(projectId), { path: APP_SESSION_COOKIE_OPTS.path });
+        if (a.action === "start") {
+          reply.setCookie(cookieName(projectId), signAppSession(projectId, a.identity ?? null, a.role ?? null), APP_SESSION_COOKIE_OPTS);
+        } else reply.clearCookie(cookieName(projectId), { path: APP_SESSION_COOKIE_OPTS.path });
         return false;
       });
       return reply.send({ actions: clientActions });

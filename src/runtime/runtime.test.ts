@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { labelFor, prepareCypher, validateCypherStatic } from "./cypher.js";
 import { coerceValue } from "./values.js";
-import { evaluateCondition, resolveTemplate, runEvent, isAnonymousEvent, hasAnonymousEntry, computeAgeYears, type QueryExecutor } from "./engine.js";
+import { evaluateCondition, resolveTemplate, runEvent, isAnonymousEvent, hasAnonymousEntry, computeAgeYears, eventRequiredRole, screenRequiredRole, type QueryExecutor } from "./engine.js";
 import { lintScreenXml } from "../services/aiService.js";
 import { parseScreenModel } from "./screenModel.js";
 import { renderScreen, THEMES, findScreenForLabel } from "./renderer.js";
@@ -813,6 +813,135 @@ describe("engine: session identity + session:identity parameter source", () => {
     const exec: QueryExecutor = async (statement, params) => { seenParams = params; return { rows: [], count: 0 }; };
     await runEvent(exec, entities, xml, "saveBtn", "click", { newPassword: "new1" });
     expect(seenParams.identity).toBeNull();
+  });
+});
+
+describe("engine: session role — session:role parameter source, condition, and requiredRole helpers", () => {
+  const xml = `<screen id="s" title="S">
+  <queries>
+    <query id="check"><statement>MATCH (a:Account) WHERE a.username = $u AND a.password = $p RETURN count(a) AS count, a.role AS role</statement>
+      <parameters><parameter name="u" source="field:u"/><parameter name="p" source="field:p"/></parameters></query>
+    <query id="adminOnly"><statement>MATCH (x:Thing) WHERE x.owner = $owner RETURN count(x) AS count</statement>
+      <parameters><parameter name="owner" source="session:role"/></parameters></query>
+  </queries>
+  <ui><field id="u" label="User" type="text"/><field id="p" label="Pass" type="password"/>
+    <button id="loginBtn" label="Login"/><button id="checkBtn" label="Check"/></ui>
+  <events>
+    <event type="click" element="loginBtn" allowAnonymous="true">
+      <execute query="check"><when condition="result.count > 0"><session action="start" identity="field:u" role="result.role"/></when></execute>
+    </event>
+    <event type="click" element="checkBtn"><execute query="adminOnly"/></event>
+  </events>
+</screen>`;
+  const entities = {};
+
+  it("captures the role column from the login query's own result on a successful login", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [{ count: 1, role: "Admin" }], count: 1 });
+    const actions = await runEvent(exec, entities, xml, "loginBtn", "click", { u: "alice", p: "x" });
+    expect(actions).toContainEqual({ type: "session", action: "start", identity: "alice", role: "Admin" });
+  });
+  it("source=\"session:role\" resolves from the role passed into runEvent, never from fieldValues", async () => {
+    let seenParams: Record<string, unknown> = {};
+    const exec: QueryExecutor = async (statement, params) => { seenParams = params; return { rows: [], count: 0 }; };
+    // A client submitting a field literally named "owner" trying to spoof a role — must be ignored.
+    await runEvent(exec, entities, xml, "checkBtn", "click", { owner: "attacker-role" }, [], "realuser", "Admin");
+    expect(seenParams).toEqual({ owner: "Admin" });
+  });
+  it("session:role is null when no role was passed in", async () => {
+    let seenParams: Record<string, unknown> = {};
+    const exec: QueryExecutor = async (statement, params) => { seenParams = params; return { rows: [], count: 0 }; };
+    await runEvent(exec, entities, xml, "checkBtn", "click", {});
+    expect(seenParams.owner).toBeNull();
+  });
+  it("evaluateCondition resolves session:role from the session argument, not fieldValues", () => {
+    const result = { rows: [], count: 0 };
+    expect(evaluateCondition("session:role == 'Admin'", result, {}, { identity: null, role: "Admin" })).toBe(true);
+    expect(evaluateCondition("session:role == 'Admin'", result, {}, { identity: null, role: "Staff" })).toBe(false);
+    expect(evaluateCondition("session:role == 'Admin'", result, { role: "Admin" })).toBe(false); // fieldValues never substitutes for it
+  });
+
+  describe("eventRequiredRole / screenRequiredRole: raw-XML role-list attributes", () => {
+    const gated = `<screen id="s" title="S" requiredRole="Admin, Manager">
+      <ui><button id="del" label="Delete"/></ui>
+      <events><event type="click" element="del" requiredRole="Admin"><stop/></event></events>
+    </screen>`;
+    const ungated = `<screen id="s" title="S"><ui><button id="del" label="Delete"/></ui><events><event type="click" element="del"><stop/></event></events></screen>`;
+
+    it("parses a comma-separated role list, trimmed", () => {
+      expect(screenRequiredRole(gated)).toEqual(["Admin", "Manager"]);
+      expect(eventRequiredRole(gated, "del", "click")).toEqual(["Admin"]);
+    });
+    it("returns null when the attribute is absent — no restriction", () => {
+      expect(screenRequiredRole(ungated)).toBeNull();
+      expect(eventRequiredRole(ungated, "del", "click")).toBeNull();
+    });
+    it("returns null for an event/element that doesn't exist, rather than throwing", () => {
+      expect(eventRequiredRole(gated, "nope", "click")).toBeNull();
+    });
+  });
+});
+
+describe("engine: visibleRoles on a field — hidden from a role must also be unwritable by that role", () => {
+  const xml = `<screen id="s" title="S">
+  <queries>
+    <query id="ins"><statement>CREATE (e:Employee {name: $name, salary: $salary})</statement>
+      <parameters><parameter name="name" source="field:name"/><parameter name="salary" source="field:salary"/></parameters></query>
+  </queries>
+  <ui>
+    <field id="name" label="Name" type="text"/>
+    <field id="salary" label="Salary" type="number" visibleRoles="Admin,HR"/>
+    <button id="save" label="Save"/>
+  </ui>
+  <events><event type="click" element="save"><execute query="ins"/></event></events>
+</screen>`;
+  const entities = { tables: [{ name: "Employee", columns: [{ name: "name", type: "VARCHAR(50)" }] }] };
+  let seen: string[] = [];
+  const exec: QueryExecutor = async (statement) => { seen.push(statement.split(" ")[0]); return { rows: [], count: 0 }; };
+  beforeEach(() => { seen = []; });
+
+  it("blocks a submitted value for a role-restricted field when the session's role isn't allowed", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { name: "Bob", salary: "90000" }, [], null, "Staff");
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Salary cannot be set with your current role." });
+    expect(seen).toEqual([]);
+  });
+  it("allows the save when the role-restricted field is simply left empty — a role that can't see it must still save the rest", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { name: "Bob", salary: "" }, [], null, "Staff");
+    expect(actions.filter((a) => a.type === "message" && a.messageType === "error")).toEqual([]);
+    expect(seen).toEqual(["CREATE"]);
+  });
+  it("allows a submitted value when the session's role is permitted", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { name: "Bob", salary: "90000" }, [], null, "Admin");
+    expect(actions.filter((a) => a.type === "message" && a.messageType === "error")).toEqual([]);
+    expect(seen).toEqual(["CREATE"]);
+  });
+  it("blocks it when no role at all is present on the session", async () => {
+    const actions = await runEvent(exec, entities, xml, "save", "click", { name: "Bob", salary: "90000" });
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Salary cannot be set with your current role." });
+    expect(seen).toEqual([]);
+  });
+});
+
+describe("renderer: visibleRoles hides a field (and its fieldset, if emptied) from a role that can't see it", () => {
+  const xml = `<screen id="s" title="S"><ui>
+    <field id="name" label="Name" type="text"/>
+    <fieldset legend="Payroll"><field id="salary" label="Salary" type="number" visibleRoles="Admin,HR"/></fieldset>
+  </ui><events/></screen>`;
+  const model = parseScreenModel(xml);
+
+  it("renders a visibleRoles field for a role that's allowed", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t", sessionRole: "Admin" });
+    expect(html).toContain('id="salary"');
+    expect(html).toContain("Payroll");
+  });
+  it("omits the field entirely (not just visually) for a role that isn't allowed, and drops the now-empty fieldset", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t", sessionRole: "Staff" });
+    expect(html).not.toContain('id="salary"');
+    expect(html).not.toContain("Payroll");
+    expect(html).toContain('id="name"'); // the unrestricted sibling field is unaffected
+  });
+  it("omits it when no sessionRole is given at all", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+    expect(html).not.toContain('id="salary"');
   });
 });
 

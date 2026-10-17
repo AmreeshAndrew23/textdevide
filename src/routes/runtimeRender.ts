@@ -3,7 +3,7 @@ import type { ProjectRow } from "../db/schema.js";
 import { getCurrentUser, HttpError } from "../services/authService.js";
 import { getOwnedProject, getProjectPublic } from "../services/projectStore.js";
 import { parseScreenModel, ScreenParseError } from "../runtime/screenModel.js";
-import { hasAnonymousEntry } from "../runtime/engine.js";
+import { hasAnonymousEntry, screenRequiredRole } from "../runtime/engine.js";
 import { renderScreen } from "../runtime/renderer.js";
 import { cookieName, verifyAppSession, APP_SESSION_COOKIE_OPTS } from "../services/appSession.js";
 
@@ -53,8 +53,16 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
             token = ""; // not a valid/owning builder token — fall through
           }
         }
-        if (!project && verifyAppSession(req.cookies?.[cookieName(projectId)], projectId)) {
-          project = await getProjectPublic(projectId);
+        // Resolved ONLY from the verified session cookie, never from anything client-submitted —
+        // same anti-spoofing precedent as sessionIdentity. null for a builder preview (not a real
+        // end-user session) or no session at all.
+        let sessionRole: string | null = null;
+        if (!project) {
+          const session = verifyAppSession(req.cookies?.[cookieName(projectId)], projectId);
+          if (session) {
+            project = await getProjectPublic(projectId);
+            sessionRole = session.role;
+          }
         }
 
         const identified = Boolean(project);
@@ -65,6 +73,15 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
         if (!screen) throw new HttpError(404, "Screen not found");
         if (!screen.xml) throw new HttpError(400, "Screen has no XML yet");
         if (!identified && !hasAnonymousEntry(screen.xml)) throw new HttpError(401, "Please log in.");
+
+        // The builder's own Studio preview (a real, project-owning token) always has full access —
+        // same bypass allowAnonymous/session concerns already get. A real end-user session must have
+        // a role in the screen's requiredRole list, if one is declared.
+        const isBuilderPreview = Boolean(token);
+        const required = screenRequiredRole(screen.xml);
+        if (required && !isBuilderPreview && (!sessionRole || !required.includes(sessionRole))) {
+          throw new HttpError(403, "You don't have permission to view this screen.");
+        }
 
         let model;
         try {
@@ -101,6 +118,7 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
           apiBase, projectId: project.id, screenId: screen.id, token,
           appName: project.name, screens: navScreens.map((s) => ({ id: s.id, name: s.name || "" })),
           theme: project.uiTheme, loggedIn, loginScreenId: loginScreen?.id ?? null, profileScreenId: profileScreen?.id ?? null,
+          sessionRole,
         });
         return reply.type("text/html; charset=utf-8").send(html);
       } catch (e) {

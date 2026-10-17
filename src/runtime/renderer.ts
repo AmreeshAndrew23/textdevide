@@ -144,6 +144,28 @@ function renderInner(items: UiItem[], linkFor: Linker): string {
   return items.map((it) => renderOne(it, linkFor)).join("\n");
 }
 
+// Drops any field whose visibleRoles excludes the current session's role, before rendering ever
+// starts — simpler than threading role through every render function, and means a hidden field
+// never reaches the page at all (not just CSS-hidden). A fieldset that ends up empty after this is
+// dropped too (an empty box with just a legend would look broken), recursively. This is the UI half
+// only — engine.ts separately refuses to WRITE a value for a field the role can't see, since a
+// client can always edit the DOM/request directly regardless of what got rendered.
+function filterItemsByRole(items: UiItem[], sessionRole: string | null): UiItem[] {
+  const out: UiItem[] = [];
+  for (const it of items) {
+    if (it.kind === "field") {
+      if (it.visibleRoles && (!sessionRole || !it.visibleRoles.includes(sessionRole))) continue;
+      out.push(it);
+    } else if (it.kind === "fieldset") {
+      const innerItems = filterItemsByRole(it.items, sessionRole);
+      if (innerItems.length) out.push({ ...it, items: innerItems });
+    } else {
+      out.push(it);
+    }
+  }
+  return out;
+}
+
 // Top level only: consecutive fields/fieldsets group into one form card (a grid always starts its
 // own separate card — see renderGrid). A button attaches to whatever field group is still open
 // (so a Save button right after some fields renders inside that same card, at the bottom — the
@@ -595,13 +617,19 @@ export function renderScreen(
   model: ScreenModel,
   opts: {
     apiBase: string; projectId: number; screenId: string; token: string; appName?: string; screens?: ShellScreen[]; theme?: string | null;
-    loggedIn?: boolean; loginScreenId?: string | null; profileScreenId?: string | null;
+    loggedIn?: boolean; loginScreenId?: string | null; profileScreenId?: string | null; sessionRole?: string | null;
   }
 ): string {
   const shellOpts: ShellOpts = {
     ...opts, appName: opts.appName || "App", screens: opts.screens || [],
     loggedIn: opts.loggedIn ?? false, loginScreenId: opts.loginScreenId ?? null, profileScreenId: opts.profileScreenId ?? null,
   };
+  const sessionRole = opts.sessionRole ?? null;
+  const items = filterItemsByRole(model.items, sessionRole);
+  // A field the client script never renders must also be absent from its option/mapping JSON, or
+  // the script would carry live wiring for a field id with no matching DOM element.
+  const visibleFields = model.fields.filter((f) => !f.visibleRoles || (sessionRole && f.visibleRoles.includes(sessionRole)));
+  const visibleModel: ScreenModel = { ...model, items, fields: visibleFields };
   const t = resolveTheme(opts.theme);
   return `<!doctype html>
 <html lang="en">
@@ -793,13 +821,13 @@ ${renderNavItems(shellOpts)}
   <h1>${esc(model.header.title || model.title)}</h1>
   ${model.header.subtitle ? `<div class="subtitle">${esc(model.header.subtitle)}</div>` : ""}
   <div id="screen-messages"></div>
-  ${renderItems(model.items, (label) => {
+  ${renderItems(items, (label) => {
     const target = findScreenForLabel(label, shellOpts.screens, opts.screenId);
     return target ? shellUrl(opts, target.id) : null;
   })}
 </main>
 </div>
-${clientScript(model, opts)}
+${clientScript(visibleModel, opts)}
 </body>
 </html>`;
 }

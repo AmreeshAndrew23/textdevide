@@ -24,8 +24,17 @@ const CONDITION_RE = /^\s*(.+?)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$/;
 const LITERAL_NUMBER_RE = /^-?\d+(\.\d+)?$/;
 const PLACEHOLDER_RE = /\$\{\s*([^}]+?)\s*\}/g;
 
-function resolveOperand(token: string, result: QueryResult, fieldValues: Record<string, unknown>): unknown {
+// WHICH account/role is running this event — resolved ONLY from the verified session cookie, never
+// from client-submitted fieldValues (same anti-spoofing precedent session:identity already set).
+// Optional with a null default so every existing call site that doesn't care about session (most
+// resolveTemplate uses, every test calling evaluateCondition with 3 args) keeps compiling unchanged.
+export type SessionContext = { identity: string | null; role: string | null };
+const NO_SESSION: SessionContext = { identity: null, role: null };
+
+function resolveOperand(token: string, result: QueryResult, fieldValues: Record<string, unknown>, session: SessionContext = NO_SESSION): unknown {
   token = (token || "").trim();
+  if (token === "session:identity") return session.identity;
+  if (token === "session:role") return session.role;
   if (token === "result.count") {
     // The standard existence-check idiom is `RETURN count(x) AS count` — which always
     // returns exactly one row (aggregates never return zero rows), with a column literally named
@@ -68,15 +77,15 @@ function numify(v: unknown): unknown {
 // field:<id>, or a literal), then compared via a plain JS operator — never re-injected into a
 // string that gets parsed as code. A malformed or type-mismatched condition degrades to false
 // with a logged warning rather than throwing, so one bad <when> never crashes the whole event.
-export function evaluateCondition(condition: string, result: QueryResult, fieldValues: Record<string, unknown>): boolean {
+export function evaluateCondition(condition: string, result: QueryResult, fieldValues: Record<string, unknown>, session: SessionContext = NO_SESSION): boolean {
   const m = CONDITION_RE.exec(condition || "");
   if (!m) {
     console.warn(`Unparseable event condition: ${JSON.stringify(condition)}`);
     return false;
   }
   const [, leftRaw, op, rightRaw] = m;
-  const left = numify(resolveOperand(leftRaw, result, fieldValues));
-  const right = numify(resolveOperand(rightRaw, result, fieldValues));
+  const left = numify(resolveOperand(leftRaw, result, fieldValues, session));
+  const right = numify(resolveOperand(rightRaw, result, fieldValues, session));
   try {
     return COMPARATORS[op](left, right);
   } catch {
@@ -131,7 +140,16 @@ function parseFieldPersistence(root: XmlElement): Map<string, [string, string]> 
   return mapping;
 }
 
-type FieldMeta = { label: string; type: string; rules: FieldRule[] };
+type FieldMeta = { label: string; type: string; rules: FieldRule[]; visibleRoles: string[] | null };
+
+// Parses a comma-separated role list attribute (requiredRole/visibleRoles) into a trimmed,
+// non-empty array, or null when the attribute is absent — null means "no restriction", not "empty
+// list" (an empty list would mean nobody, which no XML author means by omitting the attribute).
+function parseRoleList(value: string | null): string[] | null {
+  if (!value) return null;
+  const roles = value.split(",").map((r) => r.trim()).filter(Boolean);
+  return roles.length ? roles : null;
+}
 
 // fieldId -> {label, type, rules} straight off the <field> elements — same shape screenModel.ts
 // parses for rendering, re-read here independently (engine.ts works off the raw XML, not a
@@ -159,7 +177,10 @@ function parseFieldMeta(root: XmlElement): Map<string, FieldMeta> {
       if (maxAge) rule.maxAge = Number(maxAge);
       return rule;
     });
-    meta.set(id, { label: el.getAttribute("label") || id, type: el.getAttribute("type") || "text", rules });
+    meta.set(id, {
+      label: el.getAttribute("label") || id, type: el.getAttribute("type") || "text", rules,
+      visibleRoles: parseRoleList(el.getAttribute("visibleRoles")),
+    });
   }
   return meta;
 }
@@ -219,7 +240,7 @@ async function valueTaken(
 // search box can never be blocked by an unrelated required field elsewhere on the same screen.
 async function validateWriteFields(
   query: ParsedQuery, fieldValues: Record<string, unknown>, fieldMeta: Map<string, FieldMeta>,
-  fieldPersistence: Map<string, [string, string]>, entities: Entities, exec: QueryExecutor
+  fieldPersistence: Map<string, [string, string]>, entities: Entities, exec: QueryExecutor, sessionRole: string | null
 ): Promise<EventAction[]> {
   const violations: EventAction[] = [];
   const say = (label: string, msg: string) => violations.push({ type: "message", messageType: "error", value: `${label} ${msg}` });
@@ -227,8 +248,19 @@ async function validateWriteFields(
     if (!source.startsWith("field:")) continue;
     const fieldId = source.slice("field:".length);
     const meta = fieldMeta.get(fieldId);
-    if (!meta || !meta.rules.length) continue;
+    if (!meta) continue;
     const value = fieldValues[fieldId];
+    // A field the current role was never even shown (visibleRoles excludes it) must never be
+    // writable either — the client can always edit the DOM/request directly, so hiding it in the
+    // rendered page is not enforcement on its own; this is the real boundary. Only an actually
+    // SUBMITTED value is a violation — a role-restricted field the form simply never rendered
+    // legitimately has no value at all, and that must not block saving the rest of the record
+    // (same "other rules only constrain a value that's actually present" spirit as every rule below).
+    if (meta.visibleRoles && !isEmptyValue(value) && (!sessionRole || !meta.visibleRoles.includes(sessionRole))) {
+      say(meta.label, "cannot be set with your current role.");
+      continue;
+    }
+    if (!meta.rules.length) continue;
     for (const rule of meta.rules) {
       if (rule.required && isEmptyValue(value)) {
         say(meta.label, "is required.");
@@ -286,7 +318,7 @@ function findElementById(root: XmlElement, elementId: string): XmlElement | null
 function resolveQueryParams(
   queryParams: Record<string, string>, fieldValues: Record<string, unknown>,
   fieldPersistence: Map<string, [string, string]>, entities: Entities, fieldMeta: Map<string, FieldMeta>,
-  sessionIdentity: string | null
+  sessionIdentity: string | null, sessionRole: string | null
 ): Record<string, unknown> {
   const resolved: Record<string, unknown> = {};
   for (const [pname, source] of Object.entries(queryParams)) {
@@ -294,6 +326,8 @@ function resolveQueryParams(
       // From the VERIFIED session cookie only — never from fieldValues (the request body), so a
       // client can never spoof "I am someone else" by submitting a field of the same name.
       resolved[pname] = sessionIdentity;
+    } else if (source === "session:role") {
+      resolved[pname] = sessionRole; // same anti-spoofing precedent — never from fieldValues
     } else if (source.startsWith("field:")) {
       const fid = source.slice("field:".length);
       let raw = fieldValues[fid];
@@ -321,8 +355,17 @@ export type EventAction =
   | { type: "set"; target: string; value: unknown }
   | { type: "message"; messageType: string; value: string }
   | { type: "navigate"; screenId: string; screenName: string }
-  | { type: "session"; action: "start" | "end"; identity?: string }
+  | { type: "session"; action: "start" | "end"; identity?: string; role?: string }
   | { type: "stop" };
+
+function parseScreenRoot(screenXml: string): XmlElement | null {
+  try {
+    const doc = new DOMParser().parseFromString(screenXml, "text/xml");
+    return doc.documentElement || null;
+  } catch {
+    return null;
+  }
+}
 
 // <event ... allowAnonymous="true"> marks an event as safe to run with no identity at all — the
 // ONLY way an unauthenticated caller is allowed to do anything (see previewDb.ts's run-event dual
@@ -330,18 +373,34 @@ export type EventAction =
 // prompt; the engine itself enforces nothing about what such an event may contain, same as any
 // other event — this just answers "is this specific element+type pair marked safe".
 export function isAnonymousEvent(screenXml: string, elementId: string, eventType: string): boolean {
-  let root: XmlElement;
-  try {
-    const doc = new DOMParser().parseFromString(screenXml, "text/xml");
-    if (!doc.documentElement) return false;
-    root = doc.documentElement;
-  } catch {
-    return false;
-  }
+  const root = parseScreenRoot(screenXml);
+  if (!root) return false;
   const event = Array.from(root.getElementsByTagName("event")).find(
     (ev) => ev.getAttribute("element") === elementId && ev.getAttribute("type") === eventType
   );
   return event?.getAttribute("allowAnonymous") === "true";
+}
+
+// requiredRole="Admin,Manager" on a specific <event> — null means no restriction beyond being
+// logged in at all (the normal case today). Checked server-side in previewDb.ts's run-event route,
+// before anything in the event runs; the builder's own Studio preview bypasses this the same way it
+// already bypasses allowAnonymous/session concerns — the project owner always has full access.
+export function eventRequiredRole(screenXml: string, elementId: string, eventType: string): string[] | null {
+  const root = parseScreenRoot(screenXml);
+  if (!root) return null;
+  const event = Array.from(root.getElementsByTagName("event")).find(
+    (ev) => ev.getAttribute("element") === elementId && ev.getAttribute("type") === eventType
+  );
+  return parseRoleList(event?.getAttribute("requiredRole") ?? null);
+}
+
+// requiredRole="Admin,Manager" on the <screen> element itself — null means any logged-in session
+// may open it (the normal case today). Checked in runtimeRender.ts before the screen's structure is
+// ever sent to the client, same bypass-for-the-builder rule as eventRequiredRole above.
+export function screenRequiredRole(screenXml: string): string[] | null {
+  const root = parseScreenRoot(screenXml);
+  if (!root) return null;
+  return parseRoleList(root.getAttribute("requiredRole"));
 }
 
 // Whether this screen has AT LEAST ONE allowAnonymous event — i.e. it's a genuine entry point (a
@@ -394,7 +453,7 @@ function runNavigate(el: XmlElement, siblingScreens: SiblingScreen[], actions: E
 export async function runEvent(
   exec: QueryExecutor, entities: Entities, screenXml: string,
   elementId: string, eventType: string, fieldValues: Record<string, unknown>,
-  siblingScreens: SiblingScreen[] = [], sessionIdentity: string | null = null
+  siblingScreens: SiblingScreen[] = [], sessionIdentity: string | null = null, sessionRole: string | null = null
 ): Promise<EventAction[]> {
   let root: XmlElement;
   try {
@@ -431,7 +490,7 @@ export async function runEvent(
 
   for (const step of childElements(event)) {
     if (step.tagName === "execute") {
-      const stopped = await runExecute(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, values, actions, sessionIdentity);
+      const stopped = await runExecute(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, values, actions, sessionIdentity, sessionRole);
       if (stopped) break; // a <stop/> or <navigate/> anywhere inside cancels any later top-level step
     } else if (step.tagName === "navigate") {
       runNavigate(step, siblingScreens, actions);
@@ -439,7 +498,7 @@ export async function runEvent(
     } else if (step.tagName === "message" || step.tagName === "set" || step.tagName === "stop" || step.tagName === "session") {
       // e.g. a closing <message type="success" value="Saved."/> written after the executes. It has
       // no query result of its own, so ${result.*} placeholders resolve to empty.
-      if (await runStep(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, { rows: [], count: 0 }, values, actions, sessionIdentity)) break;
+      if (await runStep(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, { rows: [], count: 0 }, values, actions, sessionIdentity, sessionRole)) break;
     }
   }
   if (write.kind && !actions.some((a) => a.type === "message" || a.type === "navigate")) {
@@ -454,7 +513,7 @@ export async function runEvent(
 async function runExecute(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
   entities: Entities, siblingScreens: SiblingScreen[], fieldMeta: Map<string, FieldMeta>,
-  executeEl: XmlElement, fieldValues: Record<string, unknown>, actions: EventAction[], sessionIdentity: string | null
+  executeEl: XmlElement, fieldValues: Record<string, unknown>, actions: EventAction[], sessionIdentity: string | null, sessionRole: string | null
 ): Promise<boolean> {
   const queryId = executeEl.getAttribute("query");
   const query = queryId ? queries.get(queryId) : undefined;
@@ -466,15 +525,16 @@ async function runExecute(
   // leaves nothing partially applied. A read-only query (list/search/filter/sort) never matches
   // WRITE_STATEMENT_RE, so this never blocks anything but an actual save/delete.
   if (WRITE_STATEMENT_RE.test(query.statement)) {
-    const violations = await validateWriteFields(query, fieldValues, fieldMeta, fieldPersistence, entities, exec);
+    const violations = await validateWriteFields(query, fieldValues, fieldMeta, fieldPersistence, entities, exec, sessionRole);
     if (violations.length) {
       actions.push(...violations, { type: "stop" });
       return true;
     }
   }
-  const params = resolveQueryParams(query.params, fieldValues, fieldPersistence, entities, fieldMeta, sessionIdentity);
+  const params = resolveQueryParams(query.params, fieldValues, fieldPersistence, entities, fieldMeta, sessionIdentity, sessionRole);
   const result = await exec(query.statement, params);
 
+  const session: SessionContext = { identity: sessionIdentity, role: sessionRole };
   const children = childElements(executeEl);
   for (const child of children) {
     if (child.tagName === "map") {
@@ -490,8 +550,8 @@ async function runExecute(
       if (target.startsWith("field:")) fieldValues[target.slice("field:".length)] = value;
       actions.push({ type: "map", target, value });
     } else if (child.tagName === "when") {
-      if (!evaluateCondition(child.getAttribute("condition") || "", result, fieldValues)) continue;
-      if (await runWhenBody(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions, sessionIdentity)) {
+      if (!evaluateCondition(child.getAttribute("condition") || "", result, fieldValues, session)) continue;
+      if (await runWhenBody(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions, sessionIdentity, sessionRole)) {
         return true;
       }
     } else if (child.tagName === "execute" || child.tagName === "set" || child.tagName === "message" || child.tagName === "navigate" || child.tagName === "stop" || child.tagName === "session") {
@@ -499,7 +559,7 @@ async function runExecute(
       // directly inside the first (no <when> around it). Silently skipping it meant a successful
       // save never refreshed the grid or confirmed anything — so an unconditional step runs the
       // same way a step inside a matched <when> does.
-      if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions, sessionIdentity)) return true;
+      if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions, sessionIdentity, sessionRole)) return true;
     }
   }
   return false;
@@ -513,10 +573,10 @@ async function runExecute(
 async function runWhenBody(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
   entities: Entities, siblingScreens: SiblingScreen[], fieldMeta: Map<string, FieldMeta>,
-  whenEl: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[], sessionIdentity: string | null
+  whenEl: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[], sessionIdentity: string | null, sessionRole: string | null
 ): Promise<boolean> {
   for (const inner of childElements(whenEl)) {
-    if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, result, fieldValues, actions, sessionIdentity)) return true;
+    if (await runStep(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, result, fieldValues, actions, sessionIdentity, sessionRole)) return true;
   }
   return false;
 }
@@ -526,7 +586,7 @@ async function runWhenBody(
 async function runStep(
   exec: QueryExecutor, queries: Map<string, ParsedQuery>, fieldPersistence: Map<string, [string, string]>,
   entities: Entities, siblingScreens: SiblingScreen[], fieldMeta: Map<string, FieldMeta>,
-  inner: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[], sessionIdentity: string | null
+  inner: XmlElement, result: QueryResult, fieldValues: Record<string, unknown>, actions: EventAction[], sessionIdentity: string | null, sessionRole: string | null
 ): Promise<boolean> {
   if (inner.tagName === "set") {
     const target = inner.getAttribute("target") || "";
@@ -548,18 +608,21 @@ async function runStep(
   } else if (inner.tagName === "session") {
     const action = inner.getAttribute("action");
     if (action === "start" || action === "end") {
-      // identity="field:x" (only meaningful on "start") — resolved the SAME way any other operand
-      // is (field:/result./literal), via the existing resolveOperand, so a login/signup's identity
-      // is whatever field the AI names (usually the username field just submitted).
+      // identity="field:x" / role="field:x" (only meaningful on "start") — resolved the SAME way
+      // any other operand is (field:/result./literal), via the existing resolveOperand, so a
+      // login/signup's identity/role is whatever field or result column the AI names.
       const identitySource = action === "start" ? inner.getAttribute("identity") : null;
-      const resolved = identitySource ? resolveOperand(identitySource, result, fieldValues) : null;
-      const identity = resolved !== null && resolved !== undefined && resolved !== "" ? String(resolved) : undefined;
-      actions.push(identity !== undefined ? { type: "session", action, identity } : { type: "session", action });
+      const resolvedIdentity = identitySource ? resolveOperand(identitySource, result, fieldValues) : null;
+      const identity = resolvedIdentity !== null && resolvedIdentity !== undefined && resolvedIdentity !== "" ? String(resolvedIdentity) : undefined;
+      const roleSource = action === "start" ? inner.getAttribute("role") : null;
+      const resolvedRole = roleSource ? resolveOperand(roleSource, result, fieldValues) : null;
+      const role = resolvedRole !== null && resolvedRole !== undefined && resolvedRole !== "" ? String(resolvedRole) : undefined;
+      actions.push({ type: "session", action, ...(identity !== undefined ? { identity } : {}), ...(role !== undefined ? { role } : {}) });
     }
     // Deliberately does NOT return true — a login success is typically <session action="start"/>
     // immediately followed by a sibling <navigate>, and both need to run in the same chain.
   } else if (inner.tagName === "execute") {
-    if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, fieldValues, actions, sessionIdentity)) return true;
+    if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, fieldValues, actions, sessionIdentity, sessionRole)) return true;
   }
   return false;
 }

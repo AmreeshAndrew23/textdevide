@@ -20,11 +20,18 @@ export function cookieName(projectId: number): string {
 // resolved <session action="start" identity="field:x"/> against (see engine.ts). Opaque to this
 // module: just a string a generated screen's own queries later bind as source="session:identity"
 // to act on "the current user's own row", never trusting a client-submitted value of the same name.
-export function signAppSession(projectId: number, identity?: string | null): string {
-  return jwt.sign({ typ: APP_SESSION_TYP, projectId, identity: identity ?? null }, SECRET_KEY, { algorithm: ALGORITHM, expiresIn: `${APP_SESSION_HOURS}h` });
+// role (optional) works the same way — resolved once at login/signup (<session ... role="result:role"/>)
+// and trusted for the session's lifetime; a role change takes effect on next login, not instantly,
+// the same staleness tradeoff already accepted for identity. Bound later as source="session:role"
+// and as the session:role condition token (see engine.ts), never from client-submitted fieldValues.
+export function signAppSession(projectId: number, identity?: string | null, role?: string | null): string {
+  return jwt.sign(
+    { typ: APP_SESSION_TYP, projectId, identity: identity ?? null, role: role ?? null },
+    SECRET_KEY, { algorithm: ALGORITHM, expiresIn: `${APP_SESSION_HOURS}h` }
+  );
 }
 
-export type VerifiedAppSession = { identity: string | null };
+export type VerifiedAppSession = { identity: string | null; role: string | null };
 
 // Verifies the token AND that it's really an app-session token (not a builder JWT someone tried to
 // pass here) AND that it's for the project being asked about — returns null on any failure
@@ -35,7 +42,10 @@ export function verifyAppSession(token: string | undefined, projectId: number): 
   try {
     const payload = jwt.verify(token, SECRET_KEY, { algorithms: [ALGORITHM] }) as jwt.JwtPayload;
     if (payload.typ !== APP_SESSION_TYP || Number(payload.projectId) !== projectId) return null;
-    return { identity: typeof payload.identity === "string" ? payload.identity : null };
+    return {
+      identity: typeof payload.identity === "string" ? payload.identity : null,
+      role: typeof payload.role === "string" ? payload.role : null,
+    };
   } catch {
     return null;
   }
