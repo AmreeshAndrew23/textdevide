@@ -379,9 +379,13 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
        <session action="end"/> ends it — put this on a Log out button's event, followed by
        <navigate screen="Login"/>. Neither stops the chain by itself (unlike <navigate>/<stop>), so
        they combine naturally with whatever runs right after them.
+     Passwords are NEVER stored or compared as plain text — see PASSWORDS below for exactly how
+     hash="true" (on signup's password parameter) and passwordField/passwordColumn (on the login
+     query) make that work; the worked pattern here already uses both correctly.
      The worked pattern every app with login needs:
        <event type="click" element="loginBtn" allowAnonymous="true">
-         <execute query="checkLogin">                      -- MATCH (a:Account) WHERE a.username = $u AND a.password = $p RETURN count(a) AS count
+         <execute query="checkLogin"
+           passwordField="field:p" passwordColumn="passwordHash">  -- MATCH (a:Account) WHERE a.username = $u RETURN a.password AS passwordHash, count(a) AS count
            <when condition="result.count == 0"><message type="error" value="Invalid username or password."/><stop/></when>
            <when condition="result.count > 0"><session action="start"/><navigate screen="Dashboard"/></when>
          </execute>
@@ -390,7 +394,7 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
          <execute query="checkUsernameTaken">                -- MATCH (a:Account) WHERE a.username = $u RETURN count(a) AS count
            <when condition="result.count > 0"><message type="error" value="That username is already taken."/><stop/></when>
          </execute>
-         <execute query="createAccount"/>                    -- CREATE (a:Account {username: $u, password: $p})
+         <execute query="createAccount"/>                    -- CREATE (a:Account {username: $u, password: $p}) — createAccount's "p" parameter has hash="true"
          <session action="start"/>
          <navigate screen="Dashboard"/>
        </event>
@@ -462,6 +466,50 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      (optionValue/optionLabel against the Role table, rule 5's data-backed select pattern) to change
      a selected user's role, and requiredRole="<this app's top role>" on the screen itself so only
      that role can reach it.
+   - PASSWORDS: never stored or compared as plain text.
+     * hash="true" on a <parameter> whose source is a password-like field hashes it (server-side,
+       real bcrypt) before it's bound into the query — put this on EVERY query that writes a
+       password column (signup's createAccount, a changePassword query, an admin-provisioned
+       account's temp password), e.g.
+       <parameter name="p" source="field:password" hash="true"/>.
+     * A login query can never compare a submitted password against a stored hash with a plain
+       WHERE (the same password hashes differently every time) — instead put
+       passwordField="field:yourPasswordFieldId" passwordColumn="theColumnYourRETURNNamesTheHashAs"
+       on the <query> itself, and have its statement RETURN that hashed column (not filter on it):
+       MATCH (a:Account) WHERE a.username = $u RETURN a.password AS passwordHash, count(a) AS count.
+       The runtime does the real comparison and sets result.count to 0 on a mismatch — your
+       <when condition="result.count == 0/> 0"> branches work exactly as if it were a normal
+       WHERE-based check, you never see or touch the raw hash.
+   - AUTO-PROVISIONED LOGINS (no public signup for this role — e.g. Students get an account created
+     FOR them, not by themselves): when a screen creates a record that also needs its own login
+     (a Student Master screen creating the Student's Account too), generate a temporary password
+     instead of asking anyone to type one, and email it:
+       <generate target="field:tempPassword" type="password"/>
+       <execute query="createAccount"/>   -- CREATE (a:Account {username: $email, password: $tempPassword, role: $role, mustChangePassword: $mustChangePassword})
+                                           -- createAccount's "password" parameter has source="field:tempPassword" hash="true"; role/mustChangePassword are literal defaults (e.g. source="Student" / source="true")
+       <email to="field:email" subject="Your account"
+         body="Welcome! Your temporary password is \${field:tempPassword}. You'll be asked to change it on first login."/>
+     <generate> writes a securely random value into that field (same as <set>, just server-generated
+     instead of template-substituted) — reference it in a LATER step's hash="true" parameter and in
+     an <email>'s body the same way you'd reference any other field. <email to="..." subject="..."
+     body="..."/> sends real email — to/subject/body all resolve the same field:/result:/\${...} way
+     every other attribute already does. Never put a role-picking <field> on a public Signup screen
+     (a self-signing-up user must never choose their own role) — this pattern is the alternative:
+     the creator of the record decides the role, not the new account holder.
+     FORCING A PASSWORD CHANGE: when mustChangePassword is true (see above), on next login this
+     session can ONLY reach a screen/event you mark allowPasswordChange="true" — every other screen/
+     action is refused until they change it. Build a "Change Password Required" screen: a new
+     password field + confirm field (NOT the current password — they're changing one they never
+     chose), a Save button whose event is marked allowPasswordChange="true", hashes the new password
+     (hash="true") into the Account, then re-issues the session with it cleared:
+       <event type="click" element="saveBtn" allowPasswordChange="true">
+         <execute query="updatePassword"/>  -- MATCH (a:Account) WHERE a.username = $identity SET a.password = $newPassword, a.mustChangePassword = false
+         <session action="start" identity="session:identity" role="session:role" mustChangePassword="false"/>
+         <navigate screen="Dashboard"/>
+       </event>
+     identity="session:identity"/role="session:role" re-use the CURRENT verified session's own
+     values (the same resolver source/"session:identity" condition token already documented above)
+     so you never have to re-look them up.
    - PROFILE PICTURES: type="image" on a <field> renders a real file picker; the runtime reads it
      into a data-URL client-side (no upload endpoint needed) and that string is the field's value —
      treat it exactly like any other field's value in a query, e.g.

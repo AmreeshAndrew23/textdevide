@@ -24,14 +24,20 @@ export function cookieName(projectId: number): string {
 // and trusted for the session's lifetime; a role change takes effect on next login, not instantly,
 // the same staleness tradeoff already accepted for identity. Bound later as source="session:role"
 // and as the session:role condition token (see engine.ts), never from client-submitted fieldValues.
-export function signAppSession(projectId: number, identity?: string | null, role?: string | null): string {
+// mustChangePassword (optional, default false) marks a session issued with a temporary password —
+// while true, the runtime refuses every event/screen except one marked allowPasswordChange="true"
+// (see engine.ts/previewDb.ts/runtimeRender.ts), the same way an unauthenticated session can only
+// reach an allowAnonymous one. A successful change re-issues the session with it cleared.
+export function signAppSession(
+  projectId: number, identity?: string | null, role?: string | null, mustChangePassword?: boolean
+): string {
   return jwt.sign(
-    { typ: APP_SESSION_TYP, projectId, identity: identity ?? null, role: role ?? null },
+    { typ: APP_SESSION_TYP, projectId, identity: identity ?? null, role: role ?? null, mustChangePassword: mustChangePassword ?? false },
     SECRET_KEY, { algorithm: ALGORITHM, expiresIn: `${APP_SESSION_HOURS}h` }
   );
 }
 
-export type VerifiedAppSession = { identity: string | null; role: string | null };
+export type VerifiedAppSession = { identity: string | null; role: string | null; mustChangePassword: boolean };
 
 // Verifies the token AND that it's really an app-session token (not a builder JWT someone tried to
 // pass here) AND that it's for the project being asked about — returns null on any failure
@@ -45,6 +51,7 @@ export function verifyAppSession(token: string | undefined, projectId: number): 
     return {
       identity: typeof payload.identity === "string" ? payload.identity : null,
       role: typeof payload.role === "string" ? payload.role : null,
+      mustChangePassword: payload.mustChangePassword === true,
     };
   } catch {
     return null;

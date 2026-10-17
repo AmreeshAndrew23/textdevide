@@ -4,15 +4,19 @@ import { cookieName, signAppSession, verifyAppSession } from "./appSession.js";
 describe("appSession: the generated app's own login session (separate from the builder JWT)", () => {
   it("round-trips: a token signed for a project verifies for that same project", () => {
     const token = signAppSession(42);
-    expect(verifyAppSession(token, 42)).toEqual({ identity: null, role: null });
+    expect(verifyAppSession(token, 42)).toEqual({ identity: null, role: null, mustChangePassword: false });
   });
   it("round-trips the identity too, when one was signed in", () => {
     const token = signAppSession(42, "alice");
-    expect(verifyAppSession(token, 42)).toEqual({ identity: "alice", role: null });
+    expect(verifyAppSession(token, 42)).toEqual({ identity: "alice", role: null, mustChangePassword: false });
   });
   it("round-trips the role too, when one was signed in", () => {
     const token = signAppSession(42, "alice", "Admin");
-    expect(verifyAppSession(token, 42)).toEqual({ identity: "alice", role: "Admin" });
+    expect(verifyAppSession(token, 42)).toEqual({ identity: "alice", role: "Admin", mustChangePassword: false });
+  });
+  it("round-trips mustChangePassword, and defaults to false when omitted", () => {
+    const token = signAppSession(42, "alice", "Student", true);
+    expect(verifyAppSession(token, 42)).toEqual({ identity: "alice", role: "Student", mustChangePassword: true });
   });
   it("a token signed for one project is rejected for another — sessions don't cross projects", () => {
     const token = signAppSession(42, "alice");

@@ -3,7 +3,7 @@ import type { ProjectRow } from "../db/schema.js";
 import { getCurrentUser, HttpError } from "../services/authService.js";
 import { getOwnedProject, getProjectPublic } from "../services/projectStore.js";
 import { parseScreenModel, ScreenParseError } from "../runtime/screenModel.js";
-import { hasAnonymousEntry, screenRequiredRole } from "../runtime/engine.js";
+import { hasAnonymousEntry, screenRequiredRole, hasPasswordChangeEntry } from "../runtime/engine.js";
 import { renderScreen } from "../runtime/renderer.js";
 import { cookieName, verifyAppSession, APP_SESSION_COOKIE_OPTS } from "../services/appSession.js";
 
@@ -57,11 +57,13 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
         // same anti-spoofing precedent as sessionIdentity. null for a builder preview (not a real
         // end-user session) or no session at all.
         let sessionRole: string | null = null;
+        let sessionMustChangePassword = false;
         if (!project) {
           const session = verifyAppSession(req.cookies?.[cookieName(projectId)], projectId);
           if (session) {
             project = await getProjectPublic(projectId);
             sessionRole = session.role;
+            sessionMustChangePassword = session.mustChangePassword;
           }
         }
 
@@ -81,6 +83,12 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
         const required = screenRequiredRole(screen.xml);
         if (required && !isBuilderPreview && (!sessionRole || !required.includes(sessionRole))) {
           throw new HttpError(403, "You don't have permission to view this screen.");
+        }
+        // A session issued with a temporary password can only reach the Change Password screen
+        // (hasPasswordChangeEntry — the one with an allowPasswordChange="true" event) until it's
+        // changed. Builder preview bypasses this too, same as every other gate above.
+        if (sessionMustChangePassword && !isBuilderPreview && !hasPasswordChangeEntry(screen.xml)) {
+          throw new HttpError(403, "You must change your temporary password before continuing.");
         }
 
         let model;

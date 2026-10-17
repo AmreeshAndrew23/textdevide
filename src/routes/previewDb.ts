@@ -4,10 +4,11 @@ import { getOwnedProject, getProjectPublic } from "../services/projectStore.js";
 import { PreviewRowsRequestSchema, RunEventRequestSchema } from "../models/schemas.js";
 import { requireAuth } from "./authGuard.js";
 import { getCurrentUser, HttpError } from "../services/authService.js";
-import { runEvent, isAnonymousEvent, eventRequiredRole, type SiblingScreen } from "../runtime/engine.js";
+import { runEvent, isAnonymousEvent, eventRequiredRole, eventAllowsPasswordChange, type SiblingScreen } from "../runtime/engine.js";
 import * as store from "../runtime/neo4jStore.js";
 import { raceAbort, requestAbortSignal, RequestAbortedError } from "../utils/requestAbort.js";
 import { cookieName, verifyAppSession, signAppSession, APP_SESSION_COOKIE_OPTS } from "../services/appSession.js";
+import { sendEmail } from "../services/emailService.js";
 
 type Screen = { id: string; name?: string; xml?: string };
 
@@ -103,6 +104,7 @@ export default async function previewDbRoutes(app: FastifyInstance) {
     // row"/"my own permissions", resolved ONLY from this verified cookie, never from the request body.
     let sessionIdentity: string | null = null;
     let sessionRole: string | null = null;
+    let sessionMustChangePassword = false;
     if (bearer) {
       try {
         const user = await getCurrentUser(bearer);
@@ -120,6 +122,7 @@ export default async function previewDbRoutes(app: FastifyInstance) {
         authorized = true;
         sessionIdentity = session.identity;
         sessionRole = session.role;
+        sessionMustChangePassword = session.mustChangePassword;
       }
     }
     if (!project) project = await getProjectPublic(projectId); // just to read the screen's XML below
@@ -138,6 +141,12 @@ export default async function previewDbRoutes(app: FastifyInstance) {
     const required = eventRequiredRole(screen.xml, body.elementId, body.eventType);
     if (required && !isBuilderPreview && (!sessionRole || !required.includes(sessionRole))) {
       throw new HttpError(403, "You don't have permission to do this.");
+    }
+    // A session issued with a temporary password can do nothing else until it's changed — the
+    // Change Password screen's own save event is the ONLY one marked allowPasswordChange="true".
+    // Builder preview bypasses this too, same as every other gate above.
+    if (sessionMustChangePassword && !isBuilderPreview && !eventAllowsPasswordChange(screen.xml, body.elementId, body.eventType)) {
+      throw new HttpError(403, "You must change your temporary password before continuing.");
     }
 
     const entities = project.entities ? JSON.parse(project.entities) : {};
@@ -158,14 +167,27 @@ export default async function previewDbRoutes(app: FastifyInstance) {
       // cookie) — never forwarded to the client, same spirit as "stop" carrying no client meaning.
       // A session started with no identity/role (no identity="..."/role="..." on the XML, or either
       // resolved empty) still signs a valid project-scoped session — both are optional, access isn't
-      // gated by either one unless a screen/event declares requiredRole.
+      // gated by either one unless a screen/event declares requiredRole/mustChangePassword.
+      // <email> is server-only too, but for a different reason: it's real outbound I/O, sent for
+      // real ONLY here (after store.withTx above has already committed) — never inside the write
+      // transaction, so a slow/failed send can't roll back a real row and a successful row is never
+      // undone by a bounced email. Collected first, sent after the response shape is decided, with
+      // each send's own failure logged and swallowed (see emailService.ts) rather than surfaced here.
+      const pendingEmails: { to: string; subject: string; body: string }[] = [];
       const clientActions = actions.filter((a) => {
+        if (a.type === "email") {
+          pendingEmails.push(a);
+          return false;
+        }
         if (a.type !== "session") return true;
         if (a.action === "start") {
-          reply.setCookie(cookieName(projectId), signAppSession(projectId, a.identity ?? null, a.role ?? null), APP_SESSION_COOKIE_OPTS);
+          reply.setCookie(cookieName(projectId), signAppSession(projectId, a.identity ?? null, a.role ?? null, a.mustChangePassword ?? false), APP_SESSION_COOKIE_OPTS);
         } else reply.clearCookie(cookieName(projectId), { path: APP_SESSION_COOKIE_OPTS.path });
         return false;
       });
+      if (pendingEmails.length) {
+        await Promise.all(pendingEmails.map((e) => sendEmail(e.to, e.subject, e.body)));
+      }
       return reply.send({ actions: clientActions });
     } catch (e) {
       req.log.warn(`run_event failed for project ${project.id} screen ${req.params.screenId}: ${e}`);

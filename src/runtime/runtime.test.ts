@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { labelFor, prepareCypher, validateCypherStatic } from "./cypher.js";
 import { coerceValue } from "./values.js";
-import { evaluateCondition, resolveTemplate, runEvent, isAnonymousEvent, hasAnonymousEntry, computeAgeYears, eventRequiredRole, screenRequiredRole, type QueryExecutor } from "./engine.js";
+import {
+  evaluateCondition, resolveTemplate, runEvent, isAnonymousEvent, hasAnonymousEntry, computeAgeYears,
+  eventRequiredRole, screenRequiredRole, eventAllowsPasswordChange, hasPasswordChangeEntry, type QueryExecutor,
+} from "./engine.js";
 import { lintScreenXml } from "../services/aiService.js";
 import { parseScreenModel } from "./screenModel.js";
 import { renderScreen, THEMES, findScreenForLabel } from "./renderer.js";
+import { hashPassword, verifyPassword } from "../services/authService.js";
 
 const tables = new Set(["Department", "Course"]);
 const prep = (s: string, params: string[] = []) => prepareCypher(s, 7, tables, new Set(params));
@@ -717,7 +721,7 @@ describe("engine: <session> action + allowAnonymous gating", () => {
   it("a successful login produces session:start then navigate, in order, in the same chain", async () => {
     const exec: QueryExecutor = async () => ({ rows: [{ count: 1 }], count: 1 });
     const actions = await runEvent(exec, entities, xml, "loginBtn", "click", { u: "a", p: "b" }, [{ id: "d1", name: "Dashboard" }]);
-    expect(actions).toEqual([{ type: "session", action: "start" }, { type: "navigate", screenId: "d1", screenName: "Dashboard" }]);
+    expect(actions).toEqual([{ type: "session", action: "start", mustChangePassword: false }, { type: "navigate", screenId: "d1", screenName: "Dashboard" }]);
   });
   it("a failed login produces no session action", async () => {
     const exec: QueryExecutor = async () => ({ rows: [{ count: 0 }], count: 1 });
@@ -794,7 +798,7 @@ describe("engine: session identity + session:identity parameter source", () => {
   it("captures the resolved field value as the session's identity on a successful login", async () => {
     const exec: QueryExecutor = async () => ({ rows: [{ count: 1 }], count: 1 });
     const actions = await runEvent(exec, entities, xml, "loginBtn", "click", { u: "alice", p: "x" }, [{ id: "d", name: "Dashboard" }]);
-    expect(actions).toContainEqual({ type: "session", action: "start", identity: "alice" });
+    expect(actions).toContainEqual({ type: "session", action: "start", identity: "alice", mustChangePassword: false });
   });
   it("captures no identity when the login fails (no session:start at all)", async () => {
     const exec: QueryExecutor = async () => ({ rows: [{ count: 0 }], count: 1 });
@@ -838,7 +842,7 @@ describe("engine: session role — session:role parameter source, condition, and
   it("captures the role column from the login query's own result on a successful login", async () => {
     const exec: QueryExecutor = async () => ({ rows: [{ count: 1, role: "Admin" }], count: 1 });
     const actions = await runEvent(exec, entities, xml, "loginBtn", "click", { u: "alice", p: "x" });
-    expect(actions).toContainEqual({ type: "session", action: "start", identity: "alice", role: "Admin" });
+    expect(actions).toContainEqual({ type: "session", action: "start", identity: "alice", role: "Admin", mustChangePassword: false });
   });
   it("source=\"session:role\" resolves from the role passed into runEvent, never from fieldValues", async () => {
     let seenParams: Record<string, unknown> = {};
@@ -955,5 +959,158 @@ describe("renderer: type=\"image\" field", () => {
     const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
     expect(html).toContain('querySelectorAll("[data-image-field]")');
     expect(html).toContain("el.type === \"file\"");
+  });
+});
+
+describe("engine: <generate> — securely server-generated values", () => {
+  const xml = `<screen id="s" title="S">
+  <ui><field id="tempPassword" label="Temp Password" type="text"/><button id="go" label="Go"/></ui>
+  <events><event type="click" element="go"><generate target="field:tempPassword" type="password"/></event></events>
+</screen>`;
+  const exec: QueryExecutor = async () => ({ rows: [], count: 0 });
+
+  it("produces a 12-character value from an unambiguous alphabet", async () => {
+    const actions = await runEvent(exec, {}, xml, "go", "click", {});
+    const set = actions.find((a) => a.type === "set") as { value: string };
+    expect(set.value).toMatch(/^[A-HJ-NP-Za-km-z2-9]{12}$/);
+  });
+  it("never produces the same value twice in a row", async () => {
+    const a = (await runEvent(exec, {}, xml, "go", "click", {})).find((a) => a.type === "set") as { value: string };
+    const b = (await runEvent(exec, {}, xml, "go", "click", {})).find((a) => a.type === "set") as { value: string };
+    expect(a.value).not.toBe(b.value);
+  });
+});
+
+describe("engine: hash=\"true\" on a <parameter> — real bcrypt, not plaintext", () => {
+  const xml = `<screen id="s" title="S">
+  <queries><query id="ins"><statement>CREATE (a:Account {password: $password})</statement>
+    <parameters><parameter name="password" source="field:password" hash="true"/></parameters></query></queries>
+  <ui><field id="password" label="Password" type="password"/><button id="save" label="Save"/></ui>
+  <events><event type="click" element="save"><execute query="ins"/></event></events>
+</screen>`;
+
+  it("binds a real bcrypt hash, verifiable against the original, never the plaintext", async () => {
+    let seenParams: Record<string, unknown> = {};
+    const exec: QueryExecutor = async (statement, params) => { seenParams = params; return { rows: [], count: 0 }; };
+    await runEvent(exec, {}, xml, "save", "click", { password: "correct horse battery staple" });
+    expect(seenParams.password).not.toBe("correct horse battery staple");
+    expect(String(seenParams.password)).toMatch(/^\$2[aby]\$/); // real bcrypt hash shape
+    expect(verifyPassword("correct horse battery staple", String(seenParams.password))).toBe(true);
+    expect(verifyPassword("wrong guess", String(seenParams.password))).toBe(false);
+  });
+});
+
+describe("engine: passwordField/passwordColumn — login verification against a stored hash", () => {
+  const xml = `<screen id="s" title="S">
+  <queries>
+    <query id="checkLogin" passwordField="field:password" passwordColumn="passwordHash">
+      <statement>MATCH (a:Account) WHERE a.username = $u RETURN a.password AS passwordHash, a.role AS role, a.mustChangePassword AS mustChangePassword, count(a) AS count</statement>
+      <parameters><parameter name="u" source="field:u"/></parameters>
+    </query>
+  </queries>
+  <ui><field id="u" label="User" type="text"/><field id="password" label="Password" type="password"/><button id="login" label="Login"/></ui>
+  <events>
+    <event type="click" element="login" allowAnonymous="true">
+      <execute query="checkLogin">
+        <when condition="result.count == 0"><message type="error" value="Invalid username or password."/><stop/></when>
+        <when condition="result.count &gt; 0"><session action="start" identity="field:u" role="result.role" mustChangePassword="result.mustChangePassword"/></when>
+      </execute>
+    </event>
+  </events>
+</screen>`;
+  // Built the same way a signup's hash="true" parameter already would have.
+  const hash = hashPassword("correctPassword123");
+
+  it("succeeds for the right password, keeps role/mustChangePassword available, never leaks the hash", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [{ passwordHash: hash, role: "Student", mustChangePassword: true, count: 1 }], count: 1 });
+    const actions = await runEvent(exec, {}, xml, "login", "click", { u: "bob", password: "correctPassword123" });
+    expect(actions).toContainEqual({ type: "session", action: "start", identity: "bob", role: "Student", mustChangePassword: true });
+    expect(actions.some((a) => a.type === "message" && a.messageType === "error")).toBe(false);
+  });
+  it("fails for the wrong password — treated exactly like no matching account", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [{ passwordHash: hash, role: "Student", mustChangePassword: false, count: 1 }], count: 1 });
+    const actions = await runEvent(exec, {}, xml, "login", "click", { u: "bob", password: "wrongGuess" });
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Invalid username or password." });
+    expect(actions.some((a) => a.type === "session")).toBe(false);
+  });
+  it("fails cleanly when no account row comes back at all", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [], count: 0 });
+    const actions = await runEvent(exec, {}, xml, "login", "click", { u: "ghost", password: "anything" });
+    expect(actions).toContainEqual({ type: "message", messageType: "error", value: "Invalid username or password." });
+  });
+});
+
+describe("engine: <email> — produces an action, to/subject/body resolve via the existing operand/template resolvers", () => {
+  const xml = `<screen id="s" title="S">
+  <ui><field id="email" label="Email" type="email"/><field id="tempPassword" label="Temp" type="text"/><button id="go" label="Go"/></ui>
+  <events><event type="click" element="go">
+    <generate target="field:tempPassword" type="password"/>
+    <email to="field:email" subject="Your account" body="Your temporary password is \${field:tempPassword}."/>
+  </event></events>
+</screen>`;
+  it("resolves to from the field, and substitutes a value generated earlier in the same chain into body", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [], count: 0 });
+    const actions = await runEvent(exec, {}, xml, "go", "click", { email: "student@example.com" });
+    const emailAction = actions.find((a) => a.type === "email") as { to: string; subject: string; body: string };
+    const setAction = actions.find((a) => a.type === "set") as { value: string };
+    expect(emailAction.to).toBe("student@example.com");
+    expect(emailAction.subject).toBe("Your account");
+    expect(emailAction.body).toBe(`Your temporary password is ${setAction.value}.`);
+  });
+});
+
+describe("engine: allowPasswordChange gate helpers (raw-XML)", () => {
+  const gated = `<screen id="s" title="S"><ui><button id="save" label="Save"/></ui>
+    <events><event type="click" element="save" allowPasswordChange="true"><stop/></event></events></screen>`;
+  const ungated = `<screen id="s" title="S"><ui><button id="save" label="Save"/></ui>
+    <events><event type="click" element="save"><stop/></event></events></screen>`;
+
+  it("eventAllowsPasswordChange is true only for a marked event", () => {
+    expect(eventAllowsPasswordChange(gated, "save", "click")).toBe(true);
+    expect(eventAllowsPasswordChange(ungated, "save", "click")).toBe(false);
+  });
+  it("hasPasswordChangeEntry is true only when at least one event is marked", () => {
+    expect(hasPasswordChangeEntry(gated)).toBe(true);
+    expect(hasPasswordChangeEntry(ungated)).toBe(false);
+  });
+});
+
+describe("engine: worked pattern — create a record, auto-provision its login, email the temp password", () => {
+  const xml = `<screen id="s" title="S">
+  <queries>
+    <query id="createStudent"><statement>CREATE (s:Student {name: $name, email: $email})</statement>
+      <parameters><parameter name="name" source="field:name"/><parameter name="email" source="field:email"/></parameters></query>
+    <query id="createAccount"><statement>CREATE (a:Account {username: $email, password: $password, role: $role, mustChangePassword: $mustChangePassword})</statement>
+      <parameters>
+        <parameter name="email" source="field:email"/>
+        <parameter name="password" source="field:tempPassword" hash="true"/>
+        <parameter name="role" source="Student"/>
+        <parameter name="mustChangePassword" source="true"/>
+      </parameters></query>
+  </queries>
+  <ui><field id="name" label="Name" type="text"/><field id="email" label="Email" type="email"/>
+    <field id="tempPassword" label="Temp" type="text"/><button id="save" label="Save"/></ui>
+  <events><event type="click" element="save">
+    <execute query="createStudent"/>
+    <generate target="field:tempPassword" type="password"/>
+    <execute query="createAccount"/>
+    <email to="field:email" subject="Your account" body="Your temporary password is \${field:tempPassword}. You'll be asked to change it on first login."/>
+  </event></events>
+</screen>`;
+
+  it("creates the record, hashes a fresh temp password into the new Account, and emails the plaintext version", async () => {
+    const calls: { statement: string; params: Record<string, unknown> }[] = [];
+    const exec: QueryExecutor = async (statement, params) => { calls.push({ statement, params }); return { rows: [], count: 0 }; };
+    const actions = await runEvent(exec, {}, xml, "save", "click", { name: "Bob", email: "bob@example.com" });
+
+    const accountCall = calls.find((c) => c.statement.includes("CREATE (a:Account"))!;
+    const emailAction = actions.find((a) => a.type === "email") as { to: string; body: string };
+    const plaintextMatch = emailAction.body.match(/temporary password is (\S+)\./);
+    expect(plaintextMatch).toBeTruthy();
+    const plaintext = plaintextMatch![1];
+
+    expect(accountCall.params.password).not.toBe(plaintext);
+    expect(verifyPassword(plaintext, String(accountCall.params.password))).toBe(true);
+    expect(emailAction.to).toBe("bob@example.com");
   });
 });

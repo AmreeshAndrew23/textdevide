@@ -6,8 +6,20 @@
  */
 import { DOMParser } from "@xmldom/xmldom";
 import type { Element as XmlElement } from "@xmldom/xmldom";
+import { randomInt } from "node:crypto";
 import { type Entities, columnType, coerceValue, findTable } from "./values.js";
 import { type FieldRule, isElement, childElements } from "./screenModel.js";
+import { hashPassword, verifyPassword } from "../services/authService.js";
+
+// No 0/O/1/l/I — a temporary password a person has to actually type back in shouldn't contain
+// characters that look alike. 12 chars from a 58-symbol alphabet is well past any brute-force
+// concern for a short-lived, one-time-use credential forced to be changed on first login.
+const PASSWORD_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+function generateSecureValue(_type: string): string {
+  let out = "";
+  for (let i = 0; i < 12; i++) out += PASSWORD_CHARS[randomInt(PASSWORD_CHARS.length)];
+  return out;
+}
 
 export type QueryResult = { rows: Record<string, unknown>[]; count: number };
 export type QueryExecutor = (statement: string, params: Record<string, unknown>) => Promise<QueryResult>;
@@ -104,7 +116,13 @@ export function resolveTemplate(value: string, result: QueryResult, fieldValues:
   });
 }
 
-type ParsedQuery = { statement: string; params: Record<string, string> };
+// hash="true" on a <parameter> — its resolved value is hashed (authService's hashPassword) before
+// being bound into the Cypher parameter, instead of sent raw. passwordField/passwordColumn live on
+// the <query> itself, not a parameter — a login query can't compare a submitted password against a
+// stored bcrypt hash in Cypher at all (the same password hashes differently every time), so that
+// comparison happens here in JS instead; see the passwordField/passwordColumn handling in runExecute.
+type QueryParam = { source: string; hash: boolean };
+type ParsedQuery = { statement: string; params: Record<string, QueryParam>; passwordField: string | null; passwordColumn: string | null };
 
 function parseQueries(root: XmlElement): Map<string, ParsedQuery> {
   const queries = new Map<string, ParsedQuery>();
@@ -114,12 +132,16 @@ function parseQueries(root: XmlElement): Map<string, ParsedQuery> {
     if (!qid) continue;
     const stmtEl = q.getElementsByTagName("statement")[0];
     const statement = (stmtEl?.textContent || "").trim();
-    const params: Record<string, string> = {};
+    const params: Record<string, QueryParam> = {};
     for (const p of Array.from(q.getElementsByTagName("parameter"))) {
       const pname = p.getAttribute("name");
-      if (pname) params[pname] = p.getAttribute("source") || "";
+      if (pname) params[pname] = { source: p.getAttribute("source") || "", hash: p.getAttribute("hash") === "true" };
     }
-    queries.set(qid, { statement, params });
+    queries.set(qid, {
+      statement, params,
+      passwordField: q.getAttribute("passwordField"),
+      passwordColumn: q.getAttribute("passwordColumn"),
+    });
   }
   return queries;
 }
@@ -244,7 +266,7 @@ async function validateWriteFields(
 ): Promise<EventAction[]> {
   const violations: EventAction[] = [];
   const say = (label: string, msg: string) => violations.push({ type: "message", messageType: "error", value: `${label} ${msg}` });
-  for (const source of Object.values(query.params)) {
+  for (const { source } of Object.values(query.params)) {
     if (!source.startsWith("field:")) continue;
     const fieldId = source.slice("field:".length);
     const meta = fieldMeta.get(fieldId);
@@ -316,12 +338,12 @@ function findElementById(root: XmlElement, elementId: string): XmlElement | null
 }
 
 function resolveQueryParams(
-  queryParams: Record<string, string>, fieldValues: Record<string, unknown>,
+  queryParams: Record<string, QueryParam>, fieldValues: Record<string, unknown>,
   fieldPersistence: Map<string, [string, string]>, entities: Entities, fieldMeta: Map<string, FieldMeta>,
   sessionIdentity: string | null, sessionRole: string | null
 ): Record<string, unknown> {
   const resolved: Record<string, unknown> = {};
-  for (const [pname, source] of Object.entries(queryParams)) {
+  for (const [pname, { source, hash }] of Object.entries(queryParams)) {
     if (source === "session:identity") {
       // From the VERIFIED session cookie only — never from fieldValues (the request body), so a
       // client can never spoof "I am someone else" by submitting a field of the same name.
@@ -346,6 +368,9 @@ function resolveQueryParams(
     } else {
       resolved[pname] = source; // literal default from the XML itself
     }
+    // Applied last, regardless of source — covers both a real signup's submitted password and a
+    // <generate>-produced temp password through the same mechanism. Never stored/sent raw.
+    if (hash && resolved[pname] !== null && resolved[pname] !== undefined) resolved[pname] = hashPassword(String(resolved[pname]));
   }
   return resolved;
 }
@@ -355,7 +380,10 @@ export type EventAction =
   | { type: "set"; target: string; value: unknown }
   | { type: "message"; messageType: string; value: string }
   | { type: "navigate"; screenId: string; screenName: string }
-  | { type: "session"; action: "start" | "end"; identity?: string; role?: string }
+  | { type: "session"; action: "start" | "end"; identity?: string; role?: string; mustChangePassword?: boolean }
+  // Never forwarded to the client (filtered out the same way a "session" action is) — the caller
+  // sends it for real, after its write transaction has committed; see previewDb.ts.
+  | { type: "email"; to: string; subject: string; body: string }
   | { type: "stop" };
 
 function parseScreenRoot(screenXml: string): XmlElement | null {
@@ -401,6 +429,28 @@ export function screenRequiredRole(screenXml: string): string[] | null {
   const root = parseScreenRoot(screenXml);
   if (!root) return null;
   return parseRoleList(root.getAttribute("requiredRole"));
+}
+
+// <event ... allowPasswordChange="true"> marks an event as reachable even while the session is
+// flagged mustChangePassword — the ONLY way such a session is allowed to do anything (mirrors
+// isAnonymousEvent/allowAnonymous exactly, one level up: that gate is for "not logged in at all",
+// this one is for "logged in, but must change a temporary password before anything else"). Only
+// ever a Change Password screen's save event, by convention documented in the AI prompt.
+export function eventAllowsPasswordChange(screenXml: string, elementId: string, eventType: string): boolean {
+  const root = parseScreenRoot(screenXml);
+  if (!root) return false;
+  const event = Array.from(root.getElementsByTagName("event")).find(
+    (ev) => ev.getAttribute("element") === elementId && ev.getAttribute("type") === eventType
+  );
+  return event?.getAttribute("allowPasswordChange") === "true";
+}
+
+// Whether this screen has AT LEAST ONE allowPasswordChange event — i.e. it's the Change Password
+// screen, the only screen a mustChangePassword session may open. Mirrors hasAnonymousEntry exactly.
+export function hasPasswordChangeEntry(screenXml: string): boolean {
+  const root = parseScreenRoot(screenXml);
+  if (!root) return false;
+  return Array.from(root.getElementsByTagName("event")).some((ev) => ev.getAttribute("allowPasswordChange") === "true");
 }
 
 // Whether this screen has AT LEAST ONE allowAnonymous event — i.e. it's a genuine entry point (a
@@ -495,7 +545,10 @@ export async function runEvent(
     } else if (step.tagName === "navigate") {
       runNavigate(step, siblingScreens, actions);
       break; // navigating away ends the chain, same as <stop>
-    } else if (step.tagName === "message" || step.tagName === "set" || step.tagName === "stop" || step.tagName === "session") {
+    } else if (
+      step.tagName === "message" || step.tagName === "set" || step.tagName === "stop" || step.tagName === "session" ||
+      step.tagName === "generate" || step.tagName === "email"
+    ) {
       // e.g. a closing <message type="success" value="Saved."/> written after the executes. It has
       // no query result of its own, so ${result.*} placeholders resolve to empty.
       if (await runStep(trackedExec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, step, { rows: [], count: 0 }, values, actions, sessionIdentity, sessionRole)) break;
@@ -532,7 +585,26 @@ async function runExecute(
     }
   }
   const params = resolveQueryParams(query.params, fieldValues, fieldPersistence, entities, fieldMeta, sessionIdentity, sessionRole);
-  const result = await exec(query.statement, params);
+  let result = await exec(query.statement, params);
+
+  // Login verification: the Cypher WHERE clause can never match a bcrypt hash (the same password
+  // hashes differently every time), so this comparison happens here instead, right after the query
+  // returns and before anything downstream (a <when>, a <map>) ever sees the row. Success keeps
+  // result exactly as the query really returned it (so role/mustChangePassword/etc. columns stay
+  // available) minus the raw hash itself; failure or no matching row forces result.count to 0 and
+  // clears rows — the screen's existing <when condition="result.count > 0"> vocabulary is unchanged.
+  if (query.passwordField && query.passwordColumn) {
+    const row = result.rows[0];
+    const storedHash = row?.[query.passwordColumn];
+    const submitted = resolveOperand(query.passwordField, result, fieldValues, { identity: sessionIdentity, role: sessionRole });
+    const matches = typeof storedHash === "string" && typeof submitted === "string" && verifyPassword(submitted, storedHash);
+    if (!matches) {
+      result = { rows: [], count: 0 };
+    } else {
+      const { [query.passwordColumn]: _hash, ...rest } = row;
+      result = { rows: [rest], count: result.count };
+    }
+  }
 
   const session: SessionContext = { identity: sessionIdentity, role: sessionRole };
   const children = childElements(executeEl);
@@ -554,7 +626,10 @@ async function runExecute(
       if (await runWhenBody(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, child, result, fieldValues, actions, sessionIdentity, sessionRole)) {
         return true;
       }
-    } else if (child.tagName === "execute" || child.tagName === "set" || child.tagName === "message" || child.tagName === "navigate" || child.tagName === "stop" || child.tagName === "session") {
+    } else if (
+      child.tagName === "execute" || child.tagName === "set" || child.tagName === "message" || child.tagName === "navigate" ||
+      child.tagName === "stop" || child.tagName === "session" || child.tagName === "generate" || child.tagName === "email"
+    ) {
       // The model routinely writes "insert, THEN reload the list" as a second <execute> nested
       // directly inside the first (no <when> around it). Silently skipping it meant a successful
       // save never refreshed the grid or confirmed anything — so an unconditional step runs the
@@ -609,18 +684,56 @@ async function runStep(
     const action = inner.getAttribute("action");
     if (action === "start" || action === "end") {
       // identity="field:x" / role="field:x" (only meaningful on "start") — resolved the SAME way
-      // any other operand is (field:/result./literal), via the existing resolveOperand, so a
-      // login/signup's identity/role is whatever field or result column the AI names.
+      // any other operand is (field:/result./literal/session:identity/session:role), via the
+      // existing resolveOperand, so a login/signup's identity/role is whatever field or result
+      // column the AI names — and a password-change event can re-issue the CURRENT session's own
+      // identity/role via identity="session:identity" role="session:role" without having to re-know
+      // or re-look them up.
+      const session: SessionContext = { identity: sessionIdentity, role: sessionRole };
       const identitySource = action === "start" ? inner.getAttribute("identity") : null;
-      const resolvedIdentity = identitySource ? resolveOperand(identitySource, result, fieldValues) : null;
+      const resolvedIdentity = identitySource ? resolveOperand(identitySource, result, fieldValues, session) : null;
       const identity = resolvedIdentity !== null && resolvedIdentity !== undefined && resolvedIdentity !== "" ? String(resolvedIdentity) : undefined;
       const roleSource = action === "start" ? inner.getAttribute("role") : null;
-      const resolvedRole = roleSource ? resolveOperand(roleSource, result, fieldValues) : null;
+      const resolvedRole = roleSource ? resolveOperand(roleSource, result, fieldValues, session) : null;
       const role = resolvedRole !== null && resolvedRole !== undefined && resolvedRole !== "" ? String(resolvedRole) : undefined;
-      actions.push({ type: "session", action, ...(identity !== undefined ? { identity } : {}), ...(role !== undefined ? { role } : {}) });
+      // mustChangePassword="result.mustChangePassword" (or a literal "true"/"false") — marks a
+      // session issued with a temporary password; omitted means false (a normal session). Only
+      // meaningful on "start".
+      const mcpSource = action === "start" ? inner.getAttribute("mustChangePassword") : null;
+      const resolvedMcp = mcpSource ? resolveOperand(mcpSource, result, fieldValues, session) : null;
+      const mustChangePassword = resolvedMcp === true || resolvedMcp === "true";
+      actions.push({
+        type: "session", action,
+        ...(identity !== undefined ? { identity } : {}),
+        ...(role !== undefined ? { role } : {}),
+        ...(action === "start" ? { mustChangePassword } : {}),
+      });
     }
     // Deliberately does NOT return true — a login success is typically <session action="start"/>
     // immediately followed by a sibling <navigate>, and both need to run in the same chain.
+  } else if (inner.tagName === "generate") {
+    // <generate target="field:x" type="password"/> — a securely server-generated value (Node's
+    // crypto, never Math.random), written into fieldValues exactly like <set> so a later step
+    // (hashing it into a CREATE, emailing it) can reference it the same way any other field value
+    // is referenced. Sent to the client as a normal "set" action — the person running this event is
+    // already an authenticated Staff/Admin creating someone else's account, the same trust level as
+    // every other field value they can already see.
+    const target = inner.getAttribute("target") || "";
+    const value = generateSecureValue(inner.getAttribute("type") || "password");
+    if (target.startsWith("field:")) fieldValues[target.slice("field:".length)] = value;
+    actions.push({ type: "set", target, value });
+  } else if (inner.tagName === "email") {
+    // <email to="field:x" subject="..." body="..."/> — to resolves via the same operand resolver
+    // every other field/result/session reference does; subject/body resolve via the existing
+    // ${field:x}/${result.x} template substitution, identical syntax to <message value="...">.
+    // Never sent to the client (filtered out downstream, same as a "session" action) — the caller
+    // sends it for real only after its write transaction has committed; see previewDb.ts.
+    const session: SessionContext = { identity: sessionIdentity, role: sessionRole };
+    const toRaw = resolveOperand(inner.getAttribute("to") || "", result, fieldValues, session);
+    const to = toRaw !== null && toRaw !== undefined ? String(toRaw) : "";
+    const subject = resolveTemplate(inner.getAttribute("subject") || "", result, fieldValues);
+    const body = resolveTemplate(inner.getAttribute("body") || "", result, fieldValues);
+    actions.push({ type: "email", to, subject, body });
   } else if (inner.tagName === "execute") {
     if (await runExecute(exec, queries, fieldPersistence, entities, siblingScreens, fieldMeta, inner, fieldValues, actions, sessionIdentity, sessionRole)) return true;
   }
