@@ -74,6 +74,10 @@ export const ScreenUpdateSchema = z.object({
   primary_entities: z.array(z.string()).nullish(),
   joined_entities: z.array(z.string()).nullish(),
   reference_image: z.string().nullish(),
+  // Set directly by the frontend's visual (drag-and-drop) editor, which only ever rewrites the
+  // <ui> block and carries every other element (<queries>/<events>/...) through unchanged — see
+  // frontend/src/utils/visualEditorXml.js. AI generation keeps using generate-xml, not this field.
+  xml: z.string().nullish(),
 });
 
 export const GenerateUIXmlRequestSchema = z.object({

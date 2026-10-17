@@ -85,6 +85,7 @@ export default async function screensRoutes(app: FastifyInstance) {
     }
     if (body.joined_entities !== undefined && body.joined_entities !== null) screen.joined_entities = body.joined_entities;
     if (body.reference_image !== undefined) screen.reference_image = body.reference_image || null;
+    if (body.xml !== undefined && body.xml !== null) screen.xml = body.xml;
     screens[idx] = screen;
     const updated = await saveScreens(project.id, screens);
     return reply.send(serializeProject(updated));
