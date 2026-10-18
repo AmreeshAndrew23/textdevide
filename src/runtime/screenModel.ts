@@ -70,7 +70,14 @@ export type GridItem = {
 };
 export type ButtonItem = { kind: "button"; id: string; label: string; style: string; eventTypes: string[] };
 export type FieldsetItem = { kind: "fieldset"; legend: string; items: UiItem[] };
-export type UiItem = FieldItem | GridItem | ButtonItem | FieldsetItem;
+// <stat id="totalStudents" label="Total Students" icon="users"/> — a Dashboard metric card.
+// Populated the exact same way a grid already is: a <map target="stat:totalStudents"> inside the
+// screen's own load event (see renderer.ts) — the engine needs no changes for this at all, "stat:"
+// is purely a rendering-layer target prefix, same as how "grid:" already works. icon names one of
+// renderer.ts's fixed icon set (semantic — what the number represents — never a free-form visual
+// choice, so it stays meaningful even though every OTHER icon in the shell is renderer-inferred).
+export type StatItem = { kind: "stat"; id: string; label: string; icon: string | null };
+export type UiItem = FieldItem | GridItem | ButtonItem | FieldsetItem | StatItem;
 
 export type ScreenModel = {
   id: string;
@@ -80,6 +87,7 @@ export type ScreenModel = {
   fields: FieldItem[];
   grids: GridItem[];
   buttons: ButtonItem[];
+  stats: StatItem[];
   // Element ids of <event type="load"> handlers — fired once, automatically, when the page opens
   // (e.g. to fill a grid with the rows that already exist).
   loadElements: string[];
@@ -189,31 +197,39 @@ function parseGrid(el: XmlElement, eventsByElement: Map<string, string[]>): Grid
   };
 }
 
+function parseStat(el: XmlElement): StatItem {
+  const id = attr(el, "id");
+  return { kind: "stat", id, label: attr(el, "label", id), icon: el.getAttribute("icon") };
+}
+
 function parseUiItems(parent: XmlElement, eventsByElement: Map<string, string[]>): UiItem[] {
   const items: UiItem[] = [];
   for (const el of childElements(parent)) {
     if (el.tagName === "field") items.push(parseField(el, eventsByElement));
     else if (el.tagName === "grid") items.push(parseGrid(el, eventsByElement));
     else if (el.tagName === "button") items.push(parseButton(el, eventsByElement));
+    else if (el.tagName === "stat") items.push(parseStat(el));
     else if (el.tagName === "fieldset") items.push({ kind: "fieldset", legend: attr(el, "legend"), items: parseUiItems(el, eventsByElement) });
   }
   return items;
 }
 
-function flatten(items: UiItem[]): { fields: FieldItem[]; grids: GridItem[]; buttons: ButtonItem[] } {
+function flatten(items: UiItem[]): { fields: FieldItem[]; grids: GridItem[]; buttons: ButtonItem[]; stats: StatItem[] } {
   const fields: FieldItem[] = [];
   const grids: GridItem[] = [];
   const buttons: ButtonItem[] = [];
+  const stats: StatItem[] = [];
   const walk = (list: UiItem[]) => {
     for (const it of list) {
       if (it.kind === "field") fields.push(it);
       else if (it.kind === "grid") grids.push(it);
       else if (it.kind === "button") buttons.push(it);
+      else if (it.kind === "stat") stats.push(it);
       else walk(it.items);
     }
   };
   walk(items);
-  return { fields, grids, buttons };
+  return { fields, grids, buttons, stats };
 }
 
 export class ScreenParseError extends Error {}
@@ -245,7 +261,7 @@ export function parseScreenModel(xml: string): ScreenModel {
   const headerEl = firstChild(root, "header");
   const uiEl = firstChild(root, "ui");
   const items = uiEl ? parseUiItems(uiEl, eventsByElement) : [];
-  const { fields, grids, buttons } = flatten(items);
+  const { fields, grids, buttons, stats } = flatten(items);
 
   return {
     id: attr(root, "id"),
@@ -255,6 +271,7 @@ export function parseScreenModel(xml: string): ScreenModel {
     fields,
     grids,
     buttons,
+    stats,
     loadElements,
   };
 }

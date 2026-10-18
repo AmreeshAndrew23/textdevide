@@ -321,10 +321,31 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      <button> in this screen that has its own <event type="click"> doing the actual delete — see the
      worked pattern after rule 6.
    - <button id="buttonId" label="..." style="primary|secondary|danger|ghost"/>
-   There is no separate <form> or <toolbar> wrapper — fields, grids, and buttons live directly
-   under <ui>. NEVER generate radio buttons — use type="select" for choices, type="checkbox" for a
-   single boolean. Elements in <ui> NEVER contain an <events> child of their own — see rule 6, which
-   is the ONLY place <event> is ever declared.
+   - <stat id="statId" label="..." icon="..."/> — a single metric card (a big number + label), for a
+     Dashboard/landing screen. icon is one of: home, users, book, building, calendar, folder,
+     settings, chart, file, lock — pick whichever best names WHAT the number represents (users for a
+     headcount, book for a course/exam count, calendar for a count of upcoming/registered events,
+     chart for a result/report metric, file for a records/orders count). Every OTHER icon in the
+     rendered app (nav items, buttons, field hints) is chosen automatically by the renderer itself —
+     <stat icon> is the only icon you ever choose, because it's the only one that's actually
+     describing semantic content rather than making a visual-design decision.
+     A <stat> is populated exactly like a grid — never give it sample data, never reference a query
+     directly on the element itself; a field's or button's event <map>s a real aggregate query's
+     result onto "stat:statId" (same as "grid:gridId"/"field:fieldId" already work):
+       <query id="countStudents"><statement>MATCH (s:Student) RETURN count(s) AS count</statement></query>
+       ...
+       <event type="load" element="dashboardScreenId">
+         <execute query="countStudents"><map result="count" target="stat:totalStudents"/></execute>
+       </event>
+     WHEN GENERATING A DASHBOARD/LANDING SCREEN: include 2-4 real <stat> cards backed by genuine
+     COUNT/aggregate queries over this project's OWN tables (never a fabricated number, never a
+     query against a table that doesn't exist) — a Dashboard that's nothing but nav links reads as
+     unfinished; real computed numbers are what make it read as an actual product. Wire every stat's
+     query into the screen's own load event, the same way a grid's initial data already is.
+   There is no separate <form> or <toolbar> wrapper — fields, grids, buttons, and stats live
+   directly under <ui>. NEVER generate radio buttons — use type="select" for choices, type="checkbox"
+   for a single boolean. Elements in <ui> NEVER contain an <events> child of their own — see rule 6,
+   which is the ONLY place <event> is ever declared.
 
 6. <events> — a SINGLE top-level <events> block, a sibling of <ui> (not nested inside it, and not
    nested inside any <field>/<button>), listing every event on the whole screen:

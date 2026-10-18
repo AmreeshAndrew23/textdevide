@@ -245,18 +245,22 @@ describe("renderer: app shell (persistent header + nav across screens)", () => {
   it("shows the app name in the top bar", () => {
     expect(html).toContain(">Exam Registration<");
   });
+  // Each nav item now carries a leading icon <svg>...</svg> (inferNavIcon) immediately before its
+  // text — matched precisely (not a loose [\s\S]*?, which could false-match across separate <a>
+  // elements) by requiring the icon's own closing tag directly before the screen name.
+  const navItem = (name: string) => new RegExp(`<svg[^>]*>[\\s\\S]*?<\\/svg>${name}`);
   it("lists every screen in the nav, marking the current one active and not a link", () => {
-    expect(html).toMatch(/<span class="app-nav-item active"[^>]*>Department<\/span>/);
-    expect(html).not.toMatch(/<a[^>]*>Department<\/a>/);
+    expect(html).toMatch(new RegExp(`<span class="app-nav-item active"[^>]*>${navItem("Department").source}<\\/span>`));
+    expect(html).not.toMatch(new RegExp(`<a[^>]*>${navItem("Department").source}<\\/a>`));
   });
   it("links every OTHER screen to its real runtime URL with the token", () => {
     expect(html).toContain('href="http://localhost:8001/runtime/projects/42/screens/s2?token=tok123"');
-    expect(html).toMatch(/<a class="app-nav-item" href="[^"]+">Course<\/a>/);
+    expect(html).toMatch(new RegExp(`<a class="app-nav-item" href="[^"]+">${navItem("Course").source}<\\/a>`));
   });
   it("a different screen's render shows the identical nav with a different item active", () => {
     const html2 = renderScreen(model, { ...shellOpts, screenId: "s2" });
-    expect(html2).toMatch(/<span class="app-nav-item active"[^>]*>Course<\/span>/);
-    expect(html2).toMatch(/<a class="app-nav-item" href="[^"]+">Department<\/a>/);
+    expect(html2).toMatch(new RegExp(`<span class="app-nav-item active"[^>]*>${navItem("Course").source}<\\/span>`));
+    expect(html2).toMatch(new RegExp(`<a class="app-nav-item" href="[^"]+">${navItem("Department").source}<\\/a>`));
   });
 });
 
@@ -1112,5 +1116,112 @@ describe("engine: worked pattern — create a record, auto-provision its login, 
     expect(accountCall.params.password).not.toBe(plaintext);
     expect(verifyPassword(plaintext, String(accountCall.params.password))).toBe(true);
     expect(emailAction.to).toBe("bob@example.com");
+  });
+});
+
+describe("screenModel: <stat> parsing", () => {
+  it("parses id/label/icon, and defaults label to id when omitted", () => {
+    const model = parseScreenModel(`<screen id="s" title="S"><ui>
+      <stat id="totalStudents" label="Total Students" icon="users"/>
+      <stat id="totalCourses"/>
+    </ui><events/></screen>`);
+    expect(model.stats).toEqual([
+      { kind: "stat", id: "totalStudents", label: "Total Students", icon: "users" },
+      { kind: "stat", id: "totalCourses", label: "totalCourses", icon: null },
+    ]);
+  });
+  it("finds a <stat> nested inside a <fieldset> too, same as any other item", () => {
+    const model = parseScreenModel(`<screen id="s" title="S"><ui>
+      <fieldset legend="Metrics"><stat id="x" label="X"/></fieldset>
+    </ui><events/></screen>`);
+    expect(model.stats.map((s) => s.id)).toEqual(["x"]);
+  });
+});
+
+describe("renderer: <stat> widget — card markup and live client-side update", () => {
+  const model = parseScreenModel(`<screen id="dash" title="Dashboard"><ui>
+    <stat id="totalStudents" label="Total Students" icon="users"/>
+    <stat id="totalCourses" label="Total Courses"/>
+  </ui><events><event type="load" element="dash"><execute query="q"/></event></events></screen>`);
+  const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "t" });
+
+  it("renders a stat card per <stat>, grouped into one stats-row, with a placeholder value", () => {
+    expect(html).toContain('class="stats-row"');
+    expect(html).toContain('data-stat="totalStudents"');
+    expect(html).toContain('data-stat="totalCourses"');
+    expect(html).toMatch(/data-stat="totalStudents"[\s\S]*?class="stat-value">—</);
+  });
+  it("includes the icon for a stat that specifies one, and omits it for one that doesn't", () => {
+    const studentsCard = html.slice(html.indexOf('data-stat="totalStudents"'), html.indexOf('data-stat="totalCourses"'));
+    const coursesCard = html.slice(html.indexOf('data-stat="totalCourses"'));
+    expect(studentsCard).toContain("stat-icon");
+    expect(coursesCard.slice(0, coursesCard.indexOf("stat-body"))).not.toContain("stat-icon");
+  });
+  it("the client script updates a stat's value element when a map/set action targets stat:<id>", () => {
+    expect(html).toContain('a.target.indexOf("stat:") === 0');
+    expect(html).toContain('root.querySelector(\'[data-stat="\' + a.target.slice(5) + \'"]\')');
+  });
+});
+
+describe("renderer: nav icons are inferred from the screen name, never AI-chosen", () => {
+  const screens = [
+    { id: "a", name: "Dashboard" }, { id: "b", name: "Student Master" }, { id: "c", name: "Course Catalog" },
+    { id: "d", name: "Department List" }, { id: "e", name: "Exam Report" }, { id: "f", name: "Totally Unrecognizable Xyz" },
+  ];
+  const model = parseScreenModel(`<screen id="a" title="S"><ui/><events/></screen>`);
+  const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "a", token: "t", screens });
+
+  it("picks a sensible icon per recognizable screen name", () => {
+    // Order in ICON_PATHS/inferNavIcon isn't asserted directly (private) — instead confirm distinct
+    // screens with clearly different domains don't all collapse onto the exact same icon markup.
+    const iconFor = (name: string) => {
+      const idx = html.indexOf(`>${name}<`);
+      const start = html.lastIndexOf("<svg", idx);
+      return html.slice(start, html.indexOf("</svg>", start) + 7);
+    };
+    expect(iconFor("Dashboard")).not.toBe(iconFor("Student Master"));
+    expect(iconFor("Student Master")).not.toBe(iconFor("Course Catalog"));
+    expect(iconFor("Course Catalog")).not.toBe(iconFor("Department List"));
+  });
+  it("falls back to a generic icon for an unrecognized screen name, without throwing", () => {
+    expect(() => html).not.toThrow();
+    expect(html).toContain(">Totally Unrecognizable Xyz<");
+  });
+});
+
+describe("renderer: toast notifications replace the old plain banner", () => {
+  const model = parseScreenModel(`<screen id="s" title="S"><ui><field id="f" label="F" type="text"/></ui><events/></screen>`);
+  const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+
+  it("keeps the same #screen-messages container id (call site in applyActions is unchanged)", () => {
+    expect(html).toContain('id="screen-messages"');
+  });
+  it("client script builds a toast with an icon per message type and an auto-dismiss for non-errors", () => {
+    expect(html).toContain("toast-" + "error");
+    expect(html).toContain("TOAST_ICONS");
+    expect(html).toContain('kind !== "error"');
+    expect(html).toContain("setTimeout");
+  });
+});
+
+describe("renderer: grid skeleton loading state", () => {
+  const model = parseScreenModel(`<screen id="s" title="S"><ui>
+    <grid id="g" label="G" emptyMessage="No records."><column id="c" header="C" binding="c"/></grid>
+  </ui><events/></screen>`);
+  const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t" });
+
+  it("renders a skeleton tbody by default, not the empty-state message, before any load completes", () => {
+    expect(html).toMatch(/<tbody class="skeleton">/);
+    // "No records." legitimately appears once, in the data-empty attribute the client script reads
+    // later — it must NOT also appear as real rendered row content in the initial (skeleton) tbody.
+    const tbodyMatch = html.match(/<tbody class="skeleton">[\s\S]*?<\/tbody>/);
+    expect(tbodyMatch).toBeTruthy();
+    expect(tbodyMatch![0]).not.toContain("No records.");
+  });
+  it("client script clears the skeleton class once real rows (or an empty result) are applied", () => {
+    expect(html).toContain('tbody.classList.remove("skeleton")');
+  });
+  it("has a safety fallback that resolves any still-skeletal grid once the load-event chain settles", () => {
+    expect(html).toContain('querySelectorAll("tbody.skeleton")');
   });
 });

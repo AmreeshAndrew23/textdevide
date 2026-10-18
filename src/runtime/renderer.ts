@@ -6,7 +6,7 @@
  * blur-commit vs immediate-commit, map/set treated identically, message replaces, stop is a
  * server-only concept the client never sees).
  */
-import type { ButtonItem, FieldItem, GridAction, GridItem, ScreenModel, UiItem } from "./screenModel.js";
+import type { ButtonItem, FieldItem, GridAction, GridItem, ScreenModel, StatItem, UiItem } from "./screenModel.js";
 
 function esc(s: string): string {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -17,6 +17,87 @@ function escAttr(s: string): string {
 }
 
 const BUTTON_CLASS: Record<string, string> = { primary: "btn-primary", secondary: "btn-secondary", danger: "btn-danger", ghost: "btn-ghost" };
+
+// ---------------------------------------------------------------------------
+// Icon set — one cohesive outline style (24x24, 1.75px stroke, rounded caps), authored once here
+// rather than pulled from an external pack, so every generated app shares the exact same visual
+// language automatically. Used in three ways: (1) a fixed set an AI-generated <stat icon="..."/>
+// picks from (semantic — what the number represents), and (2)/(3) nav items and buttons, which are
+// NEVER AI-chosen — inferNavIcon/inferButtonIcon below pick them from data that already exists
+// (screen name, button style/label), so the icon system stays identical across every app no matter
+// what any one generation produces, and every already-generated app picks them up on its next
+// render with zero regeneration.
+// ---------------------------------------------------------------------------
+const ICON_PATHS: Record<string, string> = {
+  home: "M3 11.5 12 4l9 7.5M5.5 10v9a1 1 0 0 0 1 1H9.5v-6h5v6H18.5a1 1 0 0 0 1-1v-9",
+  users: "M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2M9.5 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM23 21v-2a4 4 0 0 0-3-3.87M16.5 3.13a4 4 0 0 1 0 7.75",
+  book: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15Z",
+  building: "M5 21V5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v16M3 21h18M9 9h0M9 13h0M9 17h0M13 21v-4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4",
+  calendar: "M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z",
+  folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z",
+  settings: "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM19.4 13a8 8 0 0 0 0-2l2-1.5-2-3.46-2.36.94a8 8 0 0 0-1.73-1L15 3.5h-6l-.3 2.48a8 8 0 0 0-1.74 1l-2.35-.94-2 3.46L4.6 11a8 8 0 0 0 0 2l-2 1.5 2 3.46 2.35-.94a8 8 0 0 0 1.74 1L9 21.5h6l.3-2.48a8 8 0 0 0 1.74-1l2.35.94 2-3.46Z",
+  chart: "M4 20V10M12 20V4M20 20v-7M3 20h18",
+  file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8L14 2ZM14 2v6h6",
+  lock: "M5 11h14v10H5V11ZM8 11V7a4 4 0 0 1 8 0v4",
+  plus: "M12 5v14M5 12h14",
+  pencil: "M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z",
+  trash: "M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16Z",
+  search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM21 21l-4.3-4.3",
+  download: "M12 3v12M7 10l5 5 5-5M5 21h14",
+  "log-out": "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
+  check: "M20 6 9 17l-5-5",
+  "check-circle": "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20ZM8 12.5l2.5 2.5L16 9",
+  "alert-circle": "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20ZM12 8v5M12 16h.01",
+  "info-circle": "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20ZM12 16v-5M12 8h.01",
+  x: "M18 6 6 18M6 6l12 12",
+  email: "M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2ZM22 6l-10 7L2 6",
+};
+
+function icon(name: string, cls = "icon"): string {
+  const d = ICON_PATHS[name];
+  if (!d) return "";
+  return `<svg class="${escAttr(cls)}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
+}
+
+// Best-effort keyword match on a screen's NAME (never AI-chosen) — a sensible icon for most real
+// app sections, with a plain folder as the fallback for anything unrecognized, so nothing ever
+// looks broken, just generic.
+function inferNavIcon(name: string): string {
+  const n = (name || "").toLowerCase();
+  if (/\b(dashboard|home)\b/.test(n)) return "home";
+  if (/\b(login|signup|sign up|account|auth)\b/.test(n)) return "lock";
+  if (/\b(profile)\b/.test(n)) return "users";
+  if (/\b(student|employee|user|staff|customer|member|people|person)\b/.test(n)) return "users";
+  if (/\b(course|exam|paper|subject|class|lesson|training)\b/.test(n)) return "book";
+  if (/\b(department|branch|office|building|facility)\b/.test(n)) return "building";
+  if (/\b(report|result|analytic|stat|summary)\b/.test(n)) return "chart";
+  if (/\b(setting|config|admin|role|permission)\b/.test(n)) return "settings";
+  if (/\b(calendar|schedule|event|registration|booking|appointment)\b/.test(n)) return "calendar";
+  if (/\b(invoice|order|document|record|file)\b/.test(n)) return "file";
+  return "folder";
+}
+
+// Best-effort keyword match on a BUTTON's style/label — never AI-chosen. null means no icon (a
+// button whose purpose doesn't map cleanly to anything in the set stays label-only, which is fine).
+function inferButtonIcon(b: ButtonItem): string | null {
+  const label = (b.label || "").toLowerCase();
+  if (b.style === "danger" || /\b(delete|remove|cancel registration)\b/.test(label)) return "trash";
+  if (/\b(add|new|create)\b/.test(label)) return "plus";
+  if (/\b(save|submit|register|confirm)\b/.test(label)) return "check";
+  if (/\b(search|filter)\b/.test(label)) return "search";
+  if (/\b(export|download)\b/.test(label)) return "download";
+  if (/\b(edit|update)\b/.test(label)) return "pencil";
+  return null;
+}
+
+// Subtle field-type hint icon, shown small and muted next to the label — not load-bearing, purely a
+// scannability aid for the types people recognize fastest.
+function inferFieldIcon(f: FieldItem): string | null {
+  if (f.type === "email") return "email";
+  if (f.type === "date" || f.type === "time") return "calendar";
+  if (f.type === "password") return "lock";
+  return null;
+}
 
 // Every field type this vocabulary defines maps 1:1 to a native input. "select" renders a real
 // <select> when the XML supplies <option value="..." label="..."/> children (e.g. a filter's fixed
@@ -74,12 +155,21 @@ function renderField(f: FieldItem): string {
     control = `<input type="text" id="${escAttr(f.id)}" name="${escAttr(f.id)}"${maxLength}${pattern}${value}${disabled}${wiredEvents}>`;
   }
 
+  const fieldIcon = inferFieldIcon(f);
+  const labelIcon = fieldIcon ? icon(fieldIcon, "icon field-label-icon") : "";
   const hint = f.hint ? `<div class="hint">${esc(f.hint)}</div>` : "";
   return `<div class="field-wrap" data-field="${escAttr(f.id)}">
-  <label for="${escAttr(f.id)}">${esc(f.label)}${required ? ' <span class="req">*</span>' : ""}</label>
+  <label for="${escAttr(f.id)}">${labelIcon}${esc(f.label)}${required ? ' <span class="req">*</span>' : ""}</label>
   ${control}
   ${hint}
 </div>`;
+}
+
+// 3 shimmering placeholder rows, shown until this grid's first real load — swapped for the real
+// rows/empty-state by renderGridRows() client-side (see clientScript), with a safety fallback after
+// the page's whole load-event chain settles so a grid that's never wired to load can't stay stuck.
+function skeletonRows(colCount: number): string {
+  return Array.from({ length: 3 }, () => `<tr class="skeleton-row">${`<td><div class="skeleton-bar"></div></td>`.repeat(colCount || 1)}</tr>`).join("");
 }
 
 function renderGrid(g: GridItem): string {
@@ -90,7 +180,7 @@ function renderGrid(g: GridItem): string {
   <div class="table-scroll">
   <table>
     <thead><tr>${headers}</tr></thead>
-    <tbody><tr class="empty-row"><td colspan="${colCount || 1}">${esc(g.emptyMessage)}</td></tr></tbody>
+    <tbody class="skeleton">${skeletonRows(colCount)}</tbody>
   </table>
   </div>
 </div>`;
@@ -126,16 +216,27 @@ function renderButton(b: ButtonItem, linkFor: Linker): string {
   // runs real queries must never be hijacked just because its label contains a screen's name.
   const href = wired ? null : linkFor(b.label);
   const link = href ? ` data-nav-href="${escAttr(href)}"` : "";
+  const btnIcon = inferButtonIcon(b);
+  const iconHtml = btnIcon ? icon(btnIcon, "icon btn-icon") : "";
   // A click that runs a real query can take a visible moment (especially against a cold/slow
   // database) — a spinner on the SPECIFIC button clicked, not just a page-wide disable, is what
   // tells the user their click registered and something is actually happening.
-  return `<button type="button" id="${escAttr(b.id)}" data-button${wired}${link} class="${cls}"><span class="btn-spinner" hidden></span><span class="btn-label">${esc(b.label)}</span></button>`;
+  return `<button type="button" id="${escAttr(b.id)}" data-button${wired}${link} class="${cls}"><span class="btn-spinner" hidden></span>${iconHtml}<span class="btn-label">${esc(b.label)}</span></button>`;
+}
+
+function renderStat(s: StatItem): string {
+  const iconHtml = s.icon ? icon(s.icon, "icon stat-icon") : "";
+  return `<div class="stat-card" data-stat="${escAttr(s.id)}">
+  ${iconHtml}
+  <div class="stat-body"><div class="stat-value">—</div><div class="stat-label">${esc(s.label)}</div></div>
+</div>`;
 }
 
 function renderOne(it: UiItem, linkFor: Linker): string {
   if (it.kind === "field") return renderField(it);
   if (it.kind === "grid") return renderGrid(it);
   if (it.kind === "button") return renderButton(it, linkFor);
+  if (it.kind === "stat") return renderStat(it);
   return `<fieldset><legend>${esc(it.legend)}</legend>${renderInner(it.items, linkFor)}</fieldset>`;
 }
 
@@ -176,6 +277,7 @@ function renderItems(items: UiItem[], linkFor: Linker): string {
   const out: string[] = [];
   let group: UiItem[] = [];
   let toolbar: ButtonItem[] = [];
+  let statGroup: StatItem[] = [];
   const flushGroup = () => {
     if (group.length) out.push(`<div class="card form-card">\n${group.map((g) => renderOne(g, linkFor)).join("\n")}\n</div>`);
     group = [];
@@ -184,21 +286,35 @@ function renderItems(items: UiItem[], linkFor: Linker): string {
     if (toolbar.length) out.push(`<div class="toolbar">\n${toolbar.map((b) => renderOne(b, linkFor)).join("\n")}\n</div>`);
     toolbar = [];
   };
+  // Stats group into their own row of cards (a Dashboard's metrics strip), separate from the
+  // form-card/toolbar/grid groupings above — never mixed into a form card with ordinary fields.
+  const flushStats = () => {
+    if (statGroup.length) out.push(`<div class="stats-row">\n${statGroup.map((s) => renderStat(s)).join("\n")}\n</div>`);
+    statGroup = [];
+  };
   for (const it of items) {
     if (it.kind === "grid") {
       flushGroup();
       flushToolbar();
+      flushStats();
       out.push(renderOne(it, linkFor));
+    } else if (it.kind === "stat") {
+      flushGroup();
+      flushToolbar();
+      statGroup.push(it);
     } else if (it.kind === "button") {
+      flushStats();
       if (group.length) group.push(it); // attach to the still-open form card
       else toolbar.push(it); // nothing open — accumulate as a standalone toolbar row instead
     } else {
       flushToolbar();
+      flushStats();
       group.push(it);
     }
   }
   flushGroup();
   flushToolbar();
+  flushStats();
   return out.join("\n");
 }
 
@@ -275,14 +391,29 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     return values;
   }
 
+  var TOAST_ICONS = {
+    error: ${JSON.stringify(icon("alert-circle", "icon toast-icon"))},
+    success: ${JSON.stringify(icon("check-circle", "icon toast-icon"))},
+    notice: ${JSON.stringify(icon("info-circle", "icon toast-icon"))},
+  };
+  // Floating toast stack, not an inline banner — same call signature/call site as before
+  // (applyActions below), only the visual treatment changed. Each new batch replaces whatever
+  // toasts are still showing (same "replace" semantics the old banner already had), but each toast
+  // gets its own slide-in and, for success/notice, its own auto-dismiss timer — an error stays until
+  // the user dismisses it or the next action replaces it, since that's the one people actually need
+  // time to read.
   function showMessages(messages) {
     var box = root.getElementById("screen-messages");
     box.innerHTML = "";
     (messages || []).forEach(function (m) {
+      var kind = m.messageType === "error" ? "error" : m.messageType === "success" ? "success" : "notice";
       var div = document.createElement("div");
-      div.className = "banner " + (m.messageType === "error" ? "error" : m.messageType === "success" ? "success" : "notice");
-      div.textContent = m.value;
+      div.className = "toast toast-" + kind;
+      div.innerHTML = (TOAST_ICONS[kind] || "") + '<span class="toast-text"></span><button type="button" class="toast-close" aria-label="Dismiss">' + ${JSON.stringify(icon("x", "icon"))} + "</button>";
+      div.querySelector(".toast-text").textContent = m.value;
+      div.querySelector(".toast-close").addEventListener("click", function () { div.remove(); });
       box.appendChild(div);
+      if (kind !== "error") setTimeout(function () { div.remove(); }, 4500);
     });
   }
 
@@ -309,6 +440,10 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
         if (el) { if (el.type === "checkbox") el.checked = Boolean(a.value); else el.value = a.value == null ? "" : a.value; }
       } else if ((a.type === "map" || a.type === "set") && typeof a.target === "string" && a.target.indexOf("grid:") === 0 && Array.isArray(a.value)) {
         renderGridRows(a.target.slice(5), a.value);
+      } else if ((a.type === "map" || a.type === "set") && typeof a.target === "string" && a.target.indexOf("stat:") === 0) {
+        var statWrap = root.querySelector('[data-stat="' + a.target.slice(5) + '"]');
+        var statValueEl = statWrap ? statWrap.querySelector(".stat-value") : null;
+        if (statValueEl) statValueEl.textContent = a.value == null ? "0" : String(a.value);
       } else if (a.type === "message") {
         messages.push(a);
       } else if (a.type === "navigate") {
@@ -345,15 +480,23 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     return values;
   }
 
+  var EMPTY_ICON = ${JSON.stringify(icon("folder", "icon empty-icon"))};
+  var EDIT_ICON = ${JSON.stringify(icon("pencil", "icon"))};
+  var DELETE_ICON = ${JSON.stringify(icon("trash", "icon"))};
+
+  // Swaps this grid's skeleton placeholder (shown from first paint, see renderGrid) for its real
+  // content — the one place that transition happens, whether triggered by a real load-event
+  // response or the end-of-load-chain safety fallback below.
   function renderGridRows(gridId, rows) {
     var wrap = root.querySelector('[data-grid="' + gridId + '"]');
     if (!wrap) return;
     var tbody = wrap.querySelector("tbody");
+    tbody.classList.remove("skeleton");
     var bindings = GRID_COLUMNS[gridId] || [];
     var actions = GRID_ACTIONS[gridId] || [];
     GRID_ROWS[gridId] = rows;
     if (!rows.length) {
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="' + Math.max(bindings.length + (actions.length ? 1 : 0), 1) + '">' + (wrap.getAttribute("data-empty") || "") + "</td></tr>";
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="' + Math.max(bindings.length + (actions.length ? 1 : 0), 1) + '">' + EMPTY_ICON + '<span>' + (wrap.getAttribute("data-empty") || "") + "</span></td></tr>";
       return;
     }
     tbody.innerHTML = rows.map(function (row, i) {
@@ -364,9 +507,9 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
       }).join("");
       if (actions.length) {
         cells += '<td class="row-actions">' + actions.map(function (a) {
-          if (a.type === "edit") return '<button type="button" class="row-action-btn" data-row-edit="' + i + '">Edit</button>';
+          if (a.type === "edit") return '<button type="button" class="row-action-btn" data-row-edit="' + i + '">' + EDIT_ICON + "<span>Edit</span></button>";
           var confirmAttr = a.confirm ? ' data-row-confirm="' + attrEscape(a.confirm) + '"' : "";
-          return '<button type="button" class="row-action-btn row-action-danger" data-row-delete="' + i + '" data-row-target="' + attrEscape(a.target) + '"' + confirmAttr + '><span class="btn-spinner" hidden></span>Delete</button>';
+          return '<button type="button" class="row-action-btn row-action-danger" data-row-delete="' + i + '" data-row-target="' + attrEscape(a.target) + '"' + confirmAttr + '><span class="btn-spinner" hidden></span>' + DELETE_ICON + "<span>Delete</span></button>";
         }).join("") + "</td>";
       }
       return '<tr data-row="' + i + '">' + cells + "</tr>";
@@ -519,7 +662,15 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
   // before the next starts) — e.g. to fill a grid with the rows already saved.
   LOAD_ELEMENTS.reduce(function (chain, id) {
     return chain.then(function () { return fireEvent(id, "load"); });
-  }, Promise.resolve());
+  }, Promise.resolve()).then(function () {
+    // Safety fallback: a grid genuinely never wired to any load event (filter/search-only) would
+    // otherwise be stuck showing its skeleton forever — once every load event has had its chance,
+    // anything still skeletal converts to its real (empty) state.
+    root.querySelectorAll("tbody.skeleton").forEach(function (tbody) {
+      var wrap = tbody.closest("[data-grid]");
+      if (wrap) renderGridRows(wrap.getAttribute("data-grid"), GRID_ROWS[wrap.getAttribute("data-grid")] || []);
+    });
+  });
 })();
 </script>`;
 }
@@ -564,11 +715,12 @@ function renderTopBar(opts: ShellOpts): string {
 function renderNavItems(opts: ShellOpts): string {
   if (!opts.screens.length) return '<span class="app-nav-empty">No other screens yet</span>';
   return opts.screens
-    .map((s) =>
-      s.id === opts.screenId
-        ? `<span class="app-nav-item active" aria-current="page">${esc(s.name)}</span>`
-        : `<a class="app-nav-item" href="${escAttr(shellUrl(opts, s.id))}">${esc(s.name)}</a>`
-    )
+    .map((s) => {
+      const navIcon = icon(inferNavIcon(s.name), "icon nav-icon");
+      return s.id === opts.screenId
+        ? `<span class="app-nav-item active" aria-current="page">${navIcon}${esc(s.name)}</span>`
+        : `<a class="app-nav-item" href="${escAttr(shellUrl(opts, s.id))}">${navIcon}${esc(s.name)}</a>`;
+    })
     .join("\n");
 }
 
@@ -654,6 +806,8 @@ export function renderScreen(
   html, body { height: 100%; }
   body { margin: 0; font-family: var(--font-family); color: var(--clr-text); background: var(--clr-bg); display: flex; flex-direction: column; -webkit-font-smoothing: antialiased; }
 
+  .icon { width: 17px; height: 17px; flex-shrink: 0; display: inline-block; vertical-align: -3px; }
+
   .app-topbar {
     flex-shrink: 0; display: flex; align-items: center; padding: 0 24px; height: 56px;
     background: linear-gradient(135deg, var(--clr-primary-dark), var(--clr-primary));
@@ -676,12 +830,15 @@ export function renderScreen(
   .app-body { display: flex; flex: 1; min-height: 0; }
   .app-nav { width: 210px; flex-shrink: 0; background: var(--clr-surface); border-right: 1px solid var(--clr-border); padding: 16px 12px; overflow-y: auto; }
   .app-nav-item {
-    display: block; padding: 9px 12px; border-radius: 7px; font-size: 13.5px; font-weight: 500;
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 7px; font-size: 13.5px; font-weight: 500;
     text-decoration: none; color: var(--clr-text); margin-bottom: 2px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: background 0.12s;
   }
+  .app-nav-item .nav-icon { color: var(--clr-muted); }
   a.app-nav-item:hover { background: var(--clr-primary-light); color: var(--clr-primary-dark); }
+  a.app-nav-item:hover .nav-icon { color: var(--clr-primary-dark); }
   .app-nav-item.active { background: var(--clr-primary); color: #fff; font-weight: 600; cursor: default; }
+  .app-nav-item.active .nav-icon { color: rgba(255,255,255,0.85); }
   .app-nav-empty { display: block; padding: 9px 12px; font-size: 12.5px; color: var(--clr-muted); font-style: italic; }
 
   .app-content { flex: 1; min-width: 0; overflow: auto; padding: 32px 36px; }
@@ -693,9 +850,24 @@ export function renderScreen(
   .card-header { padding: 16px 20px; border-bottom: 1px solid var(--clr-border); }
   .card-header h3 { margin: 0; font-size: 14.5px; font-weight: 600; }
 
+  .stats-row { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 20px; }
+  .stat-card {
+    display: flex; align-items: center; gap: 14px; background: var(--clr-surface);
+    border: 1px solid var(--clr-border); border-radius: var(--radius); box-shadow: var(--shadow-card);
+    padding: 18px 20px; flex: 1 1 200px; min-width: 180px;
+  }
+  .stat-icon {
+    width: 40px; height: 40px; padding: 9px; border-radius: 10px; flex-shrink: 0;
+    background: var(--clr-primary-light); color: var(--clr-primary-dark);
+  }
+  .stat-body { min-width: 0; }
+  .stat-value { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.2; }
+  .stat-label { font-size: 12.5px; color: var(--clr-muted); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
   .field-wrap { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
   .field-wrap:last-of-type { margin-bottom: 4px; }
-  .field-wrap label { font-size: 13px; font-weight: 600; color: var(--clr-text); }
+  .field-wrap label { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--clr-text); }
+  .field-label-icon { width: 14px; height: 14px; color: var(--clr-muted); }
   .req { color: var(--clr-danger); }
   .field-wrap input, .field-wrap textarea, .field-wrap select {
     padding: 9px 13px; border: 1.5px solid var(--clr-border); border-radius: 8px;
@@ -721,16 +893,25 @@ export function renderScreen(
   tbody tr:hover td { background: #fafbfc; }
   tbody tr[data-row] { cursor: pointer; }
   tbody tr.selected td { background: var(--clr-primary-light); }
-  .empty-row td { color: var(--clr-muted); font-style: italic; text-align: center; padding: 28px 20px; }
+  .empty-row td { color: var(--clr-muted); text-align: center; padding: 36px 20px; }
+  .empty-row { display: table-row; }
+  .empty-row td { display: flex; flex-direction: column; align-items: center; gap: 8px; border-bottom: none; }
+  .empty-icon { width: 30px; height: 30px; color: #cbd5e1; }
   .actions-col { width: 1%; white-space: nowrap; }
   .row-actions { white-space: nowrap; }
   .row-action-btn {
+    display: inline-flex; align-items: center; gap: 5px;
     font-family: inherit; font-size: 12px; font-weight: 600; padding: 5px 10px; margin-right: 6px;
     border-radius: 6px; border: 1.5px solid var(--clr-border); background: var(--clr-surface); color: var(--clr-text); cursor: pointer;
   }
+  .row-action-btn .icon { width: 13px; height: 13px; }
   .row-action-btn:hover { background: var(--clr-bg); }
   .row-action-danger { color: var(--clr-danger); border-color: #fecaca; }
   .row-action-danger:hover { background: #fef2f2; }
+
+  /* Skeleton loading rows — shown from first paint until a grid's load event actually resolves. */
+  .skeleton-bar { height: 13px; border-radius: 4px; background: linear-gradient(90deg, #eef1f5 25%, #e2e8f0 37%, #eef1f5 63%); background-size: 400% 100%; animation: skeleton-shimmer 1.4s ease infinite; }
+  @keyframes skeleton-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
 
   .toolbar { margin-bottom: 20px; }
   button { font-family: inherit; padding: 9px 20px; border-radius: 8px; font-size: 13.5px; font-weight: 600; cursor: pointer; margin-right: 8px; margin-top: 4px; transition: filter 0.12s, box-shadow 0.12s; }
@@ -750,13 +931,28 @@ export function renderScreen(
   }
   .btn-spinner[hidden] { display: none; }
   @keyframes btn-spin { to { transform: rotate(360deg); } }
+  .btn-icon { margin-right: 7px; }
 
-  #screen-messages:empty { display: none; }
-  #screen-messages { margin-bottom: 18px; }
-  .banner { padding: 11px 16px; border-radius: 8px; margin-bottom: 8px; font-size: 13.5px; font-weight: 500; }
-  .banner.notice { background: #f1f5f9; color: #334155; }
-  .banner.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
-  .banner.success { background: #f0fdf4; color: var(--clr-success); border: 1px solid #bbf7d0; }
+  /* Floating toast stack — replaces the old inline banner. #screen-messages keeps its id/position in
+     the DOM (right after the page header) but is now visually detached via fixed positioning. */
+  #screen-messages {
+    position: fixed; top: 18px; right: 18px; z-index: 1000;
+    display: flex; flex-direction: column; gap: 8px; max-width: 360px;
+  }
+  .toast {
+    display: flex; align-items: flex-start; gap: 10px; padding: 13px 14px; border-radius: 9px;
+    font-size: 13.5px; font-weight: 500; box-shadow: 0 4px 16px rgba(15,23,42,0.12), 0 1px 3px rgba(15,23,42,0.08);
+    animation: toast-in 0.18s ease-out;
+  }
+  .toast-icon { margin-top: 1px; }
+  .toast-text { flex: 1; line-height: 1.4; }
+  .toast-close { background: none; border: none; padding: 2px; margin: 0; cursor: pointer; opacity: 0.6; border-radius: 4px; }
+  .toast-close:hover { opacity: 1; background: rgba(0,0,0,0.06); }
+  .toast-close .icon { width: 13px; height: 13px; }
+  .toast-notice { background: #f1f5f9; color: #334155; }
+  .toast-error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+  .toast-success { background: #f0fdf4; color: var(--clr-success); border: 1px solid #bbf7d0; }
+  @keyframes toast-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
 
   /* ---- Structural preset variants, driven by data-* attributes on <body> ---- */
   /* header: gradient (default, above) | solid | light */
