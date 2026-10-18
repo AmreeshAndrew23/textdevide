@@ -51,6 +51,10 @@ const ICON_PATHS: Record<string, string> = {
   "info-circle": "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20ZM12 16v-5M12 8h.01",
   x: "M18 6 6 18M6 6l12 12",
   email: "M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2ZM22 6l-10 7L2 6",
+  user: "M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9ZM4 21a8 8 0 0 1 16 0",
+  "chevron-down": "M6 9l6 6 6-6",
+  moon: "M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z",
+  sun: "M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10ZM12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4",
 };
 
 function icon(name: string, cls = "icon"): string {
@@ -658,6 +662,44 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     });
   });
 
+  // The Profile dropdown — click the trigger to open/close, click anywhere outside (or Escape) to
+  // close. Structural, same spirit as Log out above.
+  root.querySelectorAll("[data-profile-menu]").forEach(function (menu) {
+    var trigger = menu.querySelector("[data-profile-trigger]");
+    var dropdown = menu.querySelector("[data-profile-dropdown]");
+    if (!trigger || !dropdown) return;
+    function close() { dropdown.hidden = true; trigger.setAttribute("aria-expanded", "false"); }
+    function open() { dropdown.hidden = false; trigger.setAttribute("aria-expanded", "true"); }
+    trigger.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (dropdown.hidden) open(); else close();
+    });
+    document.addEventListener("click", function (e) { if (!menu.contains(e.target)) close(); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
+  });
+
+  // Dark/light mode — a per-viewer preference (localStorage, not synced server-side; see the early
+  // inline <script> right after <body> that applies it before first paint to avoid a flash of the
+  // wrong theme). The toggle's own icon/label always describes the OPPOSITE of the CURRENT mode.
+  var THEME_KEY = "td_theme_scheme";
+  root.querySelectorAll("[data-theme-toggle]").forEach(function (btn) {
+    var iconEl = btn.querySelector("[data-theme-toggle-icon]");
+    var labelEl = btn.querySelector("[data-theme-toggle-label]");
+    function sync() {
+      var dark = document.body.getAttribute("data-color-scheme") === "dark";
+      iconEl.innerHTML = btn.getAttribute(dark ? "data-icon-dark" : "data-icon-light");
+      labelEl.textContent = btn.getAttribute(dark ? "data-label-dark" : "data-label-light");
+    }
+    sync();
+    btn.addEventListener("click", function () {
+      var nowDark = document.body.getAttribute("data-color-scheme") !== "dark";
+      if (nowDark) document.body.setAttribute("data-color-scheme", "dark");
+      else document.body.removeAttribute("data-color-scheme");
+      try { localStorage.setItem(THEME_KEY, nowDark ? "dark" : "light"); } catch (e) {}
+      sync();
+    });
+  });
+
   // <event type="load"> handlers run once when the page opens, one after another (each finishes
   // before the next starts) — e.g. to fill a grid with the rows already saved.
   LOAD_ELEMENTS.reduce(function (chain, id) {
@@ -700,14 +742,35 @@ function renderTopBar(opts: ShellOpts): string {
   const mark = esc(name.trim().charAt(0).toUpperCase() || "A");
   const brand = `<a class="app-topbar-brand" href="${escAttr(shellUrl(opts, opts.screenId))}"><span class="app-mark">${mark}</span><span class="app-topbar-title">${esc(name)}</span></a>`;
   if (!opts.loggedIn) return brand;
-  const profile = opts.profileScreenId
-    ? `<a class="app-topbar-action" href="${escAttr(shellUrl(opts, opts.profileScreenId))}">Profile</a>`
+  // One Profile dropdown holds all three account-level actions — structural, zero AI/XML
+  // involvement, present on every logged-in screen of every generated app. Change Password only
+  // appears if the project has a screen named "Profile" (same detection runtimeRender.ts already
+  // does); the theme toggle always appears (it's a pure client-side preference, no screen needed);
+  // Log out only appears if a real login screen exists to send the user back to.
+  const changePassword = opts.profileScreenId
+    ? `<a class="profile-dropdown-item" href="${escAttr(shellUrl(opts, opts.profileScreenId))}">${icon("lock")}<span>Change Password</span></a>`
     : "";
+  // data-theme-icon-light/dark hold BOTH icons' markup so the client script can swap between them
+  // without re-fetching anything; data-theme-label-light/dark hold the matching label text. The
+  // button always offers the OPPOSITE of the current mode ("Switch to Dark Mode" while in light).
+  const themeToggle = `<button type="button" class="profile-dropdown-item" data-theme-toggle
+      data-icon-light="${escAttr(icon("moon"))}" data-icon-dark="${escAttr(icon("sun"))}"
+      data-label-light="Switch to Dark Mode" data-label-dark="Switch to Light Mode">
+      <span data-theme-toggle-icon>${icon("moon")}</span><span data-theme-toggle-label>Switch to Dark Mode</span>
+    </button>`;
   const logout = opts.loginScreenId
-    ? `<button type="button" class="app-topbar-action app-topbar-logout" data-app-logout data-login-url="${escAttr(shellUrl(opts, opts.loginScreenId))}">Log out</button>`
+    ? `<button type="button" class="profile-dropdown-item profile-dropdown-danger" data-app-logout data-login-url="${escAttr(shellUrl(opts, opts.loginScreenId))}">${icon("log-out")}<span>Log out</span></button>`
     : "";
-  const actions = profile || logout ? `<div class="app-topbar-actions">${profile}${logout}</div>` : "";
-  return brand + actions;
+  const sep = changePassword ? '<div class="profile-dropdown-sep"></div>' : "";
+  const menu = `<div class="profile-menu" data-profile-menu>
+    <button type="button" class="profile-trigger" data-profile-trigger aria-haspopup="true" aria-expanded="false">
+      ${icon("user")}<span>Account</span>${icon("chevron-down", "icon chevron")}
+    </button>
+    <div class="profile-dropdown" data-profile-dropdown hidden>
+      ${changePassword}${sep}${themeToggle}${logout}
+    </div>
+  </div>`;
+  return brand + `<div class="app-topbar-actions">${menu}</div>`;
 }
 
 // Plain <a href> links (real navigation, no JS needed for this part) — the active screen renders
@@ -826,6 +889,36 @@ export function renderScreen(
     font-family: inherit; text-decoration: none; display: inline-block;
   }
   .app-topbar-action:hover { background: rgba(255,255,255,0.22); }
+
+  /* Profile menu — the single dropdown trigger that holds Change Password / theme toggle / Log out,
+     structural on every screen a real app session is logged into, same zero-AI-involvement spirit
+     as the rest of this shell. */
+  .profile-menu { position: relative; }
+  .profile-trigger {
+    display: flex; align-items: center; gap: 7px; background: rgba(255,255,255,0.12); color: #fff;
+    border: 1px solid rgba(255,255,255,0.25); padding: 6px 12px 6px 10px; border-radius: 7px;
+    font-size: 12.5px; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .profile-trigger:hover { background: rgba(255,255,255,0.22); }
+  .profile-trigger .chevron { width: 12px; height: 12px; transition: transform 0.15s; }
+  .profile-trigger[aria-expanded="true"] .chevron { transform: rotate(180deg); }
+  .profile-dropdown {
+    position: absolute; top: calc(100% + 8px); right: 0; min-width: 210px; z-index: 50;
+    background: var(--clr-surface); border: 1px solid var(--clr-border); border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(15,23,42,0.18), 0 2px 8px rgba(15,23,42,0.08); padding: 6px; overflow: hidden;
+  }
+  .profile-dropdown[hidden] { display: none; }
+  .profile-dropdown-item {
+    display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box;
+    padding: 9px 10px; border-radius: 7px; border: none; background: none; cursor: pointer;
+    font-family: inherit; font-size: 13px; font-weight: 500; color: var(--clr-text); text-decoration: none;
+    text-align: left;
+  }
+  .profile-dropdown-item:hover { background: var(--clr-bg); }
+  .profile-dropdown-item .icon { color: var(--clr-muted); }
+  .profile-dropdown-danger { color: var(--clr-danger); }
+  .profile-dropdown-danger .icon { color: var(--clr-danger); }
+  .profile-dropdown-sep { height: 1px; background: var(--clr-border); margin: 5px 2px; }
 
   .app-body { display: flex; flex: 1; min-height: 0; }
   .app-nav { width: 210px; flex-shrink: 0; background: var(--clr-surface); border-right: 1px solid var(--clr-border); padding: 16px 12px; overflow-y: auto; }
@@ -1003,9 +1096,35 @@ export function renderScreen(
 
   /* mono: numeric-looking inputs get a monospace font for scannable data entry */
   body[data-mono="true"] input[type=number] { font-family: var(--font-mono); }
+
+  /* ---- Dark mode — a per-viewer preference (the Profile menu's toggle), layered on top of
+     whichever color theme is active; --clr-primary/--clr-secondary stay the theme's own hue in
+     both modes, only the neutral surface/text/border scale flips. color-scheme hints the browser's
+     own chrome (scrollbars, form control defaults) to match too. ---- */
+  body[data-color-scheme="dark"] {
+    color-scheme: dark;
+    --clr-bg: #0f172a; --clr-surface: #1e293b; --clr-border: #334155;
+    --clr-text: #e2e8f0; --clr-muted: #94a3b8;
+    --clr-primary-light: color-mix(in srgb, var(--clr-primary) 24%, transparent);
+    --shadow-card: 0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.25);
+  }
+  body[data-color-scheme="dark"] th,
+  body[data-color-scheme="dark"] tbody tr:hover td { background: #16213a; }
+  body[data-color-scheme="dark"] .field-wrap input:disabled,
+  body[data-color-scheme="dark"] .field-wrap textarea:disabled,
+  body[data-color-scheme="dark"] .field-wrap select:disabled { background: #16213a; color: #64748b; }
+  body[data-color-scheme="dark"] .btn-secondary { background: var(--clr-surface); }
+  body[data-color-scheme="dark"] .row-action-danger:hover { background: color-mix(in srgb, var(--clr-danger) 18%, transparent); }
+  body[data-color-scheme="dark"] .empty-icon { color: #475569; }
+  body[data-color-scheme="dark"] .skeleton-bar { background: linear-gradient(90deg, #1e293b 25%, #334155 37%, #1e293b 63%); background-size: 400% 100%; }
+  body[data-color-scheme="dark"] .toast-notice { background: #1e293b; color: #e2e8f0; }
+  body[data-color-scheme="dark"] .toast-error { background: #2a1416; color: #fca5a5; border-color: #7f1d1d; }
+  body[data-color-scheme="dark"] .toast-success { background: #0f2419; color: #86efac; border-color: #166534; }
+  body[data-color-scheme="dark"][data-header="light"] .app-topbar { border-bottom-color: var(--clr-border); }
 </style>
 </head>
 <body data-header="${t.header}" data-nav="${t.nav}" data-fields="${t.fields}" data-toolbar="${t.toolbar}" data-card="${t.card}" data-density="${t.density}" data-mono="${t.mono}">
+<script>try{if(localStorage.getItem("td_theme_scheme")==="dark")document.body.setAttribute("data-color-scheme","dark");}catch(e){}</script>
 <header class="app-topbar">
 ${renderTopBar(shellOpts)}
 </header>

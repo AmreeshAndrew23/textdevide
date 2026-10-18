@@ -765,17 +765,58 @@ describe("renderer: shell's built-in Log out + Profile controls", () => {
     const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "t", screens });
     expect(hasLogoutButton(html)).toBe(false);
   });
-  it("renders a Profile link in the topbar when loggedIn and a Profile screen exists, none otherwise", () => {
+  it("renders a Change Password link inside the Profile dropdown when loggedIn and a Profile screen exists, none otherwise", () => {
     // "Profile" (same name used by the sidebar nav's own real-screen listing, which is unrelated —
     // excluding a screen from THAT list is runtimeRender.ts's job, not renderer.ts's) — so these
-    // checks target the specific topbar action link, not any occurrence of the word anywhere.
-    const topbarProfileLink = /<a class="app-topbar-action" href="[^"]*\/screens\/prof\?[^"]*">Profile<\/a>/;
+    // checks target the specific dropdown item link, not any occurrence of the word anywhere.
+    const changePasswordLink = /<a class="profile-dropdown-item" href="[^"]*\/screens\/prof\?[^"]*">[\s\S]*?Change Password<\/span><\/a>/;
     const loggedInHtml = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: true, loginScreenId: "login", profileScreenId: "prof" });
-    expect(loggedInHtml).toMatch(topbarProfileLink);
+    expect(loggedInHtml).toMatch(changePasswordLink);
     const noneHtml = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: true, loginScreenId: "login", profileScreenId: null });
-    expect(noneHtml).not.toMatch(topbarProfileLink);
+    expect(noneHtml).not.toMatch(changePasswordLink);
     const anonHtml = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: false, profileScreenId: "prof" });
-    expect(anonHtml).not.toMatch(topbarProfileLink);
+    expect(anonHtml).not.toMatch(changePasswordLink);
+  });
+  it("the Profile dropdown always offers the theme toggle once logged in, regardless of Profile/login screens", () => {
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: true, loginScreenId: null, profileScreenId: null });
+    expect(html).toContain("data-theme-toggle");
+    expect(html).toContain('data-profile-menu');
+  });
+  it("never renders the Profile menu at all when not logged in — dark mode toggle included", () => {
+    // Checks the actual rendered element, not a bare attribute-name substring — the always-present
+    // client script's own querySelectorAll("[data-profile-menu]")/("[data-theme-toggle]") calls
+    // contain those same substrings regardless of whether any such element was ever rendered.
+    const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "dash", token: "", screens, loggedIn: false });
+    expect(html).not.toContain('class="profile-menu" data-profile-menu');
+    expect(html).not.toContain('class="profile-dropdown-item" data-theme-toggle');
+  });
+});
+
+describe("renderer: dark mode — a per-viewer localStorage preference, applied before first paint", () => {
+  const model = parseScreenModel(`<screen id="s" title="S"><ui/><events/></screen>`);
+  const html = renderScreen(model, { apiBase: "x", projectId: 1, screenId: "s", token: "t", loggedIn: true, loginScreenId: "login" });
+
+  it("includes an early inline script, right after <body>, that applies the saved preference before anything else renders", () => {
+    const bodyIdx = html.indexOf("<body ");
+    const earlyScriptIdx = html.indexOf("td_theme_scheme");
+    const headerIdx = html.indexOf("<header");
+    expect(bodyIdx).toBeGreaterThan(-1);
+    expect(earlyScriptIdx).toBeGreaterThan(bodyIdx);
+    expect(earlyScriptIdx).toBeLessThan(headerIdx);
+  });
+  it("defines dark-mode CSS overrides keyed off body[data-color-scheme=\"dark\"]", () => {
+    expect(html).toMatch(/body\[data-color-scheme="dark"\]\s*\{/);
+  });
+  it("the theme toggle button carries both icon variants and both labels as data attributes, not just one static label", () => {
+    expect(html).toContain('data-label-light="Switch to Dark Mode"');
+    expect(html).toContain('data-label-dark="Switch to Light Mode"');
+    expect(html).toContain("data-icon-light=");
+    expect(html).toContain("data-icon-dark=");
+  });
+  it("client script toggles the body attribute, persists the choice, and re-syncs the label/icon on click", () => {
+    expect(html).toContain('document.body.setAttribute("data-color-scheme", "dark")');
+    expect(html).toContain('document.body.removeAttribute("data-color-scheme")');
+    expect(html).toContain("localStorage.setItem(THEME_KEY");
   });
 });
 
