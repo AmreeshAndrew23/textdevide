@@ -216,18 +216,20 @@ export function findScreenForLabel(label: string, screens: ShellScreen[], curren
 function renderButton(b: ButtonItem, linkFor: Linker): string {
   const cls = BUTTON_CLASS[b.style] || BUTTON_CLASS.primary;
   // bulkCsv replaces the normal single data-click wiring entirely — the bulk handler fires this
-  // same click event itself, once per CSV row, so both firing would double-run it.
+  // same click event itself, once per CSV row, so both firing would double-run it. downloadTemplate
+  // is purely client-side (no server event at all), so it's independent of either.
   const wired = b.bulkCsv ? ` data-bulk-csv="${escAttr(b.bulkCsv)}"` : b.eventTypes.includes("click") ? " data-click" : "";
+  const template = b.downloadTemplate ? ` data-download-template="${escAttr(b.downloadTemplate)}"` : "";
   // Only a button with NO handler of its own becomes an automatic link — a Save/Login button that
   // runs real queries must never be hijacked just because its label contains a screen's name.
-  const href = wired ? null : linkFor(b.label);
+  const href = wired || template ? null : linkFor(b.label);
   const link = href ? ` data-nav-href="${escAttr(href)}"` : "";
   const btnIcon = inferButtonIcon(b);
   const iconHtml = btnIcon ? icon(btnIcon, "icon btn-icon") : "";
   // A click that runs a real query can take a visible moment (especially against a cold/slow
   // database) — a spinner on the SPECIFIC button clicked, not just a page-wide disable, is what
   // tells the user their click registered and something is actually happening.
-  return `<button type="button" id="${escAttr(b.id)}" data-button${wired}${link} class="${cls}"><span class="btn-spinner" hidden></span>${iconHtml}<span class="btn-label">${esc(b.label)}</span></button>`;
+  return `<button type="button" id="${escAttr(b.id)}" data-button${wired}${template}${link} class="${cls}"><span class="btn-spinner" hidden></span>${iconHtml}<span class="btn-label">${esc(b.label)}</span></button>`;
 }
 
 function renderStat(s: StatItem): string {
@@ -714,6 +716,24 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
           .finally(function () { runRow(i + 1); });
       }
       runRow(0);
+    });
+  });
+
+  // Download Template: a button with downloadTemplate="col1,col2,..." hands the browser a plain
+  // .csv file containing just that header row — no server round trip, so it works even if the
+  // backend is slow/offline. Shows the exact columns/order a bulkCsv paste box expects.
+  root.querySelectorAll("[data-download-template]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var header = btn.getAttribute("data-download-template") || "";
+      var blob = new Blob([header + "\\r\\n"], { type: "text/csv" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "import-template.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
     });
   });
 

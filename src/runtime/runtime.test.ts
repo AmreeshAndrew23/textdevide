@@ -464,6 +464,24 @@ describe("renderer: bulkCsv button — bulk import by replaying a single-row eve
   });
 });
 
+describe("renderer: downloadTemplate button — a client-side-only CSV header download", () => {
+  const xml = `<screen id="s" title="S">
+  <ui><button id="templateButton" label="Download Template" downloadTemplate="name,email,phone"/></ui>
+</screen>`;
+  const model = parseScreenModel(xml);
+  const html = renderScreen(model, { apiBase: "http://localhost:8001", projectId: 1, screenId: "s", token: "tok" });
+
+  it("renders data-download-template with the header text, no data-click, no nav link", () => {
+    expect(html).toContain('id="templateButton" data-button data-download-template="name,email,phone"');
+    expect(html).not.toMatch(/id="templateButton"[^>]*data-click/);
+    expect(html).not.toMatch(/id="templateButton"[^>]*data-nav-href/);
+  });
+  it("emits the client-side Blob-download handler with a real \\r\\n, not a literal control character", () => {
+    expect(html).toContain('querySelectorAll("[data-download-template]")');
+    expect(html).toContain('header + "\\r\\n"');
+  });
+});
+
 describe("renderer: buttons that name another screen become links", () => {
   const screens = [
     { id: "s_login", name: "Login Screen" },

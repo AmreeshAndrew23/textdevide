@@ -340,6 +340,15 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      pasted CSV to already contain numeric ids, since no end user pasting a spreadsheet has those).
      Do not add a <query source="..."> or any new event type for this — there isn't one; the entire
      mechanism is the existing single-row event, replayed.
+     Always pair a bulkCsv screen with a downloadTemplate button so the user knows exactly which
+     columns/order to paste, instead of guessing from the field's label text alone:
+       <button id="templateButton" label="Download Template" downloadTemplate="name,email,phone,gender,departmentName,courseName,batch"/>
+     downloadTemplate's value is the exact header row (comma-separated column names, matching the
+     bulkCsv field's expected headers exactly) — purely client-side, hands the browser a one-line
+     .csv file with that header, no server event at all. If the request also asks for an "Import"
+     entry point on another screen (e.g. a Student Registration screen gaining an "Import Students"
+     button), that's a plain <navigate> to the bulk-import screen — nothing new, same as any other
+     cross-screen button.
    - <stat id="statId" label="..." icon="..."/> — a single metric card (a big number + label), for a
      Dashboard/landing screen. icon is one of: home, users, book, building, calendar, folder,
      settings, chart, file, lock — pick whichever best names WHAT the number represents (users for a

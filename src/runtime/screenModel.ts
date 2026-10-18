@@ -74,7 +74,14 @@ export type GridItem = {
 // normal Save already has, just invoked N times with that row's columns overlaid onto the form's
 // other field values. Lets any "create one row" screen become a bulk importer with zero new
 // engine/query concepts, only a different client-side trigger.
-export type ButtonItem = { kind: "button"; id: string; label: string; style: string; eventTypes: string[]; bulkCsv: string | null };
+// downloadTemplate: a comma-separated header row (e.g. "name,email,phone") this button hands the
+// browser as a plain .csv file download — pure client-side, no server round trip at all. Lets a
+// bulk-import screen show exactly which columns/order the paste box expects, generated from data
+// that already exists (the header text the AI wrote once) rather than the user guessing it.
+export type ButtonItem = {
+  kind: "button"; id: string; label: string; style: string; eventTypes: string[];
+  bulkCsv: string | null; downloadTemplate: string | null;
+};
 export type FieldsetItem = { kind: "fieldset"; legend: string; items: UiItem[] };
 // <stat id="totalStudents" label="Total Students" icon="users"/> — a Dashboard metric card.
 // Populated the exact same way a grid already is: a <map target="stat:totalStudents"> inside the
@@ -174,6 +181,7 @@ function parseButton(el: XmlElement, eventsByElement: Map<string, string[]>): Bu
   return {
     kind: "button", id, label: attr(el, "label", id), style: attr(el, "style", "primary"),
     eventTypes: eventsByElement.get(id) || [], bulkCsv: el.getAttribute("bulkCsv") || null,
+    downloadTemplate: el.getAttribute("downloadTemplate") || null,
   };
 }
 
