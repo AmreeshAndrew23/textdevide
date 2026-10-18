@@ -491,25 +491,75 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      generation time. When the request specifically asks for a page where an admin role can change
      which roles can open which screen WITHOUT regenerating anything, generate a table literally
      named "ScreenPermission" (screenId, screenName, requiredRoles — same comma-separated role-list
-     format requiredRole/visibleRoles already use) and a screen that manages it:
-     - A "which screen" field populated from a special built-in query that needs no <statement> at
-       all — just source="project:screens" on the <query> itself:
+     format requiredRole/visibleRoles already use) and a screen that manages it.
+     DO NOT improvise this screen's queries from the general CRUD pattern — copy the <queries> and
+     <events> blocks below EXACTLY, verbatim, changing only requiredRole's value. The single most
+     common mistake here is writing listScreens as a normal Cypher query against ScreenPermission
+     itself (MATCH (s:ScreenPermission) RETURN s.screenId, s.screenName) — that is WRONG: it can
+     only ever return screens that already have a saved row, so the dropdown stays permanently
+     empty and nothing can ever be saved. The dropdown of screens to CHOOSE from and the grid of
+     screens that ALREADY HAVE a saved permission are two different queries with two different
+     answers — never merge them into one query id.
+     There is also no ":label" suffix on any field: source anywhere in this engine — only the
+     field's own submitted value is ever available server-side, never the text of whichever
+     <option> happened to be displayed for it. Do not invent one to capture a dropdown's display
+     text; this screen does not need it (screenName is cosmetic only, not used by any permission
+     check — see mergeScreenPermission below, which deliberately leaves it out).
+     Required, verbatim template — the ONLY placeholders are <TopRole> (this app's top role, e.g.
+     SuperUser) in requiredRole, and the <screen id>/<title>/module/purpose/header/accessibility
+     wrapper around it, which follow the normal per-screen conventions:
+       <queries>
          <query id="listScreens" source="project:screens"/>
-       This returns {screenId, screenName} rows for every OTHER screen in the project (never this
-       RBAC screen itself — it is structurally excluded, so this screen can never restrict its own
-       access by mistake). Bind it with optionValue="screenId" optionLabel="screenName" on a
-       type="select" field, populated via the normal load-event <map target="field:x:options">
-       pattern — exactly like any other data-backed dropdown, just with this one special query
-       source instead of a Cypher <statement>.
-     - requiredRoles on the form: a plain required text field (comma-separated role names) is enough
-       — do not invent a special control type for it.
-     - Save MERGEs a ScreenPermission row keyed on the chosen screenId (so re-saving the same screen
-       updates its existing row rather than creating duplicates); a Delete action removes the row
-       entirely, which reverts that screen to whatever requiredRole it already had in its own XML.
-     - A grid lists existing ScreenPermission rows (Screen, Required Roles) with Edit/Delete.
-     - requiredRole="<this app's top role>" on this screen itself, same as Role Management/User
-       Management — this one screen's OWN access is never itself dynamically configurable, since
-       it's the root of trust for every other screen's access.
+         <query id="listScreenPermissions">
+           <dataSource ref="mainDB"/>
+           <statement>MATCH (sp:ScreenPermission) RETURN sp.screenId AS screenId, sp.screenName AS screenName, sp.requiredRoles AS requiredRoles ORDER BY sp.screenName</statement>
+         </query>
+         <query id="mergeScreenPermission">
+           <dataSource ref="mainDB"/>
+           <statement>MERGE (sp:ScreenPermission {screenId: $screenId}) SET sp.requiredRoles = $requiredRoles</statement>
+           <parameters>
+             <parameter name="screenId" source="field:screenId"/>
+             <parameter name="requiredRoles" source="field:requiredRoles"/>
+           </parameters>
+         </query>
+         <query id="deleteScreenPermission">
+           <dataSource ref="mainDB"/>
+           <statement>MATCH (sp:ScreenPermission {screenId: $screenId}) DELETE sp</statement>
+           <parameters>
+             <parameter name="screenId" source="field:screenId"/>
+           </parameters>
+         </query>
+       </queries>
+       <!-- field "screenId": type="select" optionValue="screenId" optionLabel="screenName" -->
+       <!-- field "requiredRoles": type="text", persistenceMapping="ScreenPermission.requiredRoles" -->
+       <!-- grid "permissionsGrid": bound to listScreenPermissions' rows, columns screenId + requiredRoles, Edit/Delete actions -->
+       <events>
+         <event type="load" element="<screen id>">
+           <execute query="listScreens">
+             <map result="rows" target="field:screenId:options"/>
+           </execute>
+           <execute query="listScreenPermissions">
+             <map result="rows" target="grid:permissionsGrid"/>
+           </execute>
+         </event>
+         <event type="click" element="saveButton">
+           <execute query="mergeScreenPermission"/>
+           <execute query="listScreenPermissions">
+             <map result="rows" target="grid:permissionsGrid"/>
+           </execute>
+           <message type="success" value="Saved."/>
+         </event>
+         <event type="click" element="deleteButton">
+           <execute query="deleteScreenPermission"/>
+           <execute query="listScreenPermissions">
+             <map result="rows" target="grid:permissionsGrid"/>
+           </execute>
+           <message type="success" value="Deleted."/>
+         </event>
+       </events>
+     requiredRole="<TopRole>" on the <screen> itself, same as Role Management/User Management —
+     this one screen's OWN access is never itself dynamically configurable, since it's the root of
+     trust for every other screen's access.
      This only ever controls whether a role can open/interact with a WHOLE screen — field-level
      (visibleRoles) and single-event-level (requiredRole on one <event>) access stay exactly as they
      already are, generated into the XML directly; they are not part of this dynamic system.

@@ -1045,6 +1045,29 @@ describe("engine: hash=\"true\" on a <parameter> — real bcrypt, not plaintext"
   });
 });
 
+describe("engine: a literal <parameter> source never leaks an invented \"literal:\" prefix", () => {
+  // The model has twice written source="literal:Staff" (mirroring field:/session: syntax, but
+  // never a real prefix this engine recognizes) expecting the literal value "Staff" — with no
+  // defensive stripping, that whole string including the prefix gets stored verbatim.
+  const xml = `<screen id="s" title="S">
+  <queries><query id="ins"><statement>CREATE (a:Account {roleId: $roleId, verified: $verified})</statement>
+    <parameters>
+      <parameter name="roleId" source="literal:Staff"/>
+      <parameter name="verified" source="false"/>
+    </parameters></query></queries>
+  <ui><button id="save" label="Save"/></ui>
+  <events><event type="click" element="save"><execute query="ins"/></event></events>
+</screen>`;
+
+  it("strips an invented literal: prefix down to the real value", async () => {
+    let seenParams: Record<string, unknown> = {};
+    const exec: QueryExecutor = async (statement, params) => { seenParams = params; return { rows: [], count: 0 }; };
+    await runEvent(exec, {}, xml, "save", "click", {});
+    expect(seenParams.roleId).toBe("Staff");
+    expect(seenParams.verified).toBe("false"); // an ordinary literal with no prefix is untouched
+  });
+});
+
 describe("engine: passwordField/passwordColumn — login verification against a stored hash", () => {
   const xml = `<screen id="s" title="S">
   <queries>

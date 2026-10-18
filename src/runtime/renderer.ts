@@ -412,12 +412,27 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     (messages || []).forEach(function (m) {
       var kind = m.messageType === "error" ? "error" : m.messageType === "success" ? "success" : "notice";
       var div = document.createElement("div");
-      div.className = "toast toast-" + kind;
-      div.innerHTML = (TOAST_ICONS[kind] || "") + '<span class="toast-text"></span><button type="button" class="toast-close" aria-label="Dismiss">' + ${JSON.stringify(icon("x", "icon"))} + "</button>";
+      // sticky: a one-time value (a generated temp password) the user needs time to read and
+      // copy — no auto-dismiss timer, and a Copy button instead of relying on manual text selection.
+      div.className = "toast toast-" + kind + (m.sticky ? " toast-sticky" : "");
+      div.innerHTML = (TOAST_ICONS[kind] || "") + '<span class="toast-text"></span>' +
+        (m.sticky ? '<button type="button" class="toast-copy">Copy</button>' : "") +
+        '<button type="button" class="toast-close" aria-label="Dismiss">' + ${JSON.stringify(icon("x", "icon"))} + "</button>";
       div.querySelector(".toast-text").textContent = m.value;
       div.querySelector(".toast-close").addEventListener("click", function () { div.remove(); });
+      if (m.sticky) {
+        var copyBtn = div.querySelector(".toast-copy");
+        copyBtn.addEventListener("click", function () {
+          var text = div.querySelector(".toast-text").textContent;
+          if (!navigator.clipboard) return;
+          navigator.clipboard.writeText(text).then(function () {
+            copyBtn.textContent = "Copied";
+            setTimeout(function () { copyBtn.textContent = "Copy"; }, 1500);
+          }).catch(function () {});
+        });
+      }
       box.appendChild(div);
-      if (kind !== "error") setTimeout(function () { div.remove(); }, 4500);
+      if (kind !== "error" && !m.sticky) setTimeout(function () { div.remove(); }, 4500);
     });
   }
 
@@ -1046,6 +1061,15 @@ export function renderScreen(
   .toast-error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
   .toast-success { background: #f0fdf4; color: var(--clr-success); border: 1px solid #bbf7d0; }
   @keyframes toast-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
+  /* sticky: a one-time credential (a generated temp password) that stays until the user dismisses
+     it, with a monospace value and its own Copy button — distinct from a fleeting status toast. */
+  .toast-sticky { max-width: 420px; }
+  .toast-sticky .toast-text { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px; word-break: break-all; }
+  .toast-copy {
+    background: rgba(15,23,42,0.08); border: none; border-radius: 6px; padding: 4px 9px;
+    font-size: 12px; font-weight: 600; cursor: pointer; color: inherit; white-space: nowrap;
+  }
+  .toast-copy:hover { background: rgba(15,23,42,0.14); }
 
   /* ---- Structural preset variants, driven by data-* attributes on <body> ---- */
   /* header: gradient (default, above) | solid | light */

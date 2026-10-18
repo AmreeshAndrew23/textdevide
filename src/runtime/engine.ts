@@ -375,7 +375,10 @@ function resolveQueryParams(
       }
       resolved[pname] = raw;
     } else {
-      resolved[pname] = source; // literal default from the XML itself
+      // literal default from the XML itself — defensively strip a "literal:" prefix the model
+      // sometimes invents (mirroring field:/session: syntax) even though it was never valid: with
+      // no stripping, source="literal:Staff" would store the literal STRING "literal:Staff".
+      resolved[pname] = source.startsWith("literal:") ? source.slice("literal:".length) : source;
     }
     // Applied last, regardless of source — covers both a real signup's submitted password and a
     // <generate>-produced temp password through the same mechanism. Never stored/sent raw.
@@ -387,7 +390,10 @@ function resolveQueryParams(
 export type EventAction =
   | { type: "map"; target: string; value: unknown }
   | { type: "set"; target: string; value: unknown }
-  | { type: "message"; messageType: string; value: string }
+  // sticky: true suppresses the client's usual auto-dismiss timer and swaps in a "Copy" button —
+  // for a one-time value (a generated temp password) the user needs time to read and copy, not a
+  // 4.5s toast. Only meaningful on the client; the engine just carries the flag through.
+  | { type: "message"; messageType: string; value: string; sticky?: boolean }
   | { type: "navigate"; screenId: string; screenName: string }
   | { type: "session"; action: "start" | "end"; identity?: string; role?: string; mustChangePassword?: boolean }
   // Never forwarded to the client (filtered out the same way a "session" action is) — the caller
@@ -694,6 +700,7 @@ async function runStep(
       type: "message",
       messageType: inner.getAttribute("type") || "info",
       value: resolveTemplate(inner.getAttribute("value") || "", result, fieldValues),
+      ...(inner.getAttribute("sticky") === "true" ? { sticky: true } : {}),
     });
   } else if (inner.tagName === "navigate") {
     runNavigate(inner, siblingScreens, actions);
