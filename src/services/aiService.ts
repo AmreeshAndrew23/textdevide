@@ -321,6 +321,25 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      <button> in this screen that has its own <event type="click"> doing the actual delete — see the
      worked pattern after rule 6.
    - <button id="buttonId" label="..." style="primary|secondary|danger|ghost"/>
+   - BULK IMPORT: when the request specifically asks for a way to create many rows at once from
+     pasted/uploaded data (e.g. "bulk import students"), do NOT invent a new query/event mechanism
+     for it — add bulkCsv="<fieldId>" to the SAME button that already does a normal single-row
+     create, pointing at a type="textarea" field holding pasted CSV text:
+       <field id="csvData" label="Paste CSV (name,email,phone,gender,departmentName,courseName,batch)" type="textarea"/>
+       <button id="importButton" label="Import" bulkCsv="csvData"/>
+     The button's own <event type="click" element="importButton"> stays EXACTLY the same single-row
+     create/generate/hash/email logic a normal "add one record" screen already has — write it as if
+     the screen only ever creates one row at a time. bulkCsv is purely a client-side trigger: the
+     renderer parses the textarea's first line as headers and each later line as one data row
+     (naive comma-split, no quoted-field support — document that in the field's label), then fires
+     this SAME click event once per row, sequentially, merging that row's columns on top of the
+     form's other field values each time. Because headers become field values directly, CSV column
+     names MUST exactly match this screen's own field ids (e.g. a column named "departmentName"
+     needs a lookup query in the create event that resolves Department by name to get departmentId,
+     same MATCH-by-name-then-CREATE pattern as any other lookup-before-create — never require the
+     pasted CSV to already contain numeric ids, since no end user pasting a spreadsheet has those).
+     Do not add a <query source="..."> or any new event type for this — there isn't one; the entire
+     mechanism is the existing single-row event, replayed.
    - <stat id="statId" label="..." icon="..."/> — a single metric card (a big number + label), for a
      Dashboard/landing screen. icon is one of: home, users, book, building, calendar, folder,
      settings, chart, file, lock — pick whichever best names WHAT the number represents (users for a

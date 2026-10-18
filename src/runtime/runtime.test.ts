@@ -440,6 +440,30 @@ describe("engine: unconditional nested steps and save feedback", () => {
   });
 });
 
+describe("renderer: bulkCsv button — bulk import by replaying a single-row event per CSV row", () => {
+  const xml = `<screen id="s" title="S">
+  <queries><query id="ins"><statement>CREATE (a:Student {name: $name})</statement>
+    <parameters><parameter name="name" source="field:name"/></parameters></query></queries>
+  <ui>
+    <field id="csvData" label="CSV" type="textarea"/>
+    <field id="name" label="Name" type="text"/>
+    <button id="importButton" label="Import" bulkCsv="csvData"/>
+  </ui>
+  <events><event type="click" element="importButton"><execute query="ins"/></event></events>
+</screen>`;
+  const model = parseScreenModel(xml);
+  const html = renderScreen(model, { apiBase: "http://localhost:8001", projectId: 1, screenId: "s", token: "tok" });
+
+  it("renders data-bulk-csv pointing at the CSV field, never data-click", () => {
+    expect(html).toContain('id="importButton" data-button data-bulk-csv="csvData"');
+    expect(html).not.toMatch(/id="importButton"[^>]*data-click/);
+  });
+  it("emits the client-side per-row replay handler", () => {
+    expect(html).toContain('querySelectorAll("[data-bulk-csv]")');
+    expect(html).toContain("runRow(i + 1)"); // sequential, not parallel
+  });
+});
+
 describe("renderer: buttons that name another screen become links", () => {
   const screens = [
     { id: "s_login", name: "Login Screen" },

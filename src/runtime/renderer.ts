@@ -215,7 +215,9 @@ export function findScreenForLabel(label: string, screens: ShellScreen[], curren
 
 function renderButton(b: ButtonItem, linkFor: Linker): string {
   const cls = BUTTON_CLASS[b.style] || BUTTON_CLASS.primary;
-  const wired = b.eventTypes.includes("click") ? " data-click" : "";
+  // bulkCsv replaces the normal single data-click wiring entirely — the bulk handler fires this
+  // same click event itself, once per CSV row, so both firing would double-run it.
+  const wired = b.bulkCsv ? ` data-bulk-csv="${escAttr(b.bulkCsv)}"` : b.eventTypes.includes("click") ? " data-click" : "";
   // Only a button with NO handler of its own becomes an automatic link — a Save/Login button that
   // runs real queries must never be hijacked just because its label contains a screen's name.
   const href = wired ? null : linkFor(b.label);
@@ -657,6 +659,62 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
 
   root.querySelectorAll("[data-click]").forEach(function (btn) {
     btn.addEventListener("click", function () { fireEvent(btn.id, "click", undefined, btn); });
+  });
+
+  // Bulk import: a button with bulkCsv="<fieldId>" runs its OWN click event once per data row
+  // instead of once, reusing the exact same single-row query/event logic a normal Save already
+  // has — nothing server-side changes. Naive comma-split (no quoted-field support), which is fine
+  // for name/email/phone/department-name style columns; documented as a known limit, not a bug.
+  // Sequential, not parallel — simpler error accounting and no risk of overwhelming a cold backend.
+  root.querySelectorAll("[data-bulk-csv]").forEach(function (btn) {
+    var csvFieldId = btn.getAttribute("data-bulk-csv");
+    btn.addEventListener("click", function () {
+      var csvWrap = root.querySelector('[data-field="' + csvFieldId + '"]');
+      var csvEl = csvWrap ? csvWrap.querySelector(FIELD_CONTROL_SELECTOR) : null;
+      var raw = csvEl ? String(csvEl.value || "") : "";
+      var lines = raw.split(/\\r?\\n/).map(function (l) { return l.trim(); }).filter(function (l) { return l.length; });
+      if (lines.length < 2) {
+        showMessages([{ messageType: "error", value: "Paste a header row and at least one data row." }]);
+        return;
+      }
+      var headers = lines[0].split(",").map(function (h) { return h.trim(); });
+      var rows = lines.slice(1).map(function (line) {
+        var cells = line.split(",").map(function (c) { return c.trim(); });
+        var row = {};
+        headers.forEach(function (h, i) { row[h] = cells[i] !== undefined ? cells[i] : ""; });
+        return row;
+      });
+      var base = allFieldValues();
+      var ok = 0, fail = 0;
+      setBusy(true, btn);
+      function runRow(i) {
+        if (i >= rows.length) {
+          setBusy(false, btn);
+          showMessages([{
+            messageType: fail ? "error" : "success",
+            value: ok + " imported" + (fail ? ", " + fail + " failed — check each row's data." : "."),
+            sticky: fail > 0,
+          }]);
+          return;
+        }
+        var values = {};
+        for (var k in base) values[k] = base[k];
+        for (var k2 in rows[i]) values[k2] = rows[i][k2];
+        fetch(API_BASE + "/api/projects/" + PROJECT_ID + "/screens/" + SCREEN_ID + "/run-event", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + TOKEN },
+          body: JSON.stringify({ elementId: btn.id, eventType: "click", fieldValues: values }),
+        })
+          .then(function (res) { return res.json(); })
+          .then(function (data) {
+            var hadError = (data.actions || []).some(function (a) { return a.type === "message" && a.messageType === "error"; });
+            if (hadError) fail++; else ok++;
+          })
+          .catch(function () { fail++; })
+          .finally(function () { runRow(i + 1); });
+      }
+      runRow(0);
+    });
   });
 
   // A handler-less button whose label names another screen is a plain link to that screen.

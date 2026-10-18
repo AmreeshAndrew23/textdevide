@@ -68,7 +68,13 @@ export type GridAction = { type: "edit" } | { type: "delete"; target: string; co
 export type GridItem = {
   kind: "grid"; id: string; label: string; emptyMessage: string; columns: GridColumn[]; eventTypes: string[]; actions: GridAction[];
 };
-export type ButtonItem = { kind: "button"; id: string; label: string; style: string; eventTypes: string[] };
+// bulkCsv: the id of a textarea field on this same screen holding pasted CSV text (header row +
+// data rows). When set, the button runs its own click event once PER DATA ROW instead of once —
+// see renderer.ts's data-bulk-csv handler — reusing the exact same single-row event/query logic a
+// normal Save already has, just invoked N times with that row's columns overlaid onto the form's
+// other field values. Lets any "create one row" screen become a bulk importer with zero new
+// engine/query concepts, only a different client-side trigger.
+export type ButtonItem = { kind: "button"; id: string; label: string; style: string; eventTypes: string[]; bulkCsv: string | null };
 export type FieldsetItem = { kind: "fieldset"; legend: string; items: UiItem[] };
 // <stat id="totalStudents" label="Total Students" icon="users"/> — a Dashboard metric card.
 // Populated the exact same way a grid already is: a <map target="stat:totalStudents"> inside the
@@ -165,7 +171,10 @@ function parseField(el: XmlElement, eventsByElement: Map<string, string[]>): Fie
 
 function parseButton(el: XmlElement, eventsByElement: Map<string, string[]>): ButtonItem {
   const id = attr(el, "id");
-  return { kind: "button", id, label: attr(el, "label", id), style: attr(el, "style", "primary"), eventTypes: eventsByElement.get(id) || [] };
+  return {
+    kind: "button", id, label: attr(el, "label", id), style: attr(el, "style", "primary"),
+    eventTypes: eventsByElement.get(id) || [], bulkCsv: el.getAttribute("bulkCsv") || null,
+  };
 }
 
 function parseGridActions(el: XmlElement): GridAction[] {
