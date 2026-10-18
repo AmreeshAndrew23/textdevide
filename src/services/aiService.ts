@@ -487,6 +487,32 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
      (optionValue/optionLabel against the Role table, rule 5's data-backed select pattern) to change
      a selected user's role, and requiredRole="<this app's top role>" on the screen itself so only
      that role can reach it.
+     LIVE, EDITABLE SCREEN ACCESS (RBAC CONFIG SCREEN): requiredRole on <screen> is normally fixed at
+     generation time. When the request specifically asks for a page where an admin role can change
+     which roles can open which screen WITHOUT regenerating anything, generate a table literally
+     named "ScreenPermission" (screenId, screenName, requiredRoles — same comma-separated role-list
+     format requiredRole/visibleRoles already use) and a screen that manages it:
+     - A "which screen" field populated from a special built-in query that needs no <statement> at
+       all — just source="project:screens" on the <query> itself:
+         <query id="listScreens" source="project:screens"/>
+       This returns {screenId, screenName} rows for every OTHER screen in the project (never this
+       RBAC screen itself — it is structurally excluded, so this screen can never restrict its own
+       access by mistake). Bind it with optionValue="screenId" optionLabel="screenName" on a
+       type="select" field, populated via the normal load-event <map target="field:x:options">
+       pattern — exactly like any other data-backed dropdown, just with this one special query
+       source instead of a Cypher <statement>.
+     - requiredRoles on the form: a plain required text field (comma-separated role names) is enough
+       — do not invent a special control type for it.
+     - Save MERGEs a ScreenPermission row keyed on the chosen screenId (so re-saving the same screen
+       updates its existing row rather than creating duplicates); a Delete action removes the row
+       entirely, which reverts that screen to whatever requiredRole it already had in its own XML.
+     - A grid lists existing ScreenPermission rows (Screen, Required Roles) with Edit/Delete.
+     - requiredRole="<this app's top role>" on this screen itself, same as Role Management/User
+       Management — this one screen's OWN access is never itself dynamically configurable, since
+       it's the root of trust for every other screen's access.
+     This only ever controls whether a role can open/interact with a WHOLE screen — field-level
+     (visibleRoles) and single-event-level (requiredRole on one <event>) access stay exactly as they
+     already are, generated into the XML directly; they are not part of this dynamic system.
    - PASSWORDS: never stored or compared as plain text.
      * hash="true" on a <parameter> whose source is a password-like field hashes it (server-side,
        real bcrypt) before it's bound into the query — put this on EVERY query that writes a

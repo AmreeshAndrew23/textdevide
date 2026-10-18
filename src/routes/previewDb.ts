@@ -4,7 +4,7 @@ import { getOwnedProject, getProjectPublic } from "../services/projectStore.js";
 import { PreviewRowsRequestSchema, RunEventRequestSchema } from "../models/schemas.js";
 import { requireAuth } from "./authGuard.js";
 import { getCurrentUser, HttpError } from "../services/authService.js";
-import { runEvent, isAnonymousEvent, eventRequiredRole, eventAllowsPasswordChange, type SiblingScreen } from "../runtime/engine.js";
+import { runEvent, isAnonymousEvent, eventRequiredRole, screenRequiredRole, eventAllowsPasswordChange, type SiblingScreen } from "../runtime/engine.js";
 import * as store from "../runtime/neo4jStore.js";
 import { raceAbort, requestAbortSignal, RequestAbortedError } from "../utils/requestAbort.js";
 import { cookieName, verifyAppSession, signAppSession, APP_SESSION_COOKIE_OPTS } from "../services/appSession.js";
@@ -141,6 +141,17 @@ export default async function previewDbRoutes(app: FastifyInstance) {
     const required = eventRequiredRole(screen.xml, body.elementId, body.eventType);
     if (required && !isBuilderPreview && (!sessionRole || !required.includes(sessionRole))) {
       throw new HttpError(403, "You don't have permission to do this.");
+    }
+    // The SCREEN's own requiredRole, not just this one event's — previously only checked at render
+    // time (runtimeRender.ts), which meant an event with no requiredRole of its own on an otherwise
+    // gated screen could still be fired directly here, bypassing the screen-level gate entirely.
+    // A live ScreenPermission row (see neo4jStore.ts) REPLACES the static XML value when present —
+    // skipped entirely for the builder's own preview, which already bypasses every gate below.
+    if (!isBuilderPreview) {
+      const screenRequired = (await store.getScreenPermissionOverride(project.id, screen.id)) ?? screenRequiredRole(screen.xml);
+      if (screenRequired && (!sessionRole || !screenRequired.includes(sessionRole))) {
+        throw new HttpError(403, "You don't have permission to do this.");
+      }
     }
     // A session issued with a temporary password can do nothing else until it's changed — the
     // Change Password screen's own save event is the ONLY one marked allowPasswordChange="true".

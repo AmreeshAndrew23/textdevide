@@ -121,8 +121,16 @@ export function resolveTemplate(value: string, result: QueryResult, fieldValues:
 // the <query> itself, not a parameter — a login query can't compare a submitted password against a
 // stored bcrypt hash in Cypher at all (the same password hashes differently every time), so that
 // comparison happens here in JS instead; see the passwordField/passwordColumn handling in runExecute.
+// builtinSource="project:screens" also lives on the <query> itself — a query id with this attribute
+// needs no <statement> at all; runExecute returns this project's OTHER screens (same list/same
+// exclusion of the currently-running screen already used for <navigate> resolution) as rows
+// directly, with no Neo4j round trip — used to populate a picker of "which screen" without ever
+// exposing the real (Td-prefixed, AI-unreachable) screen list through a Cypher query.
 type QueryParam = { source: string; hash: boolean };
-type ParsedQuery = { statement: string; params: Record<string, QueryParam>; passwordField: string | null; passwordColumn: string | null };
+type ParsedQuery = {
+  statement: string; params: Record<string, QueryParam>;
+  passwordField: string | null; passwordColumn: string | null; builtinSource: string | null;
+};
 
 function parseQueries(root: XmlElement): Map<string, ParsedQuery> {
   const queries = new Map<string, ParsedQuery>();
@@ -141,6 +149,7 @@ function parseQueries(root: XmlElement): Map<string, ParsedQuery> {
       statement, params,
       passwordField: q.getAttribute("passwordField"),
       passwordColumn: q.getAttribute("passwordColumn"),
+      builtinSource: q.getAttribute("source"),
     });
   }
   return queries;
@@ -574,18 +583,30 @@ async function runExecute(
     console.warn(`run_event: unknown query id ${JSON.stringify(queryId)}`);
     return false;
   }
-  // Validated before a write ever reaches the database — same transaction, so a rejected write
-  // leaves nothing partially applied. A read-only query (list/search/filter/sort) never matches
-  // WRITE_STATEMENT_RE, so this never blocks anything but an actual save/delete.
-  if (WRITE_STATEMENT_RE.test(query.statement)) {
-    const violations = await validateWriteFields(query, fieldValues, fieldMeta, fieldPersistence, entities, exec, sessionRole);
-    if (violations.length) {
-      actions.push(...violations, { type: "stop" });
-      return true;
+
+  let result: QueryResult;
+  if (query.builtinSource === "project:screens") {
+    // No <statement>, no Neo4j round trip — this project's OTHER screens (never the one currently
+    // running), the exact same list <navigate> already resolves against, returned as rows a <map>
+    // can bind onto a dropdown exactly like any other query's result. Lets a generated "which
+    // screen" picker exist without ever exposing the real (Td-prefixed, AI-unreachable) screen list
+    // through actual Cypher.
+    const rows = siblingScreens.map((s) => ({ screenId: s.id, screenName: s.name }));
+    result = { rows, count: rows.length };
+  } else {
+    // Validated before a write ever reaches the database — same transaction, so a rejected write
+    // leaves nothing partially applied. A read-only query (list/search/filter/sort) never matches
+    // WRITE_STATEMENT_RE, so this never blocks anything but an actual save/delete.
+    if (WRITE_STATEMENT_RE.test(query.statement)) {
+      const violations = await validateWriteFields(query, fieldValues, fieldMeta, fieldPersistence, entities, exec, sessionRole);
+      if (violations.length) {
+        actions.push(...violations, { type: "stop" });
+        return true;
+      }
     }
+    const params = resolveQueryParams(query.params, fieldValues, fieldPersistence, entities, fieldMeta, sessionIdentity, sessionRole);
+    result = await exec(query.statement, params);
   }
-  const params = resolveQueryParams(query.params, fieldValues, fieldPersistence, entities, fieldMeta, sessionIdentity, sessionRole);
-  let result = await exec(query.statement, params);
 
   // Login verification: the Cypher WHERE clause can never match a bcrypt hash (the same password
   // hashes differently every time), so this comparison happens here instead, right after the query

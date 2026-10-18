@@ -6,6 +6,7 @@ import { parseScreenModel, ScreenParseError } from "../runtime/screenModel.js";
 import { hasAnonymousEntry, screenRequiredRole, hasPasswordChangeEntry } from "../runtime/engine.js";
 import { renderScreen } from "../runtime/renderer.js";
 import { cookieName, verifyAppSession, APP_SESSION_COOKIE_OPTS } from "../services/appSession.js";
+import { getScreenPermissionOverride } from "../runtime/neo4jStore.js";
 
 type Screen = { id: string; name?: string; xml?: string };
 
@@ -80,9 +81,13 @@ export default async function runtimeRenderRoutes(app: FastifyInstance) {
         // same bypass allowAnonymous/session concerns already get. A real end-user session must have
         // a role in the screen's requiredRole list, if one is declared.
         const isBuilderPreview = Boolean(token);
-        const required = screenRequiredRole(screen.xml);
-        if (required && !isBuilderPreview && (!sessionRole || !required.includes(sessionRole))) {
-          throw new HttpError(403, "You don't have permission to view this screen.");
+        // A live ScreenPermission row (see neo4jStore.ts) REPLACES the static XML value when
+        // present — skipped entirely for the builder's own preview, which already bypasses this.
+        if (!isBuilderPreview) {
+          const required = (await getScreenPermissionOverride(project.id, screen.id)) ?? screenRequiredRole(screen.xml);
+          if (required && (!sessionRole || !required.includes(sessionRole))) {
+            throw new HttpError(403, "You don't have permission to view this screen.");
+          }
         }
         // A session issued with a temporary password can only reach the Change Password screen
         // (hasPasswordChangeEntry — the one with an allowPasswordChange="true" event) until it's

@@ -1225,3 +1225,33 @@ describe("renderer: grid skeleton loading state", () => {
     expect(html).toContain('querySelectorAll("tbody.skeleton")');
   });
 });
+
+describe("engine: source=\"project:screens\" — a screen-picker query with no <statement> and no executor round trip", () => {
+  const xml = `<screen id="rbac" title="RBAC">
+  <queries><query id="listScreens" source="project:screens"/></queries>
+  <ui><button id="go" label="Go"/></ui>
+  <events><event type="click" element="go"><execute query="listScreens"><map result="rows" target="field:x:options"/></execute></event></events>
+</screen>`;
+
+  it("returns this project's OTHER screens as rows, without ever calling the executor", async () => {
+    let execCalled = false;
+    const exec: QueryExecutor = async () => { execCalled = true; return { rows: [], count: 0 }; };
+    const siblingScreens = [{ id: "s1", name: "Department Master" }, { id: "s2", name: "Student Master" }];
+    const actions = await runEvent(exec, {}, xml, "go", "click", {}, siblingScreens);
+    const mapAction = actions.find((a) => a.type === "map") as { value: unknown };
+    expect(mapAction.value).toEqual([
+      { screenId: "s1", screenName: "Department Master" },
+      { screenId: "s2", screenName: "Student Master" },
+    ]);
+    expect(execCalled).toBe(false);
+  });
+  it("never includes the currently-running screen, the same exclusion <navigate> already relies on", async () => {
+    const exec: QueryExecutor = async () => ({ rows: [], count: 0 });
+    // siblingScreens is defined (by runtimeRender.ts, which builds it) to already exclude the
+    // current screen — this just proves the query faithfully reflects whatever list it's given,
+    // so an RBAC screen can never end up listing (and therefore restricting) itself.
+    const actions = await runEvent(exec, {}, xml, "go", "click", {}, []);
+    const mapAction = actions.find((a) => a.type === "map") as { value: unknown };
+    expect(mapAction.value).toEqual([]);
+  });
+});

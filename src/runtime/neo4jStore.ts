@@ -189,6 +189,32 @@ export async function tableExists(projectId: number, entity: string): Promise<bo
   }
 }
 
+// Backend-owned lookup for a screen's DYNAMIC permission override (see runtime/engine.ts's
+// screenRequiredRole/eventRequiredRole for the static XML fallback) — a small, fixed query this
+// code runs itself, never reachable or alterable by anything in the screen's own AI-authored
+// Cypher, same trust boundary as hashPassword/injectProjectId. A project that wants live,
+// SuperUser-editable screen access generates a normal "ScreenPermission" table (screenId,
+// screenName, requiredRoles — same comma-separated format requiredRole/visibleRoles already use);
+// this reads it directly via the project's own Proj<id>_ label, same as any other table access.
+// Matching a label nobody has ever written to is not an error in Neo4j (it just returns zero rows),
+// so a project that never generated this table behaves identically to one with an empty table —
+// both mean "no override, fall back to the screen's static XML requiredRole". A genuine connection/
+// query failure is NOT swallowed here — it propagates, the same as any other Neo4j operation this
+// route layer already lets fail loudly rather than silently pretending access control is working.
+export async function getScreenPermissionOverride(projectId: number, screenId: string): Promise<string[] | null> {
+  const label = labelFor(projectId, "ScreenPermission");
+  const session = getDriver().session({ database: NEO4J_DATABASE });
+  try {
+    const res = await session.run(`MATCH (p:${label}) WHERE p.screenId = $screenId RETURN p.requiredRoles AS requiredRoles LIMIT 1`, { screenId });
+    const raw = res.records[0] ? fromDriverValue(res.records[0].get("requiredRoles")) : null;
+    if (typeof raw !== "string" || !raw.trim()) return null;
+    const roles = raw.split(",").map((r) => r.trim()).filter(Boolean);
+    return roles.length ? roles : null;
+  } finally {
+    await session.close();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Row CRUD (what the preview grid uses)
 // ---------------------------------------------------------------------------
