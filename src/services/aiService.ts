@@ -783,6 +783,23 @@ Return ONLY valid XML, no explanations or markdown fences.`;
 const QUERY_BLOCK_RE = /<query[^>]*>[\s\S]*?<\/query>/gi;
 const STATEMENT_RE = /<statement>([\s\S]*?)<\/statement>/id; // `d` flag -> match.indices for group offsets
 const PARAM_NAME_RE = /<parameter[^>]*name="([^"]*)"/gi;
+// A <parameter>'s source mirrors field:/session: syntax for a value that's meant to be a plain
+// literal, inventing a pseudo-prefix that was never real (seen so far: "literal:", also guarded
+// against the same-shaped "const:"/"static:"/"default:"). None of these are recognized anywhere —
+// left alone, the WHOLE string including the prefix gets stored as the literal value.
+const INVENTED_SOURCE_PREFIX_RE = /source="(?:literal|const|static|default):([^"]*)"/gi;
+// An invented ":label" suffix on a field: source, meant to capture a <select>'s displayed option
+// text — there is no such mechanism anywhere in this engine; only a field's own submitted value is
+// ever available server-side. Not auto-fixable (no real data to resolve it to), just logged so a
+// recurrence is visible instead of silently resolving to nothing.
+const INVENTED_LABEL_SUFFIX_RE = /source="field:[^"]*:label"/gi;
+// Seen twice in testing: a "list every screen" picker query written as ordinary Cypher against
+// ScreenPermission instead of the special source="project:screens" builtin. That can only ever
+// return screens that already have a saved permission row, so an RBAC config screen's picker stays
+// permanently empty — chicken-and-egg, nothing can ever be saved. Detected narrowly: a query whose
+// statement matches ScreenPermission but does NOT select requiredRoles (the real "list saved
+// permissions" query for the grid always does) is almost certainly meant to be the screen picker.
+const SCREEN_LIST_QUERY_RE = /<query\s+id="([^"]*)"[^>]*>([\s\S]*?)<\/query>/gi;
 
 // Deterministic backstop over the model's generated Cypher: every <query>'s <statement> must pass
 // the runtime's static Cypher checks (single statement, allowed clauses, no relationships/
@@ -790,7 +807,23 @@ const PARAM_NAME_RE = /<parameter[^>]*name="([^"]*)"/gi;
 // query that fails gets its statement swapped for a safe no-op (never touches the database)
 // instead of failing the whole generation. The runtime re-runs the full validation (including the
 // project-label allow-list) at actual execution time (runtime/cypher.ts).
+//
+// This also carries two narrower, deterministic auto-fixes for mistakes the model has actually
+// made more than once (see the regexes above) — fixing the XML itself before it's ever saved, not
+// just tolerating the mistake at runtime. Both are generic: they run on every generated screen, for
+// every project, not anything specific to one app.
 export function lintScreenXml(xml: string): string {
+  xml = xml.replace(INVENTED_SOURCE_PREFIX_RE, (_m, rest) => `source="${rest}"`);
+  if (INVENTED_LABEL_SUFFIX_RE.test(xml)) {
+    console.warn("Generated screen used an invented field:...:label source — it will resolve to nothing; see aiService.ts's lintScreenXml comment.");
+  }
+  xml = xml.replace(SCREEN_LIST_QUERY_RE, (block, id, body) => {
+    if (/source\s*=\s*"project:screens"/i.test(block)) return block; // already correct
+    if (!/MATCH\s*\([^)]*:\s*ScreenPermission\b/i.test(body)) return block; // not this pattern
+    if (/requiredRoles/i.test(body)) return block; // a real permissions-list query — leave it
+    console.warn(`Rewrote a screen-list query (id=${id}) from Cypher-on-ScreenPermission to source="project:screens"`);
+    return `<query id="${id}" source="project:screens"/>`;
+  });
   return xml.replace(QUERY_BLOCK_RE, (block) => {
     const stmtMatch = STATEMENT_RE.exec(block) as (RegExpExecArray & { indices: [number, number][] }) | null;
     if (!stmtMatch) return block;

@@ -80,6 +80,23 @@ describe("lintScreenXml (Cypher)", () => {
     expect(lintScreenXml(xml("SELECT * FROM department WHERE deptid = :deptid"))).toContain("RETURN 1 AS noop LIMIT 0");
     expect(lintScreenXml(xml("MATCH (d:Department) RETURN d.deptname AS deptname"))).toContain("RETURN 1 AS noop LIMIT 0");
   });
+  it("strips an invented literal:/const:/static:/default: prefix off a <parameter> source", () => {
+    const withPrefix = `<query id="q"><statement>CREATE (a:Account {roleId: $roleId})</statement><parameters><parameter name="roleId" source="literal:Staff"/></parameters></query>`;
+    expect(lintScreenXml(withPrefix)).toContain('source="Staff"');
+    expect(lintScreenXml(withPrefix)).not.toContain("literal:");
+  });
+  it("rewrites a screen-list query written as Cypher-on-ScreenPermission to source=\"project:screens\"", () => {
+    const broken = `<query id="listScreens"><dataSource ref="mainDB"/><statement>MATCH (s:ScreenPermission) RETURN s.screenId AS screenId, s.screenName AS screenName</statement></query>`;
+    expect(lintScreenXml(broken)).toBe('<query id="listScreens" source="project:screens"/>');
+  });
+  it("leaves a real ScreenPermission query (one that selects requiredRoles) untouched", () => {
+    const real = `<query id="listScreenPermissions"><dataSource ref="mainDB"/><statement>MATCH (sp:ScreenPermission) RETURN sp.screenId AS screenId, sp.requiredRoles AS requiredRoles</statement></query>`;
+    expect(lintScreenXml(real)).toBe(real);
+  });
+  it("leaves an already-correct source=\"project:screens\" query untouched", () => {
+    const already = `<query id="listScreens" source="project:screens"/>`;
+    expect(lintScreenXml(already)).toBe(already);
+  });
 });
 
 describe("conditions and templates", () => {
