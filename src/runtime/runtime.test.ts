@@ -476,9 +476,35 @@ describe("renderer: downloadTemplate button — a client-side-only CSV header do
     expect(html).not.toMatch(/id="templateButton"[^>]*data-click/);
     expect(html).not.toMatch(/id="templateButton"[^>]*data-nav-href/);
   });
-  it("emits the client-side Blob-download handler with a real \\r\\n, not a literal control character", () => {
+  it("emits the client-side XLSX-download handler, lazily loading SheetJS", () => {
     expect(html).toContain('querySelectorAll("[data-download-template]")');
-    expect(html).toContain('header + "\\r\\n"');
+    expect(html).toContain("ensureXlsxLib()");
+    expect(html).toContain("XLSX.writeFile(wb, \"import-template.xlsx\")");
+  });
+});
+
+describe("renderer: bulkFile button — bulk import from an uploaded .xlsx/.csv file", () => {
+  const xml = `<screen id="s" title="S">
+  <ui>
+    <field id="importFile" label="Upload File" type="file"/>
+    <button id="importButton" label="Import" bulkFile="importFile"/>
+  </ui>
+</screen>`;
+  const model = parseScreenModel(xml);
+  const html = renderScreen(model, { apiBase: "http://localhost:8001", projectId: 1, screenId: "s", token: "tok" });
+
+  it("renders a plain data-file-field input (never the image data-URL path), defaulting accept to .xlsx,.csv", () => {
+    expect(html).toContain('accept=".xlsx,.csv" id="importFile" name="importFile" data-file-field');
+    expect(html).not.toContain('accept="image/*"'); // the actual rendered element, not the ever-present client-script selector
+  });
+  it("renders data-bulk-file pointing at the upload field, never data-click", () => {
+    expect(html).toContain('id="importButton" data-button data-bulk-file="importFile"');
+    expect(html).not.toMatch(/id="importButton"[^>]*data-click/);
+  });
+  it("emits the client-side file-parsing handler, reusing the shared row-replay function", () => {
+    expect(html).toContain('querySelectorAll("[data-bulk-file]")');
+    expect(html).toContain("readAsArrayBuffer(file)");
+    expect(html).toContain("runBulkRows(rows, btn)");
   });
 });
 

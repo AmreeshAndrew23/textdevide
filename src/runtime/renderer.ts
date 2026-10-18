@@ -129,6 +129,10 @@ function renderField(f: FieldItem): string {
     // reference images. Capped client-side at 2MB — a profile photo, not a full design upload. No
     // default/pre-fill: browsers block programmatically setting a file input's value.
     control = `<input type="file" accept="image/*" id="${escAttr(f.id)}" name="${escAttr(f.id)}" data-image-field${disabled}${wiredEvents}>`;
+  } else if (f.type === "file") {
+    // A plain data-file upload (.xlsx/.csv for a bulkFile import), never read into a data-URL —
+    // a bulkFile button reads this input's raw File object directly at click time instead.
+    control = `<input type="file" accept="${escAttr(f.accept || ".xlsx,.csv")}" id="${escAttr(f.id)}" name="${escAttr(f.id)}" data-file-field${disabled}${wiredEvents}>`;
   } else if (f.type === "select" && f.optionsBinding) {
     // Populated from a REAL query's rows (e.g. picking an existing Exam), not a fixed list — this
     // is only the initial shell; the client script replaces it once the screen's load event (or
@@ -215,10 +219,12 @@ export function findScreenForLabel(label: string, screens: ShellScreen[], curren
 
 function renderButton(b: ButtonItem, linkFor: Linker): string {
   const cls = BUTTON_CLASS[b.style] || BUTTON_CLASS.primary;
-  // bulkCsv replaces the normal single data-click wiring entirely — the bulk handler fires this
-  // same click event itself, once per CSV row, so both firing would double-run it. downloadTemplate
-  // is purely client-side (no server event at all), so it's independent of either.
-  const wired = b.bulkCsv ? ` data-bulk-csv="${escAttr(b.bulkCsv)}"` : b.eventTypes.includes("click") ? " data-click" : "";
+  // bulkCsv/bulkFile replace the normal single data-click wiring entirely — the bulk handler
+  // fires this same click event itself, once per row, so both firing would double-run it.
+  // downloadTemplate is purely client-side (no server event at all), so it's independent of either.
+  const wired = b.bulkCsv ? ` data-bulk-csv="${escAttr(b.bulkCsv)}"`
+    : b.bulkFile ? ` data-bulk-file="${escAttr(b.bulkFile)}"`
+    : b.eventTypes.includes("click") ? " data-click" : "";
   const template = b.downloadTemplate ? ` data-download-template="${escAttr(b.downloadTemplate)}"` : "";
   // Only a button with NO handler of its own becomes an automatic link — a Save/Login button that
   // runs real queries must never be hijacked just because its label contains a screen's name.
@@ -663,11 +669,63 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
     btn.addEventListener("click", function () { fireEvent(btn.id, "click", undefined, btn); });
   });
 
-  // Bulk import: a button with bulkCsv="<fieldId>" runs its OWN click event once per data row
-  // instead of once, reusing the exact same single-row query/event logic a normal Save already
-  // has — nothing server-side changes. Naive comma-split (no quoted-field support), which is fine
-  // for name/email/phone/department-name style columns; documented as a known limit, not a bug.
-  // Sequential, not parallel — simpler error accounting and no risk of overwhelming a cold backend.
+  // Shared by bulkCsv and bulkFile: replays btn's OWN click event once PER ROW instead of once,
+  // reusing the exact same single-row query/event logic a normal Save already has — nothing
+  // server-side changes either way. Sequential, not parallel — simpler error accounting and no
+  // risk of overwhelming a cold backend.
+  function runBulkRows(rows, btn) {
+    var base = allFieldValues();
+    var ok = 0, fail = 0;
+    setBusy(true, btn);
+    function runRow(i) {
+      if (i >= rows.length) {
+        setBusy(false, btn);
+        showMessages([{
+          messageType: fail ? "error" : "success",
+          value: ok + " imported" + (fail ? ", " + fail + " failed — check each row's data." : "."),
+          sticky: fail > 0,
+        }]);
+        return;
+      }
+      var values = {};
+      for (var k in base) values[k] = base[k];
+      for (var k2 in rows[i]) values[k2] = rows[i][k2];
+      fetch(API_BASE + "/api/projects/" + PROJECT_ID + "/screens/" + SCREEN_ID + "/run-event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + TOKEN },
+        body: JSON.stringify({ elementId: btn.id, eventType: "click", fieldValues: values }),
+      })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          var hadError = (data.actions || []).some(function (a) { return a.type === "message" && a.messageType === "error"; });
+          if (hadError) fail++; else ok++;
+        })
+        .catch(function () { fail++; })
+        .finally(function () { runRow(i + 1); });
+    }
+    runRow(0);
+  }
+
+  // Lazily loads SheetJS (xlsx) from a CDN the first time any screen actually needs it (a
+  // downloadTemplate or bulkFile button) — never loaded on a screen that has neither, so it costs
+  // every OTHER generated screen nothing. Cached on window so multiple buttons on one page share
+  // a single load.
+  function ensureXlsxLib() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    if (window.__xlsxLoadPromise) return window.__xlsxLoadPromise;
+    window.__xlsxLoadPromise = new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
+      s.onload = function () { resolve(window.XLSX); };
+      s.onerror = function () { reject(new Error("Could not load the spreadsheet library.")); };
+      document.head.appendChild(s);
+    });
+    return window.__xlsxLoadPromise;
+  }
+
+  // Bulk import from pasted text: a button with bulkCsv="<fieldId>" reads a textarea. Naive
+  // comma-split (no quoted-field support), fine for name/email/phone/department-name columns;
+  // documented as a known limit, not a bug.
   root.querySelectorAll("[data-bulk-csv]").forEach(function (btn) {
     var csvFieldId = btn.getAttribute("data-bulk-csv");
     btn.addEventListener("click", function () {
@@ -686,54 +744,68 @@ function clientScript(model: ScreenModel, opts: { apiBase: string; projectId: nu
         headers.forEach(function (h, i) { row[h] = cells[i] !== undefined ? cells[i] : ""; });
         return row;
       });
-      var base = allFieldValues();
-      var ok = 0, fail = 0;
-      setBusy(true, btn);
-      function runRow(i) {
-        if (i >= rows.length) {
-          setBusy(false, btn);
-          showMessages([{
-            messageType: fail ? "error" : "success",
-            value: ok + " imported" + (fail ? ", " + fail + " failed — check each row's data." : "."),
-            sticky: fail > 0,
-          }]);
-          return;
-        }
-        var values = {};
-        for (var k in base) values[k] = base[k];
-        for (var k2 in rows[i]) values[k2] = rows[i][k2];
-        fetch(API_BASE + "/api/projects/" + PROJECT_ID + "/screens/" + SCREEN_ID + "/run-event", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: "Bearer " + TOKEN },
-          body: JSON.stringify({ elementId: btn.id, eventType: "click", fieldValues: values }),
-        })
-          .then(function (res) { return res.json(); })
-          .then(function (data) {
-            var hadError = (data.actions || []).some(function (a) { return a.type === "message" && a.messageType === "error"; });
-            if (hadError) fail++; else ok++;
-          })
-          .catch(function () { fail++; })
-          .finally(function () { runRow(i + 1); });
-      }
-      runRow(0);
+      runBulkRows(rows, btn);
     });
   });
 
-  // Download Template: a button with downloadTemplate="col1,col2,..." hands the browser a plain
-  // .csv file containing just that header row — no server round trip, so it works even if the
-  // backend is slow/offline. Shows the exact columns/order a bulkCsv paste box expects.
+  // Bulk import from an uploaded file: a button with bulkFile="<fieldId>" reads a type="file"
+  // field's chosen .xlsx/.csv file, parses it with SheetJS (handles real Excel files, quoted CSV
+  // fields, etc. — far more robust than the paste box's naive split), and replays the same event
+  // once per row. The natural pairing for a downloadTemplate button: download, fill in Excel,
+  // upload it back here.
+  root.querySelectorAll("[data-bulk-file]").forEach(function (btn) {
+    var fileFieldId = btn.getAttribute("data-bulk-file");
+    btn.addEventListener("click", function () {
+      var fileWrap = root.querySelector('[data-field="' + fileFieldId + '"]');
+      var fileEl = fileWrap ? fileWrap.querySelector('[data-file-field]') : null;
+      var file = fileEl && fileEl.files && fileEl.files[0];
+      if (!file) {
+        showMessages([{ messageType: "error", value: "Choose a file first." }]);
+        return;
+      }
+      setBusy(true, btn);
+      var reader = new FileReader();
+      reader.onload = function () {
+        ensureXlsxLib().then(function (XLSX) {
+          var wb = XLSX.read(reader.result, { type: "array" });
+          var sheet = wb.Sheets[wb.SheetNames[0]];
+          var rows = XLSX.utils.sheet_to_json(sheet, { raw: false, defval: "" });
+          setBusy(false, btn);
+          if (!rows.length) {
+            showMessages([{ messageType: "error", value: "That file has no data rows." }]);
+            return;
+          }
+          runBulkRows(rows, btn);
+        }).catch(function (e) {
+          setBusy(false, btn);
+          showMessages([{ messageType: "error", value: e.message || "Could not read that file." }]);
+        });
+      };
+      reader.onerror = function () {
+        setBusy(false, btn);
+        showMessages([{ messageType: "error", value: "Could not read that file." }]);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+  });
+
+  // Download Template: a button with downloadTemplate="col1,col2,..." hands the browser a real
+  // .xlsx workbook containing just that header row — the exact columns/order a bulkCsv/bulkFile
+  // import expects, filled in with a real spreadsheet app rather than guessed from a label.
   root.querySelectorAll("[data-download-template]").forEach(function (btn) {
     btn.addEventListener("click", function () {
-      var header = btn.getAttribute("data-download-template") || "";
-      var blob = new Blob([header + "\\r\\n"], { type: "text/csv" });
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement("a");
-      a.href = url;
-      a.download = "import-template.csv";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      var header = (btn.getAttribute("data-download-template") || "").split(",").map(function (h) { return h.trim(); });
+      setBusy(true, btn);
+      ensureXlsxLib().then(function (XLSX) {
+        var ws = XLSX.utils.aoa_to_sheet([header]);
+        var wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Template");
+        XLSX.writeFile(wb, "import-template.xlsx");
+        setBusy(false, btn);
+      }).catch(function (e) {
+        setBusy(false, btn);
+        showMessages([{ messageType: "error", value: e.message || "Could not generate the template." }]);
+      });
     });
   });
 

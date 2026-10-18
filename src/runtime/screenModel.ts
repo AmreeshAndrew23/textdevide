@@ -56,6 +56,10 @@ export type FieldItem = {
   // Hiding it here is the UI half only — engine.ts separately rejects a write sourced from a hidden
   // field server-side, since a client can always edit the DOM/request directly.
   visibleRoles: string[] | null;
+  // accept="..." on a type="file" field — a plain spreadsheet/data-file upload (.xlsx/.csv), never
+  // read into a data-URL (unlike type="image"); a bulkFile button reads the raw File object
+  // straight off this input at click time. Defaults to ".xlsx,.csv" when omitted on a file field.
+  accept: string | null;
 };
 
 export type GridColumn = { id: string; header: string; binding: string; persistenceMapping: string | null };
@@ -75,12 +79,18 @@ export type GridItem = {
 // other field values. Lets any "create one row" screen become a bulk importer with zero new
 // engine/query concepts, only a different client-side trigger.
 // downloadTemplate: a comma-separated header row (e.g. "name,email,phone") this button hands the
-// browser as a plain .csv file download — pure client-side, no server round trip at all. Lets a
-// bulk-import screen show exactly which columns/order the paste box expects, generated from data
-// that already exists (the header text the AI wrote once) rather than the user guessing it.
+// browser as a real .xlsx workbook download (via the lazily-loaded SheetJS library — see
+// renderer.ts's ensureXlsxLib) — pure client-side, no server round trip. Lets a bulk-import
+// screen show exactly which columns/order it expects, generated from data that already exists
+// (the header text the AI wrote once) rather than the user guessing it.
+// bulkFile: the id of a type="file" field on this same screen. Like bulkCsv, but the rows come
+// from an uploaded .xlsx/.csv file (parsed client-side with SheetJS) instead of pasted text —
+// the natural pairing for a downloadTemplate button: download the template, fill it in a real
+// spreadsheet app, upload it back here. Same single-row-event-replayed-per-row mechanism either
+// way; a screen can offer bulkCsv, bulkFile, or both, on two different buttons.
 export type ButtonItem = {
   kind: "button"; id: string; label: string; style: string; eventTypes: string[];
-  bulkCsv: string | null; downloadTemplate: string | null;
+  bulkCsv: string | null; bulkFile: string | null; downloadTemplate: string | null;
 };
 export type FieldsetItem = { kind: "fieldset"; legend: string; items: UiItem[] };
 // <stat id="totalStudents" label="Total Students" icon="users"/> — a Dashboard metric card.
@@ -173,6 +183,7 @@ function parseField(el: XmlElement, eventsByElement: Map<string, string[]>): Fie
       return valueColumn && labelColumn ? { valueColumn, labelColumn } : null;
     })(),
     visibleRoles: parseRoleList(el.getAttribute("visibleRoles")),
+    accept: el.getAttribute("accept"),
   };
 }
 
@@ -181,6 +192,7 @@ function parseButton(el: XmlElement, eventsByElement: Map<string, string[]>): Bu
   return {
     kind: "button", id, label: attr(el, "label", id), style: attr(el, "style", "primary"),
     eventTypes: eventsByElement.get(id) || [], bulkCsv: el.getAttribute("bulkCsv") || null,
+    bulkFile: el.getAttribute("bulkFile") || null,
     downloadTemplate: el.getAttribute("downloadTemplate") || null,
   };
 }

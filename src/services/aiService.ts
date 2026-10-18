@@ -323,32 +323,37 @@ export const UI_XML_VOCABULARY_RULES = `1. <screen> root with id, title, module,
    - <button id="buttonId" label="..." style="primary|secondary|danger|ghost"/>
    - BULK IMPORT: when the request specifically asks for a way to create many rows at once from
      pasted/uploaded data (e.g. "bulk import students"), do NOT invent a new query/event mechanism
-     for it — add bulkCsv="<fieldId>" to the SAME button that already does a normal single-row
-     create, pointing at a type="textarea" field holding pasted CSV text:
+     for it. Both forms below replay the SAME button's own click event once PER ROW instead of
+     once — the <event type="click"> stays EXACTLY the same single-row create/generate/hash/email
+     logic a normal "add one record" screen already has; write it as if the screen only ever
+     creates one row at a time. Because each row's columns become field values directly, column
+     names MUST exactly match this screen's own field ids (e.g. a column named "departmentName"
+     needs a lookup query in the create event that resolves Department by name to get departmentId
+     — same MATCH-by-name-then-CREATE pattern as any other lookup-before-create; never require the
+     imported data to already contain numeric ids, since no end user exporting a spreadsheet has
+     those). Do not add a <query source="..."> or any new event type for either form.
+     DEFAULT CHOICE — upload a real file (recommended whenever the request mentions "template",
+     "Excel", "upload", or doesn't specify a mechanism at all): a type="file" field plus
+     bulkFile="<fieldId>" on the button:
+       <field id="importFile" label="Upload File" type="file" accept=".xlsx,.csv"/>
+       <button id="importButton" label="Import" bulkFile="importFile"/>
+     This parses a real uploaded .xlsx or .csv with SheetJS (handles actual Excel formatting and
+     quoted fields, unlike the paste form below) and replays the row once per data row.
+     LIGHTER ALTERNATIVE — paste text directly (only when the request explicitly says "paste" or
+     wants to avoid a file entirely): a type="textarea" field plus bulkCsv="<fieldId>" instead:
        <field id="csvData" label="Paste CSV (name,email,phone,gender,departmentName,courseName,batch)" type="textarea"/>
        <button id="importButton" label="Import" bulkCsv="csvData"/>
-     The button's own <event type="click" element="importButton"> stays EXACTLY the same single-row
-     create/generate/hash/email logic a normal "add one record" screen already has — write it as if
-     the screen only ever creates one row at a time. bulkCsv is purely a client-side trigger: the
-     renderer parses the textarea's first line as headers and each later line as one data row
-     (naive comma-split, no quoted-field support — document that in the field's label), then fires
-     this SAME click event once per row, sequentially, merging that row's columns on top of the
-     form's other field values each time. Because headers become field values directly, CSV column
-     names MUST exactly match this screen's own field ids (e.g. a column named "departmentName"
-     needs a lookup query in the create event that resolves Department by name to get departmentId,
-     same MATCH-by-name-then-CREATE pattern as any other lookup-before-create — never require the
-     pasted CSV to already contain numeric ids, since no end user pasting a spreadsheet has those).
-     Do not add a <query source="..."> or any new event type for this — there isn't one; the entire
-     mechanism is the existing single-row event, replayed.
-     Always pair a bulkCsv screen with a downloadTemplate button so the user knows exactly which
-     columns/order to paste, instead of guessing from the field's label text alone:
+     This parses the textarea's first line as headers and each later line as one data row with a
+     naive comma-split (no quoted-field support — document that limit in the field's label).
+     Either way, pair the import button with a Download Template button so the user knows exactly
+     which columns/order to provide, instead of guessing from the field's label text alone:
        <button id="templateButton" label="Download Template" downloadTemplate="name,email,phone,gender,departmentName,courseName,batch"/>
      downloadTemplate's value is the exact header row (comma-separated column names, matching the
-     bulkCsv field's expected headers exactly) — purely client-side, hands the browser a one-line
-     .csv file with that header, no server event at all. If the request also asks for an "Import"
-     entry point on another screen (e.g. a Student Registration screen gaining an "Import Students"
-     button), that's a plain <navigate> to the bulk-import screen — nothing new, same as any other
-     cross-screen button.
+     import field's expected headers exactly) — purely client-side, hands the browser a real .xlsx
+     workbook containing just that header row, no server event at all; works with either import
+     form above. If the request also asks for an "Import" entry point on another screen (e.g. a
+     Student Registration screen gaining an "Import Students" button), that's a plain <navigate> to
+     the bulk-import screen — nothing new, same as any other cross-screen button.
    - <stat id="statId" label="..." icon="..."/> — a single metric card (a big number + label), for a
      Dashboard/landing screen. icon is one of: home, users, book, building, calendar, folder,
      settings, chart, file, lock — pick whichever best names WHAT the number represents (users for a
