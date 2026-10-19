@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { eq, and, desc } from "drizzle-orm";
 import { db } from "../db/connection.js";
-import { projects, promptLogs, type ProjectRow } from "../db/schema.js";
+import { projects, promptLogs, userChosenDomains, type ProjectRow } from "../db/schema.js";
 import { serializeProject, serializeProjectListItem, serializePromptLog } from "../serializers.js";
 import { ProjectCreateSchema, ProjectUpdateSchema } from "../models/schemas.js";
 import { requireAuth } from "./authGuard.js";
@@ -40,6 +40,14 @@ export default async function projectRoutes(app: FastifyInstance) {
 
   app.post("/projects", async (req, reply) => {
     const body = ProjectCreateSchema.parse(req.body);
+    // Checked BEFORE creating the project row — a bad/foreign chosen_domain_id should fail the
+    // whole request, not leave an empty project behind with no indication why seeding didn't happen.
+    let chosenDomain: { domainName: string; entitiesSnapshot: string } | null = null;
+    if (body.chosen_domain_id != null) {
+      const [row] = await db.select().from(userChosenDomains).where(eq(userChosenDomains.id, body.chosen_domain_id)).limit(1);
+      if (!row || row.userId !== req.user.id) throw new HttpError(404, "Chosen domain not found");
+      chosenDomain = row;
+    }
     const [project] = await db
       .insert(projects)
       .values({
@@ -55,7 +63,21 @@ export default async function projectRoutes(app: FastifyInstance) {
       .returning();
     // GitHub repo auto-creation intentionally dropped — github_service.py was already retired
     // this session (its routes return 410); porting it would resurrect dead functionality.
-    return reply.status(201).send(serializeProject(project));
+    if (!chosenDomain) return reply.status(201).send(serializeProject(project));
+    // Same write path/background sync a normal PUT .../entities update already uses (see that
+    // handler below) — a domain-seeded project is otherwise indistinguishable from one a user
+    // built up by hand. If the Neo4j write fails (e.g. the workspace database is down), the
+    // just-created Postgres row is rolled back too — same "nothing partially created" guarantee
+    // every other Neo4j-touching route in this file already keeps, rather than leaving behind an
+    // empty project with no indication its entities never actually seeded.
+    try {
+      const seeded = await updateProject(project.id, { entities: chosenDomain.entitiesSnapshot } as Partial<ProjectRow>);
+      syncSchemaInBackground(project.id, safeJson(chosenDomain.entitiesSnapshot));
+      return reply.status(201).send(serializeProject(seeded));
+    } catch (e) {
+      await db.delete(projects).where(eq(projects.id, project.id));
+      throw e;
+    }
   });
 
   app.get("/projects/:id", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {

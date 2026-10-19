@@ -35,6 +35,10 @@ export const ProjectCreateSchema = z.object({
   language: z.string().default("Python"),
   frontend_language: z.string().default("React"),
   theme: z.string().nullish(),
+  // References a row this user already chose from the Domains page (user_chosen_domains.id, NOT
+  // domain_templates.id — a project starts from the user's OWN snapshot, never the live catalog
+  // row directly) — seeds the new project's entities from it in the same request.
+  chosen_domain_id: z.number().nullish(),
 });
 
 export const ExtractRequestSchema = z.object({

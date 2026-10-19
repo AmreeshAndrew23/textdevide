@@ -63,9 +63,32 @@ const COLUMN_DEFS: Record<string, { name: string; ddlType: string; defaultSql?: 
   ],
 };
 
+// Unlike every table above (ported from the old Python backend, which already created them for
+// real), these two are new and exist nowhere yet — no formal migration tool here either, so they're
+// created the same way schema drift is already bridged: idempotently, at every startup.
+const CREATE_TABLE_SQL = [
+  `CREATE TABLE IF NOT EXISTS domain_templates (
+     id SERIAL PRIMARY KEY,
+     name VARCHAR NOT NULL UNIQUE,
+     description VARCHAR,
+     category VARCHAR,
+     entities TEXT NOT NULL,
+     created_at TIMESTAMPTZ DEFAULT now()
+   )`,
+  `CREATE TABLE IF NOT EXISTS user_chosen_domains (
+     id SERIAL PRIMARY KEY,
+     user_id INTEGER NOT NULL REFERENCES users(id),
+     domain_template_id INTEGER NOT NULL REFERENCES domain_templates(id),
+     domain_name VARCHAR NOT NULL,
+     entities_snapshot TEXT NOT NULL,
+     chosen_at TIMESTAMPTZ DEFAULT now()
+   )`,
+];
+
 export async function syncSchema(): Promise<void> {
   const client = await pool.connect();
   try {
+    for (const sql of CREATE_TABLE_SQL) await client.query(sql);
     for (const [table, columns] of Object.entries(COLUMN_DEFS)) {
       const existing = await client.query<{ column_name: string }>(
         `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,

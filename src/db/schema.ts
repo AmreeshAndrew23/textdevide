@@ -68,6 +68,35 @@ export const promptLogs = pgTable("prompt_logs", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
+// A shared, admin-curated catalog — same rows for every user, outside any one user's projects.
+// entities is the exact same {tables:[...]} JSON shape projects.entities/updateProject's entities
+// patch already use, so a chosen domain's entities can be handed straight to updateProject with
+// zero transformation when a new project starts from it.
+export const domainTemplates = pgTable("domain_templates", {
+  id: serial("id").primaryKey(),
+  name: varchar("name").notNull().unique(),
+  description: varchar("description"),
+  category: varchar("category"),
+  entities: text("entities").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// A user's own library of domains they've picked, browsed outside/before any specific project
+// (the sidebar's Domains page) — not yet tied to one. entitiesSnapshot is a COPY taken at the
+// moment of choosing, so a later edit to the canonical domainTemplates row never retroactively
+// changes what this user already picked; domainName is denormalized the same way, so it still
+// displays correctly even if the template is later renamed or removed.
+export const userChosenDomains = pgTable("user_chosen_domains", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  domainTemplateId: integer("domain_template_id").notNull().references(() => domainTemplates.id),
+  domainName: varchar("domain_name").notNull(),
+  entitiesSnapshot: text("entities_snapshot").notNull(),
+  chosenAt: timestamp("chosen_at", { withTimezone: true }).defaultNow(),
+});
+
 export type UserRow = typeof users.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type PromptLogRow = typeof promptLogs.$inferSelect;
+export type DomainTemplateRow = typeof domainTemplates.$inferSelect;
+export type UserChosenDomainRow = typeof userChosenDomains.$inferSelect;

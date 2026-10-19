@@ -12,6 +12,7 @@ import adminRoutes from "./routes/admin.js";
 import generateRoutes from "./routes/generate.js";
 import runtimeRenderRoutes from "./routes/runtimeRender.js";
 import themePreviewRoutes from "./routes/themePreview.js";
+import domainRoutes from "./routes/domains.js";
 export async function buildServer() {
   const app = Fastify({ logger: true });
 
@@ -28,6 +29,7 @@ export async function buildServer() {
 
   await app.register(authRoutes, { prefix: "/api" });
   await app.register(projectRoutes, { prefix: "/api" });
+  await app.register(domainRoutes, { prefix: "/api" });
   await app.register(projectsAiRoutes, { prefix: "/api" });
   await app.register(screensRoutes, { prefix: "/api" });
   await app.register(previewDbRoutes, { prefix: "/api" });

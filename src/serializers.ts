@@ -1,4 +1,4 @@
-import type { UserRow, ProjectRow, PromptLogRow } from "./db/schema.js";
+import type { UserRow, ProjectRow, PromptLogRow, DomainTemplateRow, UserChosenDomainRow } from "./db/schema.js";
 
 // The existing React frontend is untouched and expects the EXACT SAME snake_case JSON shape the
 // Python/Pydantic responses already produce — these mirror ProjectResponse/UserResponse/etc. in
@@ -62,6 +62,29 @@ export function serializeProjectListItem(p: ProjectRow) {
     entities: p.entities,
     github_repo_url: p.githubRepoUrl,
     updated_at: p.updatedAt,
+  };
+}
+
+// entities omitted from the list view (the catalog browse) — only the detail/chosen views need
+// the full {tables:[...]} payload, which can get sizable; browsing a dozen domains shouldn't pull
+// a dozen schemas over the wire.
+export function serializeDomainTemplateListItem(d: DomainTemplateRow) {
+  return { id: d.id, name: d.name, description: d.description, category: d.category };
+}
+
+export function serializeDomainTemplate(d: DomainTemplateRow) {
+  return { id: d.id, name: d.name, description: d.description, category: d.category, entities: d.entities };
+}
+
+// The "start project" picker needs entities right away to seed the new project in the same
+// request — small enough (a user's own chosen handful, not the whole catalog) to just include.
+export function serializeChosenDomain(c: UserChosenDomainRow) {
+  return {
+    id: c.id,
+    domain_template_id: c.domainTemplateId,
+    domain_name: c.domainName,
+    entities: c.entitiesSnapshot,
+    chosen_at: c.chosenAt,
   };
 }
 
