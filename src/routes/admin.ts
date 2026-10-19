@@ -7,12 +7,15 @@ import { getCurrentUser, HttpError } from "../services/authService.js";
 // Port of routes/admin.py's token-usage view — $ per 1,000,000 tokens, OpenAI's published rates
 // for the models this app actually calls. Priced at read time from the stored `model` name
 // (never a snapshotted price), so historical rows stay accurate even if these constants change
-// later. An unrecognized/null model falls back to the gpt-4o-mini rate, this app's default model.
+// later. An unrecognized/null model falls back to this app's current default model's rate.
 const PRICING: Record<string, { input: number; output: number }> = {
   "gpt-4o-mini": { input: 0.15, output: 0.6 },
   "gpt-4o": { input: 2.5, output: 10.0 },
+  // Price cut shortly after its July 2026 launch (from $1/$6 to this) — re-check before trusting
+  // this for a long-lived cost report if it's been a while since this was last verified.
+  "gpt-5.6-luna": { input: 0.2, output: 1.2 },
 };
-const DEFAULT_PRICING = PRICING["gpt-4o-mini"];
+const DEFAULT_PRICING = PRICING["gpt-5.6-luna"];
 
 const SCHEMA_KINDS = new Set(["extract_entities", "refine_entities", "schema_assistant"]);
 const UI_KINDS = new Set([

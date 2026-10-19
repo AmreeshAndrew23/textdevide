@@ -910,7 +910,7 @@ export async function callOpenAI(
   messages: ChatMessage[],
   opts: { useJson?: boolean; timeout?: number; temperature?: number; maxRetries?: number; model?: string; usageSink?: UsageEntry[]; signal?: AbortSignal } = {}
 ): Promise<string> {
-  const { useJson = false, temperature = 0, maxRetries = 2, model = "gpt-4o-mini", usageSink, signal } = opts;
+  const { useJson = false, temperature = 0, maxRetries = 2, model = "gpt-5.6-luna", usageSink, signal } = opts;
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not configured. Add it to your .env file.");
   if (signal?.aborted) throw new DOMException("Cancelled before the request started", "AbortError");
 
@@ -964,7 +964,7 @@ export async function callOpenAIWithTools(
   tools: unknown[],
   opts: { timeout?: number; temperature?: number; maxRetries?: number; model?: string } = {}
 ): Promise<{ content?: string; tool_calls?: { id: string; function: { name: string; arguments: string } }[] }> {
-  const { temperature = 0, maxRetries = 2, model = "gpt-4o-mini" } = opts;
+  const { temperature = 0, maxRetries = 2, model = "gpt-5.6-luna" } = opts;
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not configured. Add it to your .env file.");
 
   const body = { model, messages, temperature, tools };
