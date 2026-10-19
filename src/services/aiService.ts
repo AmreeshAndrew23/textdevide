@@ -906,6 +906,16 @@ async function sleep(ms: number) {
 
 export type UsageEntry = { model: string; prompt_tokens: number; completion_tokens: number; total_tokens: number };
 
+// Models that only accept their default temperature (1) and reject any other value outright —
+// gpt-5.6-luna confirmed via a real 400 ("Unsupported value: 'temperature' does not support 0
+// with this model. Only the default (1) value is supported") the first time this was actually
+// exercised after switching the platform's default model to it. Omit temperature from the request
+// entirely for these rather than ever sending a value OpenAI will reject — every call site that
+// doesn't explicitly care what model it's hitting (i.e. relies on the default) would otherwise
+// 400 on every single generation. A call that explicitly passes a different model (gpt-4o for the
+// vision call, etc.) is unaffected either way.
+const FIXED_TEMPERATURE_MODELS = new Set(["gpt-5.6-luna"]);
+
 export async function callOpenAI(
   messages: ChatMessage[],
   opts: { useJson?: boolean; timeout?: number; temperature?: number; maxRetries?: number; model?: string; usageSink?: UsageEntry[]; signal?: AbortSignal } = {}
@@ -914,7 +924,8 @@ export async function callOpenAI(
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not configured. Add it to your .env file.");
   if (signal?.aborted) throw new DOMException("Cancelled before the request started", "AbortError");
 
-  const body: Record<string, unknown> = { model, messages, temperature };
+  const body: Record<string, unknown> = { model, messages };
+  if (!FIXED_TEMPERATURE_MODELS.has(model)) body.temperature = temperature;
   if (useJson) body.response_format = { type: "json_object" };
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -967,7 +978,8 @@ export async function callOpenAIWithTools(
   const { temperature = 0, maxRetries = 2, model = "gpt-5.6-luna" } = opts;
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not configured. Add it to your .env file.");
 
-  const body = { model, messages, temperature, tools };
+  const body: Record<string, unknown> = { model, messages, tools };
+  if (!FIXED_TEMPERATURE_MODELS.has(model)) body.temperature = temperature;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const resp = await fetch("https://api.openai.com/v1/chat/completions", {
