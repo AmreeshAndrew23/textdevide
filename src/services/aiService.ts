@@ -912,8 +912,9 @@ export type UsageEntry = { model: string; prompt_tokens: number; completion_toke
 // exercised after switching the platform's default model to it. Omit temperature from the request
 // entirely for these rather than ever sending a value OpenAI will reject — every call site that
 // doesn't explicitly care what model it's hitting (i.e. relies on the default) would otherwise
-// 400 on every single generation. A call that explicitly passes a different model (gpt-4o for the
-// vision call, etc.) is unaffected either way.
+// 400 on every single generation. Covers EVERY call site right now, including the vision call
+// (gpt-5.6-luna supports image input too) — a future call site explicitly passing a genuinely
+// different model would be unaffected either way.
 const FIXED_TEMPERATURE_MODELS = new Set(["gpt-5.6-luna"]);
 
 export async function callOpenAI(
@@ -1975,7 +1976,11 @@ export async function generateHtmlFromXml(
         { type: "image_url", image_url: { url: referenceImage, detail: "high" } },
       ];
 
-  const callOpts = referenceImage ? { model: "gpt-4o", temperature: 0.4 } : { temperature: 0.9 };
+  // gpt-5.6-luna supports vision input (image captioning/classification/object detection) same as
+  // gpt-4o did here — confirmed before switching, since this call sends a real reference image.
+  // temperature: 0.4 is harmless to still pass — FIXED_TEMPERATURE_MODELS omits it from the actual
+  // request for this model regardless of what's requested here.
+  const callOpts = referenceImage ? { model: "gpt-5.6-luna", temperature: 0.4 } : { temperature: 0.9 };
   let html = await callOpenAI(
     [
       {
