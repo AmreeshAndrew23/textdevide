@@ -46,6 +46,24 @@ export const ExtractRequestSchema = z.object({
   features: z.string(),
 });
 
+// SuperUser-only — creates a Domains catalog entry. description doubles as the extraction prompt
+// fed to the same extractEntities() a project's own schema generation already uses; category is a
+// free-text grouping label (e.g. "Insurance", "Banking"), shown on the catalog's cards.
+export const DomainCreateSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  category: z.string().nullish(),
+});
+
+// entities, when present, replaces the whole {tables:[...]} JSON — same partial-update semantics
+// as ProjectUpdateSchema (only keys present in the body are touched).
+export const DomainUpdateSchema = z.object({
+  name: z.string().nullish(),
+  description: z.string().nullish(),
+  category: z.string().nullish(),
+  entities: z.string().nullish(),
+});
+
 export const RefineRequestSchema = z.object({
   entities: z.string(),
   instruction: z.string(),
