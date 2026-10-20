@@ -1,0 +1,160 @@
+import { describe, expect, it, vi } from "vitest";
+import type { Transaction } from "neo4j-driver";
+import { saveEntityRow, deleteEntityRow, ValidationError, ConcurrencyError } from "./entityStore.js";
+import type { EntityDef, RelationshipDef, ValidationDef, AuditingDef } from "./applicationModel.js";
+
+// A minimal fake neo4j-driver Transaction: tx.run returns the next queued response in order,
+// recording every (statement, params) pair it was called with so tests can assert on them. There
+// is no real Neo4j reachable from this environment, so this is the only way to unit-test
+// entityStore.ts's own decision logic (required/concurrency/validation/audit/cascade) without a
+// live database — no existing precedent for this in the codebase, so this fake is deliberately
+// minimal (just .run(), nothing else of the real driver's surface).
+function fakeTx(responses: { records: { get: (key: string) => unknown }[] }[]) {
+  const calls: { statement: string; params: unknown }[] = [];
+  let i = 0;
+  const run = vi.fn(async (statement: string, params?: unknown) => {
+    calls.push({ statement, params });
+    const res = responses[i++];
+    if (!res) throw new Error(`fakeTx: no queued response for call #${i} (${statement})`);
+    return res;
+  });
+  return { tx: { run } as unknown as Transaction, calls };
+}
+
+function record(props: Record<string, unknown>) {
+  return { get: (key: string) => (key === "n" || key === "c" ? props : props[key]) };
+}
+
+const VENDOR: EntityDef = {
+  name: "Vendor",
+  auditing: "standard",
+  fields: [
+    { name: "id", type: "string", key: true, required: false, unique: false, autoNumber: null, values: [] },
+    { name: "name", type: "string", key: false, required: true, unique: false, autoNumber: null, values: [] },
+    { name: "creditLimit", type: "decimal", key: false, required: false, unique: false, autoNumber: null, values: [] },
+  ],
+};
+const AUDITING: AuditingDef = {
+  name: "standard", concurrency: "timestamp",
+  fields: [
+    { role: "createdBy", name: "createdBy" }, { role: "createdOn", name: "createdOn" },
+    { role: "updatedBy", name: "updatedBy" }, { role: "updatedOn", name: "updatedOn" },
+  ],
+};
+const NO_RELATIONSHIPS: RelationshipDef[] = [];
+const SESSION = { identity: "alice@example.com" };
+
+describe("entityStore.saveEntityRow: required-field rejection happens before any database call", () => {
+  it("rejects with ValidationError, never touching tx.run", async () => {
+    const { tx, calls } = fakeTx([]);
+    await expect(
+      saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING, { id: "v1" }, SESSION) // name missing
+    ).rejects.toThrow(ValidationError);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("entityStore.saveEntityRow: concurrency check on update", () => {
+  it("rejects with ConcurrencyError when the submitted updatedOn doesn't match the stored row", async () => {
+    const { tx } = fakeTx([
+      { records: [record({ id: "v1", name: "Acme", updatedOn: "2024-01-01T00:00:00.000Z" })] }, // existing-row fetch
+    ]);
+    await expect(
+      saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING,
+        { id: "v1", name: "Acme Renamed", updatedOn: "2023-01-01T00:00:00.000Z" }, SESSION)
+    ).rejects.toThrow(ConcurrencyError);
+  });
+
+  it("proceeds when the submitted updatedOn matches", async () => {
+    const { tx } = fakeTx([
+      { records: [record({ id: "v1", name: "Acme", updatedOn: "2024-01-01T00:00:00.000Z" })] }, // existing
+      { records: [] }, // MERGE write
+      { records: [record({ id: "v1", name: "Acme Renamed" })] }, // final read-back
+    ]);
+    const result = await saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING,
+      { id: "v1", name: "Acme Renamed", updatedOn: "2024-01-01T00:00:00.000Z" }, SESSION);
+    expect(result.created).toBe(false);
+  });
+});
+
+describe("entityStore.saveEntityRow: this entity's own Validations reject before any write", () => {
+  const creditLimitNonNegative: ValidationDef = {
+    id: "credit-non-negative", entity: "Vendor", when: "onSave", onViolation: "reject",
+    dependsOn: [{ field: "creditLimit", via: null }], test: "creditLimit >= 0", message: "Credit limit cannot be negative",
+  };
+
+  it("rejects with the Validation's own message, and never reaches the write", async () => {
+    const { tx, calls } = fakeTx([{ records: [] }]); // only the existing-row fetch happens
+    await expect(
+      saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [creditLimitNonNegative], AUDITING,
+        { id: "v1", name: "Acme", creditLimit: -50 }, SESSION)
+    ).rejects.toThrow("Credit limit cannot be negative");
+    expect(calls).toHaveLength(1); // existing-row fetch only — no MERGE ever ran
+  });
+
+  it("passes and writes normally when the condition holds", async () => {
+    const { tx } = fakeTx([
+      { records: [] }, // no existing row — this is a create
+      { records: [] }, // MERGE write
+      { records: [record({ id: "v1", name: "Acme", creditLimit: 500 })] }, // final read-back
+    ]);
+    const result = await saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [creditLimitNonNegative], AUDITING,
+      { id: "v1", name: "Acme", creditLimit: 500 }, SESSION);
+    expect(result.created).toBe(true);
+  });
+});
+
+describe("entityStore.saveEntityRow: audit stamping", () => {
+  it("stamps createdBy/createdOn on a create, and updatedBy/updatedOn on both create and update", async () => {
+    const { tx, calls } = fakeTx([
+      { records: [] }, // no existing row
+      { records: [] }, // MERGE write
+      { records: [record({ id: "v1" })] }, // final read-back
+    ]);
+    await saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING, { id: "v1", name: "Acme" }, SESSION);
+    const mergeCall = calls[1];
+    const props = (mergeCall.params as { props: Record<string, unknown> }).props;
+    expect(props.createdBy).toBe("alice@example.com");
+    expect(props.updatedBy).toBe("alice@example.com");
+    expect(typeof props.createdOn).toBe("string");
+    expect(typeof props.updatedOn).toBe("string");
+  });
+
+  it("does NOT re-stamp createdBy/createdOn on an update", async () => {
+    const { tx, calls } = fakeTx([
+      { records: [record({ id: "v1", name: "Acme", createdBy: "bob@example.com", createdOn: "2020-01-01T00:00:00.000Z" })] },
+      { records: [] },
+      { records: [record({ id: "v1" })] },
+    ]);
+    await saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING, { id: "v1", name: "Acme Updated" }, SESSION);
+    const props = (calls[1].params as { props: Record<string, unknown> }).props;
+    expect(props.createdBy).toBeUndefined();
+    expect(props.createdOn).toBeUndefined();
+    expect(props.updatedBy).toBe("alice@example.com");
+  });
+});
+
+describe("entityStore.deleteEntityRow: onDelete restrict vs cascade", () => {
+  const PO: EntityDef = { name: "PurchaseOrder", auditing: null, fields: [{ name: "id", type: "string", key: true, required: false, unique: false, autoNumber: null, values: [] }] };
+  const restrictRel: RelationshipDef = { name: "LineItem-to-PO", fromEntity: "LineItem", fromField: "poId", toEntity: "PurchaseOrder", toField: "id", cardinality: "N:1", onDelete: "restrict" };
+  const cascadeRel: RelationshipDef = { ...restrictRel, onDelete: "cascade" };
+
+  it("restrict: refuses to delete when a child row still references it", async () => {
+    const { tx, calls } = fakeTx([{ records: [record({ cnt: 2 })] }]); // count check finds 2 LineItems
+    await expect(deleteEntityRow(tx, 7, PO, [restrictRel], "po1")).rejects.toThrow(ValidationError);
+    expect(calls).toHaveLength(1); // never reaches the actual delete
+  });
+
+  it("restrict: deletes cleanly when no child rows reference it", async () => {
+    const { tx, calls } = fakeTx([{ records: [record({ cnt: 0 })] }, { records: [] }]);
+    await deleteEntityRow(tx, 7, PO, [restrictRel], "po1");
+    expect(calls).toHaveLength(2); // count check, then the delete itself
+  });
+
+  it("cascade: deletes child rows first, then this row", async () => {
+    const { tx, calls } = fakeTx([{ records: [record({ cnt: 2 })] }, { records: [] }, { records: [] }]);
+    await deleteEntityRow(tx, 7, PO, [cascadeRel], "po1");
+    expect(calls).toHaveLength(3); // count check, cascade delete of children, delete of this row
+    expect(calls[1].statement).toContain("DETACH DELETE c");
+  });
+});

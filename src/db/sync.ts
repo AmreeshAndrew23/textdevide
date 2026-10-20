@@ -83,6 +83,15 @@ const CREATE_TABLE_SQL = [
      entities_snapshot TEXT NOT NULL,
      chosen_at TIMESTAMPTZ DEFAULT now()
    )`,
+  // Ownership anchor for the second, independent "Runtime Engine" — see runtimeEngine/ and
+  // db/schema.ts's runtimeApplications for why this is its own table rather than a project column.
+  `CREATE TABLE IF NOT EXISTS runtime_applications (
+     id SERIAL PRIMARY KEY,
+     user_id INTEGER NOT NULL REFERENCES users(id),
+     name VARCHAR NOT NULL,
+     created_at TIMESTAMPTZ DEFAULT now(),
+     updated_at TIMESTAMPTZ DEFAULT now()
+   )`,
 ];
 
 export async function syncSchema(): Promise<void> {

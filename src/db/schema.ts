@@ -95,8 +95,22 @@ export const userChosenDomains = pgTable("user_chosen_domains", {
   chosenAt: timestamp("chosen_at", { withTimezone: true }).defaultNow(),
 });
 
+// The ownership/listing anchor for the second, independent "Runtime Engine" (the Application/
+// Entity/Relationship/Validation/DataSource/Screen/Action vocabulary) — deliberately NOT a
+// project, since an Application isn't scoped to one. This row's own id IS the applicationId used
+// throughout runtimeEngine/'s Neo4j storage (:RtApplication {applicationId: <this id>, ...}) —
+// Postgres is the one ownership source of truth, Neo4j holds the actual structure.
+export const runtimeApplications = pgTable("runtime_applications", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  name: varchar("name").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
+
 export type UserRow = typeof users.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type PromptLogRow = typeof promptLogs.$inferSelect;
 export type DomainTemplateRow = typeof domainTemplates.$inferSelect;
 export type UserChosenDomainRow = typeof userChosenDomains.$inferSelect;
+export type RuntimeApplicationRow = typeof runtimeApplications.$inferSelect;
