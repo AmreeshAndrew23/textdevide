@@ -936,14 +936,20 @@ VOCABULARY RULES:
     <Condition test="..."/>
     <Message>...</Message>
   </Validation>
-  test describes the condition that must hold for the record to be VALID (e.g. "orderDate <= now()"
-  means "reject a future date", NOT "reject unless in the future"). Supported in test: comparators
-  == != < <= > >=; now(); age(fieldName); sum/avg/count/min/max(alias.field) where alias is a
-  RELATED entity reached through a Relationship, referenced the SAME way in DependsOn via a
-  <Field name="theRelatedField" via="alias"/> entry. The alias is the related entity's name,
-  lowercased-first-letter, pluralized with a trailing s (Entity "LineItem" -> alias "lineItems") —
-  ONLY use an alias that actually matches a real Relationship this way, or the dependency can't be
-  resolved. Every field test reads (including the owning entity's own fields) MUST also appear in
+  test describes the condition that must hold for the record to be VALID (e.g. test's value
+  meaning "orderDate is not after today" means "reject a future date", NOT "reject unless in the
+  future"). Supported in test: comparators == != < <= > >=; now(); age(fieldName); sum/avg/count/
+  min/max(alias.field) where alias is a RELATED entity reached through a Relationship, referenced
+  the SAME way in DependsOn via a <Field name="theRelatedField" via="alias"/> entry. The alias is
+  the related entity's name, lowercased-first-letter, pluralized with a trailing s (Entity
+  "LineItem" -> alias "lineItems") — ONLY use an alias that actually matches a real Relationship
+  this way, or the dependency can't be resolved.
+  CRITICAL XML ESCAPING: test is an XML ATTRIBUTE VALUE, not free text — a literal < or <= inside
+  it is INVALID XML and will fail to parse. ALWAYS write &lt; for < and &lt;= for <=, and &amp; for
+  a literal &, inside test (and inside any other attribute value that needs one, e.g. a Condition
+  value= on a DataSource). Correct: <Condition test="orderDate &lt;= now()"/>. WRONG (will break):
+  <Condition test="orderDate <= now()"/>. > and >= never need escaping but &lt;/&lt;= always do.
+  Every field test reads (including the owning entity's own fields) MUST also appear in
   DependsOn — this is how the runtime knows which Validations to rerun, it never parses test for that.
 - <DataSource name="..." type="query">
     <Select entity="...">
@@ -995,6 +1001,7 @@ WORKED EXAMPLE (study this shape closely — a Procurement app):
   <Entity name="PurchaseOrder" auditing="standard">
     <Field name="id" type="string" key="true" maxLength="36"/>
     <Field name="vendorId" type="string" required="true"/>
+    <Field name="orderDate" type="date" required="true"/>
     <Field name="totalAmount" type="decimal" precision="18" scale="2" required="true"/>
     <Field name="status" type="enum" required="true"><Value>draft</Value><Value>pending-approval</Value></Field>
   </Entity>
@@ -1009,6 +1016,11 @@ WORKED EXAMPLE (study this shape closely — a Procurement app):
     <DependsOn><Field name="totalAmount"/><Field name="amount" via="lineItems"/></DependsOn>
     <Condition test="totalAmount == sum(lineItems.amount)"/>
     <Message>Total must equal the sum of line items</Message>
+  </Validation>
+  <Validation id="order-date-not-future" entity="PurchaseOrder" when="onChange" onViolation="reject">
+    <DependsOn><Field name="orderDate"/></DependsOn>
+    <Condition test="orderDate &lt;= now()"/>
+    <Message>Order date cannot be in the future</Message>
   </Validation>
   <Screen name="PurchaseOrderForm" entity="PurchaseOrder" type="form">
     <Fields>
