@@ -13,6 +13,7 @@ import {
   parseActionElement, parseAuditingElement,
 } from "../runtimeEngine/applicationModel.js";
 import { runButtonAction } from "../runtimeEngine/applicationEngine.js";
+import { listEntityRows } from "../runtimeEngine/entityStore.js";
 
 // The second, independent "Runtime Engine" — see runtimeEngine/. Deliberately top-level, NOT
 // nested under /projects/:id/..., since an Application isn't scoped to a project (confirmed with
@@ -77,6 +78,22 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
     await db.delete(runtimeApplications).where(eq(runtimeApplications.id, owned.id));
     return reply.status(204).send();
   });
+
+  // Lists an Entity's real, saved rows — what a Grid-type Screen browses. Read-only, so no
+  // transaction/write-pipeline involvement; just the rows as they currently exist in Neo4j.
+  app.get(
+    "/runtime-applications/:id/entities/:entityName/rows",
+    async (req: FastifyRequest<{ Params: { id: string; entityName: string } }>, reply) => {
+      const owned = await getOwnedApplication(Number(req.params.id), req.user.id);
+      const detail = await getApplication(owned.id);
+      if (!detail) throw new HttpError(404, "Application not found");
+      const entityEl = detail.elements.find((e) => e.tag === "Entity" && e.name === req.params.entityName);
+      if (!entityEl) throw new HttpError(404, "Entity not found");
+      const entity = parseEntityElement(entityEl.xml);
+      const rows = await guard(() => withTx((tx) => listEntityRows(tx, owned.id, entity)));
+      return reply.send({ rows });
+    }
+  );
 
   app.post(
     "/runtime-applications/:id/screens/:screenName/run",
