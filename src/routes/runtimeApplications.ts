@@ -2,10 +2,11 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { eq } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { runtimeApplications } from "../db/schema.js";
-import { RuntimeApplicationCreateSchema, RuntimeApplicationRunSchema } from "../models/schemas.js";
+import { RuntimeApplicationCreateSchema, RuntimeApplicationGenerateSchema, RuntimeApplicationRunSchema } from "../models/schemas.js";
 import { HttpError } from "../services/authService.js";
 import { requireAuth } from "./authGuard.js";
 import { withTx } from "../runtime/neo4jStore.js";
+import { generateApplicationXml } from "../services/aiService.js";
 import { saveApplicationNodes, getApplication, deleteApplicationNodes, listApplicationSummaries, guard } from "../runtimeEngine/applicationStore.js";
 import {
   parseEntityElement, parseRelationshipElement, parseValidationElement, parseScreenElement,
@@ -26,6 +27,19 @@ async function getOwnedApplication(id: number, userId: number) {
 
 export default async function runtimeApplicationRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireAuth);
+
+  // Returns the generated XML for review/editing — does NOT create anything itself. The caller
+  // reviews (and can hand-edit) it client-side, then POSTs it to /runtime-applications as usual,
+  // same two-step flow the Domains page already uses for its own AI-assisted creation.
+  app.post("/runtime-applications/generate", async (req, reply) => {
+    const body = RuntimeApplicationGenerateSchema.parse(req.body);
+    try {
+      const xml = await generateApplicationXml(body.description);
+      return reply.send({ xml });
+    } catch (e) {
+      throw new HttpError(500, `AI generation failed: ${e instanceof Error ? e.message : e}`);
+    }
+  });
 
   app.post("/runtime-applications", async (req, reply) => {
     const body = RuntimeApplicationCreateSchema.parse(req.body);

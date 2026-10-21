@@ -71,6 +71,10 @@ export const RuntimeApplicationCreateSchema = z.object({
   xml: z.string().min(1),
 });
 
+export const RuntimeApplicationGenerateSchema = z.object({
+  description: z.string().min(1),
+});
+
 export const RuntimeApplicationRunSchema = z.object({
   elementId: z.string(), // the Screen's button id/Grid name whose click/rowClick fired this
   action: z.string(), // the resolved action attribute — a built-in (save/cancel/delete/openRecord) or a named <Action>

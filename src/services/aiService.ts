@@ -1,5 +1,6 @@
 import { OPENAI_API_KEY } from "../config.js";
 import { usedParams, validateCypherStatic } from "../runtime/cypher.js";
+import { parseApplicationXml } from "../runtimeEngine/applicationModel.js";
 
 // Port of ai_service.py's shared prompt fragments and OpenAI call helpers. Prompts are copied
 // verbatim (same wording = same model behavior) — only Python's str.format() {{ }} escaping is
@@ -896,6 +897,155 @@ export async function generateUiXml(
     { usageSink, signal }
   );
   return lintScreenXml(xml);
+}
+
+// The Runtime Engine's own vocabulary — a completely different, richer document model from the
+// <screen>/<query>/<field>/<button>/<event> vocabulary above (UI_XML_PROMPT/UI_XML_VOCABULARY_RULES),
+// which this never touches or reuses. One <Application> document, generated whole: Entities with
+// typed Fields, Relationships (never an fk attribute on a Field itself), Validations (DependsOn
+// drives re-run selection — never derived from parsing the Condition string), DataSources (kept to
+// the simple, actually-executable case — no aggregate/GroupBy/cross-entity dotted fields yet),
+// Screens (UIField bind/valueFrom/optionsFrom, a Grid, Buttons, Events), and named Actions
+// (Set/Save/Notify steps) — built-ins save/cancel/delete/openRecord are never redefined as one.
+const APPLICATION_XML_PROMPT = (description: string) => `You are an enterprise application architect. Given a plain-English description, generate ONE complete <Application> XML document in the exact vocabulary below. Return ONLY the XML, no explanations, no markdown fences.
+
+VOCABULARY RULES:
+- Root: <Application name="..." theme="..." database="relational">, containing any number of
+  Entity/Relationship/Validation/DataSource/Screen/Action elements (Theme/Session/Auditing/
+  AutoNumber are optional, at most one of each unless the request needs several AutoNumbers).
+- <Theme name="..."><Logo src="..." placement="top-left"/><Colors primary="#.." accent="#.." background="#.."/><Font family="..." size="14"/><Style cornerRadius="8" density="comfortable"/></Theme>
+- <Session><Variable name="branch" from="user.branch"/>...</Session> — only variables the Actions actually reference via {session.x}.
+- <Auditing name="standard" concurrency="timestamp"><Field role="createdBy" name="createdBy"/><Field role="createdOn" name="createdOn"/><Field role="updatedBy" name="updatedBy"/><Field role="updatedOn" name="updatedOn"/></Auditing>
+  Reference it from an Entity via auditing="standard". Only add concurrency="timestamp" if the
+  Entity also gets createdBy/createdOn/updatedBy/updatedOn fields some other way (the runtime
+  stamps them itself — never add those 4 columns as plain <Field>s yourself).
+- <AutoNumber id="..." start="1" increment="1" padLength="6" reset="yearly|never"><Prefix>PO-{YYYY}-</Prefix></AutoNumber>
+  — reference it from a Field via autoNumber="<id>" (cosmetic only right now, no live numbering yet).
+- <Entity name="..." auditing="standard-or-omit">
+    <Field name="id" type="string" key="true" maxLength="36"/>   <!-- EVERY entity needs exactly one key="true" field, always first -->
+    <Field name="..." type="string|integer|decimal|date|boolean|enum" required="true-or-omit" unique="true-or-omit" maxLength="50" min="0" precision="18" scale="2" autoNumber="id-or-omit"/>
+    <!-- type="enum" fields list their choices as <Value>choice</Value> children -->
+  </Entity>
+  Fields stay plain-typed — NEVER put a foreign-key-ish attribute on a Field. A field like
+  vendorId is just type="string"; the Relationship element below is what carries the whole link.
+- <Relationship name="..." fromEntity="..." fromField="..." toEntity="..." toField="id" cardinality="N:1|1:N|1:1|N:N" onDelete="restrict|cascade|setNull"/>
+  fromEntity is the "many" side holding the foreign key (fromField); toEntity is the "one" side,
+  toField is normally its key field.
+- <Validation id="..." entity="..." when="onSave|onChange" onViolation="reject|warn">
+    <DependsOn><Field name="..."/><Field name="..." via="relatedAlias"/></DependsOn>
+    <Condition test="..."/>
+    <Message>...</Message>
+  </Validation>
+  test describes the condition that must hold for the record to be VALID (e.g. "orderDate <= now()"
+  means "reject a future date", NOT "reject unless in the future"). Supported in test: comparators
+  == != < <= > >=; now(); age(fieldName); sum/avg/count/min/max(alias.field) where alias is a
+  RELATED entity reached through a Relationship, referenced the SAME way in DependsOn via a
+  <Field name="theRelatedField" via="alias"/> entry. The alias is the related entity's name,
+  lowercased-first-letter, pluralized with a trailing s (Entity "LineItem" -> alias "lineItems") —
+  ONLY use an alias that actually matches a real Relationship this way, or the dependency can't be
+  resolved. Every field test reads (including the owning entity's own fields) MUST also appear in
+  DependsOn — this is how the runtime knows which Validations to rerun, it never parses test for that.
+- <DataSource name="..." type="query">
+    <Select entity="...">
+      <Field name="..."/> <!-- repeat; plain fields only — NO aggregate=, NO dotted cross-entity names like vendor.name, those aren't executable yet -->
+      <Condition field="..." operator="equals|notEquals|gt|gte|lt|lte|contains" value="literal-or-{session.x}"/>
+      <Sort by="..." order="asc|desc"/>
+    </Select>
+    <ValueField>...</ValueField><DisplayField>...</DisplayField>  <!-- only when this feeds a dropdown -->
+  </DataSource>
+  Keep every DataSource to this simple shape — no GroupBy, no aggregate attribute, no dotted field
+  names — those parts of the vocabulary exist but this runtime can't execute them yet.
+- <Screen name="..." entity="..." type="form">
+    <Fields>
+      <UIField label="..." bind="fieldName" readonly="true-or-omit"/>
+      <UIField label="..." control="dropdown" valueFrom="field:fieldName" optionsFrom="query:dataSourceName"/>
+      <UIField label="..." bind="fieldName"><On event="change" action="actionName"/></UIField>  <!-- UIField's On has NO Events wrapper -->
+    </Fields>
+    <Buttons><Button label="Save" event="click" action="save"/></Buttons>  <!-- built-ins: save, cancel, delete, openRecord -->
+    <Events><On event="load" action="actionName"/></Events>  <!-- Screen/Grid's On IS wrapped in Events, unlike UIField's -->
+  </Screen>
+  A browse/list screen instead has: <Screen name="..." entity="...">
+    <Grid name="..." entity="..." readonly="true">
+      <Column header="..." bind="fieldName"/>
+      <Events><On event="rowClick" action="openRecord" targetScreen="TheFormScreenName"/></Events>
+    </Grid>
+  </Screen>
+  bind="x" is shorthand for valueFrom="field:x" — use bind for a plain two-way field, valueFrom/
+  optionsFrom together only for a data-backed dropdown.
+- <Action name="..." entity="...">
+    <Steps>
+      <Set field="..." value="literal-or-{session.x}-or-sum(alias.field)"/>
+      <Save/>
+      <Notify to="..." message="free text with {fieldName} placeholders"/>
+    </Steps>
+  </Action>
+  NEVER create an Action named save/cancel/delete/openRecord — those are fixed built-ins a Screen's
+  Button references directly (action="save"), never redefined.
+
+WORKED EXAMPLE (study this shape closely — a Procurement app):
+<Application name="Procurement" theme="corporate" database="relational">
+  <Auditing name="standard" concurrency="timestamp">
+    <Field role="createdBy" name="createdBy"/><Field role="createdOn" name="createdOn"/>
+    <Field role="updatedBy" name="updatedBy"/><Field role="updatedOn" name="updatedOn"/>
+  </Auditing>
+  <Entity name="Vendor" auditing="standard">
+    <Field name="id" type="string" key="true" maxLength="36"/>
+    <Field name="name" type="string" required="true" maxLength="200"/>
+  </Entity>
+  <Entity name="PurchaseOrder" auditing="standard">
+    <Field name="id" type="string" key="true" maxLength="36"/>
+    <Field name="vendorId" type="string" required="true"/>
+    <Field name="totalAmount" type="decimal" precision="18" scale="2" required="true"/>
+    <Field name="status" type="enum" required="true"><Value>draft</Value><Value>pending-approval</Value></Field>
+  </Entity>
+  <Entity name="LineItem" auditing="standard">
+    <Field name="id" type="string" key="true" maxLength="36"/>
+    <Field name="poId" type="string" required="true"/>
+    <Field name="amount" type="decimal" precision="18" scale="2" required="true"/>
+  </Entity>
+  <Relationship name="PO-to-Vendor" fromEntity="PurchaseOrder" fromField="vendorId" toEntity="Vendor" toField="id" cardinality="N:1" onDelete="restrict"/>
+  <Relationship name="LineItem-to-PO" fromEntity="LineItem" fromField="poId" toEntity="PurchaseOrder" toField="id" cardinality="N:1" onDelete="cascade"/>
+  <Validation id="total-matches-lines" entity="PurchaseOrder" when="onSave" onViolation="reject">
+    <DependsOn><Field name="totalAmount"/><Field name="amount" via="lineItems"/></DependsOn>
+    <Condition test="totalAmount == sum(lineItems.amount)"/>
+    <Message>Total must equal the sum of line items</Message>
+  </Validation>
+  <Screen name="PurchaseOrderForm" entity="PurchaseOrder" type="form">
+    <Fields>
+      <UIField label="Vendor" control="dropdown" valueFrom="field:vendorId" optionsFrom="query:activeVendors"/>
+      <UIField label="Status" bind="status"/>
+      <UIField label="Total" bind="totalAmount"/>
+    </Fields>
+    <Buttons><Button label="Save" event="click" action="save"/><Button label="Submit" event="click" action="submitForApproval"/></Buttons>
+  </Screen>
+  <DataSource name="activeVendors" type="query">
+    <Select entity="Vendor"><Field name="id"/><Field name="name"/><Sort by="name" order="asc"/></Select>
+    <ValueField>id</ValueField><DisplayField>name</DisplayField>
+  </DataSource>
+  <Action name="submitForApproval" entity="PurchaseOrder">
+    <Steps><Set field="status" value="pending-approval"/><Save/><Notify to="manager" message="A purchase order is awaiting approval"/></Steps>
+  </Action>
+</Application>
+
+Now generate a complete, valid Application for this description:
+${description}`;
+
+export async function generateApplicationXml(description: string, usageSink?: UsageEntry[], signal?: AbortSignal): Promise<string> {
+  const xml = stripMarkdownFence(
+    await callOpenAI(
+      [
+        { role: "system", content: "You are an enterprise application architect. Return ONLY valid XML, no markdown fences." },
+        { role: "user", content: APPLICATION_XML_PROMPT(description) },
+      ],
+      { usageSink, signal }
+    )
+  );
+  try {
+    parseApplicationXml(xml); // deterministic validation of the AI's own output, same philosophy as lintScreenXml
+  } catch (e) {
+    throw new Error(`Generated XML failed to parse: ${e instanceof Error ? e.message : e}`);
+  }
+  return xml;
 }
 
 type ChatMessage = { role: string; content: string | unknown[] };
