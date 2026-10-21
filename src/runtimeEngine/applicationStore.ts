@@ -42,8 +42,16 @@ function assertKnownTag(tag: string): void {
 export async function saveApplicationNodes(
   applicationId: number, xml: string
 ): Promise<{ name: string; theme: string | null; database: string | null; elementCounts: Record<string, number> }> {
-  const manifest = parseApplicationXml(xml);
-  for (const el of manifest.elements) assertKnownTag(el.tag);
+  // Parsing/validation failures are the CALLER's XML being wrong, not a server problem — a clean
+  // 400 with the real reason, never the generic 500 an unconverted plain Error would otherwise
+  // surface as once it reaches the central error handler.
+  let manifest: ReturnType<typeof parseApplicationXml>;
+  try {
+    manifest = parseApplicationXml(xml);
+    for (const el of manifest.elements) assertKnownTag(el.tag);
+  } catch (e) {
+    throw new HttpError(400, e instanceof Error ? e.message : String(e));
+  }
 
   await guard(() =>
     withTx(async (tx) => {
