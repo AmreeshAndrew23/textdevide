@@ -9,7 +9,10 @@
  * Supported: comparators ==,!=,<,<=,>,>= ; numeric/string/boolean literals; now(); age(field)
  * (whole years from a date field to today); sum/avg/count/min/max(alias.field) aggregating over
  * ctx.related[alias] (rows the CALLER pre-fetches — this evaluator never queries anything itself);
- * {session.x} template placeholders.
+ * a bare alias.field (no aggregate wrapper) resolving to that related set's FIRST row's field —
+ * correct for a to-one relationship (ctx.related holds exactly one row there), arbitrary-but-
+ * harmless for a genuine to-many one; {session.x} template placeholders; basic left-to-right
+ * arithmetic (* / + -) between any two resolved operands, e.g. "policy.premiumAmount * 10".
  */
 
 export type ExpressionContext = {
@@ -23,6 +26,14 @@ const FUNCTION_CALL_RE = /^(\w+)\((.*)\)$/;
 const SESSION_TEMPLATE_RE = /^\{session\.(\w+)\}$/;
 const QUOTED_RE = /^'([^']*)'$|^"([^"]*)"$/;
 const NUMBER_RE = /^-?\d+(\.\d+)?$/;
+const DOTTED_RE = /^(\w+)\.(\w+)$/;
+// Splits on the FIRST top-level * / + - (left-to-right, no operator precedence — deliberately
+// simple; a test needing real precedence should use parentheses via nested function calls
+// instead). Whitespace around the operator is REQUIRED (\s+, not \s*) — without it, a literal
+// enum value like "pending-approval" (no spaces around its hyphen — a real value from this
+// vocabulary's own worked example) would otherwise be misread as "pending" minus "approval".
+// Every real arithmetic example in the prompt already writes spaces around the operator.
+const ARITHMETIC_RE = /^(.+?)\s+([*/+-])\s+(.+)$/;
 
 function toNumber(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
@@ -92,7 +103,33 @@ function resolveOperand(token: string, ctx: ExpressionContext): unknown {
   if (NUMBER_RE.test(t)) return Number(t);
   if (t === "true") return true;
   if (t === "false") return false;
+  const dotted = DOTTED_RE.exec(t);
+  if (dotted) return (ctx.related[dotted[1]] || [])[0]?.[dotted[2]];
   return ctx.fields[t];
+}
+
+// Recursively splits on arithmetic operators before falling back to `single` for one term — lets
+// "policy.premiumAmount * 10" (or any mix with a field/alias/function-call term) evaluate as real
+// arithmetic rather than failing to resolve as one opaque, unrecognized token. `single` is
+// pluggable because evaluateCondition's bare-word default (a field lookup) and evaluateExpression's
+// (the literal string itself) genuinely differ — see each call site.
+function resolveArithmetic(token: string, ctx: ExpressionContext, single: (t: string, c: ExpressionContext) => unknown): unknown {
+  const t = token.trim();
+  const m = ARITHMETIC_RE.exec(t);
+  if (!m) return single(t, ctx); // no operator at all — the TOP-LEVEL term, use the caller's default
+  const [, leftRaw, op, rightRaw] = m;
+  // Sub-terms of an arithmetic split are never literals — "totalAmount" in "totalAmount + 5" is a
+  // field reference, not the word "totalAmount" — so recursive resolution always uses resolveOperand
+  // (field/related/function default) here, regardless of which `single` the top level was given.
+  const left = toNumber(resolveArithmetic(leftRaw, ctx, resolveOperand));
+  const right = toNumber(resolveArithmetic(rightRaw, ctx, resolveOperand));
+  switch (op) {
+    case "*": return left * right;
+    case "/": return right === 0 ? NaN : left / right;
+    case "+": return left + right;
+    case "-": return left - right;
+    default: return NaN;
+  }
 }
 
 // Splits on the FIRST top-level comparator — deliberately simple (no operator precedence, no
@@ -108,8 +145,8 @@ export function evaluateCondition(test: string, ctx: ExpressionContext): boolean
   }
   const [, lhsRaw, op, rhsRaw] = m;
   try {
-    const lhs = toComparable(resolveOperand(lhsRaw, ctx));
-    const rhs = toComparable(resolveOperand(rhsRaw, ctx));
+    const lhs = toComparable(resolveArithmetic(lhsRaw, ctx, resolveOperand));
+    const rhs = toComparable(resolveArithmetic(rhsRaw, ctx, resolveOperand));
     switch (op) {
       case "==": return lhs === rhs;
       case "!=": return lhs !== rhs;
@@ -127,9 +164,14 @@ export function evaluateCondition(test: string, ctx: ExpressionContext): boolean
 
 // For <Set value="...">: a bare word that isn't a session template/function call/quoted/numeric/
 // boolean literal is the LITERAL STRING ITSELF (value="draft" means the string "draft"), never a
-// field lookup — the opposite default from resolveOperand's use inside evaluateCondition.
-export function evaluateExpression(expr: string, ctx: ExpressionContext): unknown {
-  const t = expr.trim();
+// field lookup — the opposite default from resolveOperand's use inside evaluateCondition. Only
+// used for the TOP-LEVEL single term with no arithmetic at all — resolveArithmetic's recursive
+// sub-term resolution always uses resolveOperand instead (see below), since nobody writing
+// value="totalAmount + 5" means the literal word "totalAmount" plus 5; arithmetic operands are
+// always meant as field/related-row/function values, regardless of which context the WHOLE
+// expression came from.
+function resolveLiteralTerm(token: string, ctx: ExpressionContext): unknown {
+  const t = token.trim();
   const sessionMatch = SESSION_TEMPLATE_RE.exec(t);
   if (sessionMatch) return ctx.session[sessionMatch[1]];
   const fnMatch = FUNCTION_CALL_RE.exec(t);
@@ -139,5 +181,11 @@ export function evaluateExpression(expr: string, ctx: ExpressionContext): unknow
   if (NUMBER_RE.test(t)) return Number(t);
   if (t === "true") return true;
   if (t === "false") return false;
+  const dotted = DOTTED_RE.exec(t);
+  if (dotted) return (ctx.related[dotted[1]] || [])[0]?.[dotted[2]];
   return t; // plain literal
+}
+
+export function evaluateExpression(expr: string, ctx: ExpressionContext): unknown {
+  return resolveArithmetic(expr, ctx, resolveLiteralTerm);
 }

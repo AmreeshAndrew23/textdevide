@@ -22,7 +22,7 @@ function fakeTx(responses: { records: { get: (key: string) => unknown }[] }[]) {
 }
 
 function record(props: Record<string, unknown>) {
-  return { get: (key: string) => (key === "n" || key === "c" ? props : props[key]) };
+  return { get: (key: string) => (key === "n" || key === "c" || key === "p" ? props : props[key]) };
 }
 
 const VENDOR: EntityDef = {
@@ -131,6 +131,48 @@ describe("entityStore.saveEntityRow: audit stamping", () => {
     expect(props.createdBy).toBeUndefined();
     expect(props.createdOn).toBeUndefined();
     expect(props.updatedBy).toBe("alice@example.com");
+  });
+});
+
+describe("entityStore.saveEntityRow: validating against a single PARENT record (the real Insurance Claims case found live)", () => {
+  const CLAIM: EntityDef = {
+    name: "Claim", auditing: null,
+    fields: [
+      { name: "id", type: "string", key: true, required: false, unique: false, autoNumber: null, values: [] },
+      { name: "policyId", type: "string", key: false, required: true, unique: false, autoNumber: null, values: [] },
+      { name: "claimAmount", type: "decimal", key: false, required: true, unique: false, autoNumber: null, values: [] },
+    ],
+  };
+  const claimToPolicy: RelationshipDef = { name: "Claim-to-Policy", fromEntity: "Claim", fromField: "policyId", toEntity: "Policy", toField: "id", cardinality: "N:1", onDelete: "restrict" };
+  const claimWithinLimit: ValidationDef = {
+    id: "claim-within-limit", entity: "Claim", when: "onSave", onViolation: "reject",
+    dependsOn: [{ field: "claimAmount", via: null }, { field: "premiumAmount", via: "policies" }],
+    test: "claimAmount <= policies.premiumAmount * 10", message: "Claim amount cannot exceed ten times the policy premium amount",
+  };
+
+  it("fetches the single related Policy row (not a collection) and evaluates the bare-alias arithmetic condition against it", async () => {
+    const { tx, calls } = fakeTx([
+      { records: [] }, // existing-row fetch — none, this is a create
+      { records: [record({ id: "pol-1", premiumAmount: 500 })] }, // the parent Policy fetch
+      { records: [] }, // MERGE write
+      { records: [record({ id: "claim-1" })] }, // final read-back
+    ]);
+    const result = await saveEntityRow(tx, 7, CLAIM, [claimToPolicy], [claimWithinLimit], null,
+      { id: "claim-1", policyId: "pol-1", claimAmount: 4999 }, SESSION);
+    expect(result.created).toBe(true);
+    expect(calls[1].statement).toContain("MATCH (p:");
+  });
+
+  it("rejects when the claim amount exceeds ten times the policy's premium", async () => {
+    const { tx, calls } = fakeTx([
+      { records: [] },
+      { records: [record({ id: "pol-1", premiumAmount: 500 })] },
+    ]);
+    await expect(
+      saveEntityRow(tx, 7, CLAIM, [claimToPolicy], [claimWithinLimit], null,
+        { id: "claim-1", policyId: "pol-1", claimAmount: 5001 }, SESSION)
+    ).rejects.toThrow("Claim amount cannot exceed ten times the policy premium amount");
+    expect(calls).toHaveLength(2); // never reaches the write
   });
 });
 

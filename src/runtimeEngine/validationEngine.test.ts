@@ -26,6 +26,12 @@ describe("validationEngine: resolveViaAlias — a plural alias resolves to the r
   it("returns null for an alias with no matching Relationship", () => {
     expect(resolveViaAlias("PurchaseOrder", "nonsense", relationships)).toBeNull();
   });
+
+  it("resolves a consonant+y entity name's PROPER English plural, not a naive +s (found live: 'policys' never matched the AI's real 'policies')", () => {
+    const claimToPolicy: RelationshipDef = { name: "Claim-to-Policy", fromEntity: "Claim", fromField: "policyId", toEntity: "Policy", toField: "id", cardinality: "N:1", onDelete: "restrict" };
+    expect(resolveViaAlias("Claim", "policies", [claimToPolicy])).toBe("Policy");
+    expect(resolveViaAlias("Claim", "policys", [claimToPolicy])).toBeNull(); // the old, wrong pluralization must NOT match
+  });
 });
 
 describe("validationEngine: buildDependencyIndex + affectedValidations — driven only by dependsOn, never by parsing test", () => {

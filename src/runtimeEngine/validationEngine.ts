@@ -7,11 +7,14 @@
 import type { ValidationDef, RelationshipDef } from "./applicationModel.js";
 import { evaluateCondition, type ExpressionContext } from "./expressions.js";
 
-// "lineItems" from a plural camelCase alias <-> "LineItem" the entity name — naive (no irregular
-// plurals), documented as a best-effort convention: the alias in a via="..." attribute is assumed
-// to be the related entity's name, lowercased-first-letter, with a trailing "s".
+// "lineItems" from a plural camelCase alias <-> "LineItem" the entity name — best-effort, not a
+// full English pluralizer, but handles the one irregular case common enough to matter here: a
+// name ending in consonant+y (Policy, Category, Company) pluralizes to -ies, not a naive +s
+// ("Policy" -> "policies", never "policys" — the AI reliably writes proper English plurals in
+// via="...", so a naive +s here would simply never match for any such entity name).
 function pluralizeCamel(entityName: string): string {
   const camel = entityName.charAt(0).toLowerCase() + entityName.slice(1);
+  if (/[^aeiou]y$/i.test(camel)) return camel.slice(0, -1) + "ies";
   return camel.endsWith("s") ? camel : `${camel}s`;
 }
 

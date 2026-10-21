@@ -41,27 +41,46 @@ function isBlank(v: unknown): boolean {
   return v === undefined || v === null || v === "";
 }
 
-// "lineItems" <-> "LineItem" — same best-effort convention validationEngine.ts uses, kept in sync
+// "lineItems" <-> "LineItem" — same best-effort convention validationEngine.ts uses (including the
+// consonant+y -> -ies fix: "Policy" -> "policies", never the naive "policys"), kept in sync
 // deliberately rather than imported, since the two are independent small pure helpers.
 function pluralizeCamel(entityName: string): string {
   const camel = entityName.charAt(0).toLowerCase() + entityName.slice(1);
+  if (/[^aeiou]y$/i.test(camel)) return camel.slice(0, -1) + "ies";
   return camel.endsWith("s") ? camel : `${camel}s`;
 }
 
-// Pre-fetches every OTHER entity's rows that reference this one (the "many" side of a relationship
-// pointing AT this entity), keyed by the same pluralized alias convention via="..." uses — e.g.
-// saving/validating a PurchaseOrder gets related.lineItems = all LineItem rows whose poId matches.
+// Pre-fetches every related entity's rows, in BOTH directions, keyed by the same pluralized alias
+// convention via="..." uses:
+//  - children pointing AT this entity (the "many" side, e.g. a PurchaseOrder's LineItems) — found
+//    by this entity's OWN key value, used for sum/avg/count/min/max(alias.field) over the set.
+//  - the single PARENT this entity points TO (the "one" side, e.g. a Claim's Policy) — found by
+//    the FK value already in `data` (not yet saved), used for a bare alias.field reference. Still
+//    stored as a one-element array under the same alias shape, so a bare alias.field (which reads
+//    the array's first row) and an aggregate function (which would just as correctly sum a single
+//    value) both resolve the same way without the expression evaluator needing to know which
+//    direction the relationship came from.
 async function fetchRelatedRows(
-  tx: Transaction, applicationId: string | number, entity: EntityDef, relationships: RelationshipDef[], keyValue: unknown
+  tx: Transaction, applicationId: string | number, entity: EntityDef, relationships: RelationshipDef[],
+  keyValue: unknown, data: Record<string, unknown>
 ): Promise<Record<string, Record<string, unknown>[]>> {
   const related: Record<string, Record<string, unknown>[]> = {};
   for (const rel of relationships) {
-    if (rel.toEntity !== entity.name) continue; // only the "children point at this entity" direction
-    const alias = pluralizeCamel(rel.fromEntity);
-    const childLabel = entityLabelFor(applicationId, rel.fromEntity);
-    const fkField = safeIdent(rel.fromField);
-    const res = await tx.run(`MATCH (c:${childLabel}) WHERE c.${fkField} = $key RETURN c`, { key: toDriverValue(keyValue) });
-    related[alias] = res.records.map((r) => fromDriverValue(r.get("c")) as Record<string, unknown>);
+    if (rel.toEntity === entity.name) {
+      const alias = pluralizeCamel(rel.fromEntity);
+      const childLabel = entityLabelFor(applicationId, rel.fromEntity);
+      const fkField = safeIdent(rel.fromField);
+      const res = await tx.run(`MATCH (c:${childLabel}) WHERE c.${fkField} = $key RETURN c`, { key: toDriverValue(keyValue) });
+      related[alias] = res.records.map((r) => fromDriverValue(r.get("c")) as Record<string, unknown>);
+    } else if (rel.fromEntity === entity.name) {
+      const fkValue = data[rel.fromField];
+      if (isBlank(fkValue)) continue; // nothing to look up yet (e.g. this field wasn't submitted)
+      const alias = pluralizeCamel(rel.toEntity);
+      const parentLabel = entityLabelFor(applicationId, rel.toEntity);
+      const parentKeyField = safeIdent(rel.toField);
+      const res = await tx.run(`MATCH (p:${parentLabel}) WHERE p.${parentKeyField} = $key RETURN p`, { key: toDriverValue(fkValue) });
+      related[alias] = res.records.map((r) => fromDriverValue(r.get("p")) as Record<string, unknown>);
+    }
   }
   return related;
 }
@@ -110,7 +129,7 @@ export async function saveEntityRow(
   // CHILD row changes, e.g. re-checking PurchaseOrder.total-matches-lines after saving a LineItem,
   // is not yet wired up here — Phase 2; see validationEngine.ts's affectedValidations for the piece
   // that would drive it).
-  const relatedRows = await fetchRelatedRows(tx, applicationId, entity, relationships, keyValue);
+  const relatedRows = await fetchRelatedRows(tx, applicationId, entity, relationships, keyValue, data);
   const ctx: ExpressionContext = { fields: data, related: relatedRows, session: { identity: session.identity } };
   const ownValidations = validations.filter((v) => v.entity === entity.name);
   const validationResults = runValidations(ownValidations, ctx);

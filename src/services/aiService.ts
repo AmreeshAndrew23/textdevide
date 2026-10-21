@@ -939,11 +939,19 @@ VOCABULARY RULES:
   test describes the condition that must hold for the record to be VALID (e.g. test's value
   meaning "orderDate is not after today" means "reject a future date", NOT "reject unless in the
   future"). Supported in test: comparators == != < <= > >=; now(); age(fieldName); sum/avg/count/
-  min/max(alias.field) where alias is a RELATED entity reached through a Relationship, referenced
-  the SAME way in DependsOn via a <Field name="theRelatedField" via="alias"/> entry. The alias is
-  the related entity's name, lowercased-first-letter, pluralized with a trailing s (Entity
-  "LineItem" -> alias "lineItems") — ONLY use an alias that actually matches a real Relationship
-  this way, or the dependency can't be resolved.
+  min/max(alias.field) aggregating over EVERY related row (use for a to-many relationship, e.g.
+  summing a PurchaseOrder's LineItems); a bare alias.field with no function wrapper (use for a
+  to-one relationship instead, e.g. a Claim reading its single Policy's premiumAmount — do NOT
+  wrap a to-one reference in sum()/etc., just write policy.premiumAmount directly); basic
+  arithmetic with * / + - between any two of the above, e.g. "claimAmount <= policy.premiumAmount
+  * 10" — ALWAYS put a space on both sides of the operator (policy.premiumAmount * 10, never
+  policy.premiumAmount*10), since this also keeps a hyphenated literal elsewhere unambiguous.
+  alias is a RELATED entity reached through a Relationship, referenced the SAME way in DependsOn
+  via a <Field name="theRelatedField" via="alias"/> entry. The alias is the related entity's name,
+  lowercased-first-letter, pluralized with a trailing s, for BOTH directions — a to-many child
+  (Entity "LineItem" -> alias "lineItems") and a to-one parent (Entity "Policy" -> alias
+  "policies", even though there's exactly one) use the identical naming rule. ONLY use an alias
+  that actually matches a real Relationship this way, or the dependency can't be resolved.
   CRITICAL XML ESCAPING: test is an XML ATTRIBUTE VALUE, not free text — a literal < or <= inside
   it is INVALID XML and will fail to parse. ALWAYS write &lt; for < and &lt;= for <=, and &amp; for
   a literal &, inside test (and inside any other attribute value that needs one, e.g. a Condition
@@ -1039,7 +1047,16 @@ WORKED EXAMPLE (study this shape closely — a Procurement app):
   </Action>
 </Application>
 
-Now generate a complete, valid Application for this description:
+COMPLETENESS — this is not optional: generate EVERY entity, field, relationship, rule, and
+screen the description actually mentions or clearly implies, even if that means more elements
+than the worked example above. Do not drop, merge, or quietly simplify something the description
+named just to keep the output short — a description naming 4 entities and 2 rules must produce an
+Application with all 4 entities and both rules as real Validation/Entity elements, not a smaller
+subset. Add a Screen for every entity a real user would need to create/browse records for. If the
+description mentions an action happening on a status change (approval, rejection, completion,
+etc.), give that entity a matching named Action with the right Steps, not just a bare Screen.
+
+Now generate a complete, valid Application for this description — cover everything in it:
 ${description}`;
 
 export async function generateApplicationXml(description: string, usageSink?: UsageEntry[], signal?: AbortSignal): Promise<string> {

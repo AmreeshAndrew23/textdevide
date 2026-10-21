@@ -31,6 +31,31 @@ describe("expressions: evaluateCondition — the real sample Validations", () =>
   });
 });
 
+describe("expressions: a bare alias.field (to-one relationship) and arithmetic — the real Insurance Claims case found live", () => {
+  it("claimAmount <= policy.premiumAmount * 10 — a bare dotted reference times a literal", () => {
+    const policy = { related: { policy: [{ premiumAmount: 500 }] } };
+    expect(evaluateCondition("claimAmount <= policy.premiumAmount * 10", ctx({ fields: { claimAmount: 4999 }, ...policy }))).toBe(true);
+    expect(evaluateCondition("claimAmount <= policy.premiumAmount * 10", ctx({ fields: { claimAmount: 5001 }, ...policy }))).toBe(false);
+  });
+
+  it("a hyphenated literal enum value is NEVER mistaken for subtraction (the actual regression this fix needed)", () => {
+    // "pending-approval" has no spaces around its hyphen — must resolve as the literal string, not
+    // (NaN from "pending") minus (NaN from "approval"). This is exactly the value <Set
+    // field="status" value="pending-approval"/> uses in this vocabulary's own worked example.
+    expect(evaluateExpression("pending-approval", ctx())).toBe("pending-approval");
+  });
+
+  it("basic +, -, / with required whitespace around the operator", () => {
+    expect(evaluateExpression("totalAmount + 5", ctx({ fields: { totalAmount: 10 } }))).toBe(15);
+    expect(evaluateExpression("totalAmount - 5", ctx({ fields: { totalAmount: 10 } }))).toBe(5);
+    expect(evaluateExpression("totalAmount / 2", ctx({ fields: { totalAmount: 10 } }))).toBe(5);
+  });
+
+  it("a negative number literal is never mistaken for a subtraction with an empty left side", () => {
+    expect(evaluateExpression("-5", ctx())).toBe(-5);
+  });
+});
+
 describe("expressions: malformed input fails soft (never throws), same precedent as the old engine", () => {
   it("no comparator at all -> false, with a warning logged", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
