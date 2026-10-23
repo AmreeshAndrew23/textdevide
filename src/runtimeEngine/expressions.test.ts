@@ -56,6 +56,31 @@ describe("expressions: a bare alias.field (to-one relationship) and arithmetic �
   });
 });
 
+describe("expressions: evaluateCondition — and/or combining two whole comparisons (a real range-check bug)", () => {
+  // Regression test for a real incident: the AI wrote "hoursWorked >= 0 and hoursWorked <= 24"
+  // for a Timesheet Validation — a perfectly natural range check — and it silently rejected
+  // EVERY value regardless of whether it was actually in range, because nothing ever split on
+  // "and" at all: the comparator regex took the first ">=" and treated the whole remainder
+  // ("0 and hoursWorked <= 24") as one unresolvable right-hand operand.
+  it("a range check with \"and\" passes when both sides hold", () => {
+    expect(evaluateCondition("hoursWorked >= 0 and hoursWorked <= 24", ctx({ fields: { hoursWorked: 8 } }))).toBe(true);
+  });
+  it("the same range check fails when either side doesn't hold", () => {
+    expect(evaluateCondition("hoursWorked >= 0 and hoursWorked <= 24", ctx({ fields: { hoursWorked: 25 } }))).toBe(false);
+    expect(evaluateCondition("hoursWorked >= 0 and hoursWorked <= 24", ctx({ fields: { hoursWorked: -1 } }))).toBe(false);
+  });
+  it("\"or\" passes when at least one side holds", () => {
+    expect(evaluateCondition("status == \"draft\" or status == \"pending\"", ctx({ fields: { status: "pending" } }))).toBe(true);
+    expect(evaluateCondition("status == \"draft\" or status == \"pending\"", ctx({ fields: { status: "approved" } }))).toBe(false);
+  });
+  it("never mistakes a field name merely CONTAINING \"and\"/\"or\" as substring for the keyword", () => {
+    // "brandId" contains the letters "and"; "corporation" contains "or" — neither has whitespace
+    // around that substring, so LOGICAL_RE must not split on it.
+    expect(evaluateCondition("brandId == 5", ctx({ fields: { brandId: 5 } }))).toBe(true);
+    expect(evaluateCondition("corporation == true", ctx({ fields: { corporation: true } }))).toBe(true);
+  });
+});
+
 describe("expressions: malformed input fails soft (never throws), same precedent as the old engine", () => {
   it("no comparator at all -> false, with a warning logged", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

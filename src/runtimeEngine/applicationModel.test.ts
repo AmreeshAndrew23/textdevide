@@ -167,6 +167,7 @@ describe("applicationModel: per-tag typed parsers against the real sample elemen
   it("parseEntityElement — PurchaseOrder's fields, including the enum's Values and the autoNumber link", () => {
     const po = parseEntityElement(xmlOf("Entity", "PurchaseOrder"));
     expect(po.auditing).toBe("standard");
+    expect(po.isAccount).toBe(false); // the sample has no real end-user accounts
     expect(po.fields.map((f) => f.name)).toEqual(["id", "poNumber", "vendorId", "orderDate", "status", "totalAmount", "branchId", "discount"]);
     const poNumber = po.fields.find((f) => f.name === "poNumber")!;
     expect(poNumber.unique).toBe(true);
@@ -176,6 +177,13 @@ describe("applicationModel: per-tag typed parsers against the real sample elemen
     const totalAmount = po.fields.find((f) => f.name === "totalAmount")!;
     expect(totalAmount.precision).toBe(18);
     expect(totalAmount.scale).toBe(2);
+  });
+
+  it("parseEntityElement — isAccount=\"true\" marks the real end-user accounts entity", () => {
+    const user = parseEntityElement(
+      `<Entity name="User" isAccount="true"><Field name="id" type="string" key="true"/><Field name="username" type="string" required="true" unique="true"/></Entity>`
+    );
+    expect(user.isAccount).toBe(true);
   });
 
   it("parseRelationshipElement — fromField/toField/cardinality/onDelete all read correctly", () => {

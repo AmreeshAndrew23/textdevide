@@ -65,14 +65,29 @@ export const DomainUpdateSchema = z.object({
 });
 
 // The second, independent "Runtime Engine" — see runtimeEngine/. xml is the whole <Application>
-// document; applicationStore.ts splits it into one Neo4j node per top-level child.
+// document; applicationStore.ts splits it into one Neo4j node per top-level child. xml is
+// optional on create — "just a name" creates a real, empty Application that the description flow
+// fills in afterward (see routes/runtimeApplications.ts).
 export const RuntimeApplicationCreateSchema = z.object({
   name: z.string(),
+  xml: z.string().min(1).optional(),
+});
+
+export const RuntimeApplicationUpdateSchema = z.object({
   xml: z.string().min(1),
 });
 
+// existingXml (optional) is the application's CURRENT whole document — when present,
+// aiService.ts's generateApplicationXml reworks it in place to incorporate the new description
+// increment instead of generating from scratch, so an app can be built up over several messages.
 export const RuntimeApplicationGenerateSchema = z.object({
   description: z.string().min(1),
+  existingXml: z.string().optional(),
+});
+
+export const RuntimeApplicationChangePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: z.string().min(1),
 });
 
 export const RuntimeApplicationRunSchema = z.object({

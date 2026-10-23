@@ -914,6 +914,12 @@ VOCABULARY RULES:
   Entity/Relationship/Validation/DataSource/Screen/Action elements (Theme/Session/Auditing/
   AutoNumber are optional, at most one of each unless the request needs several AutoNumbers).
 - <Theme name="..."><Logo src="..." placement="top-left"/><Colors primary="#.." accent="#.." background="#.."/><Font family="..." size="14"/><Style cornerRadius="8" density="comfortable"/></Theme>
+  Pick Theme values to match the application's own register: a business/enterprise/corporate
+  domain (insurance, hospital, procurement, HR, finance, logistics, banking, government, and the
+  like) should get a professional, muted color palette (navy/slate/steel-blue primaries, not
+  bright playful ones), density="compact", and a clean corporate sans-serif (e.g. "Inter",
+  "Segoe UI", "Roboto"). A simpler consumer-facing or personal-tool description can keep
+  density="comfortable" and a friendlier accent color.
 - <Session><Variable name="branch" from="user.branch"/>...</Session> — only variables the Actions actually reference via {session.x}.
 - <Auditing name="standard" concurrency="timestamp"><Field role="createdBy" name="createdBy"/><Field role="createdOn" name="createdOn"/><Field role="updatedBy" name="updatedBy"/><Field role="updatedOn" name="updatedOn"/></Auditing>
   Reference it from an Entity via auditing="standard". Only add concurrency="timestamp" if the
@@ -923,11 +929,28 @@ VOCABULARY RULES:
   — reference it from a Field via autoNumber="<id>" (cosmetic only right now, no live numbering yet).
 - <Entity name="..." auditing="standard-or-omit">
     <Field name="id" type="string" key="true" maxLength="36"/>   <!-- EVERY entity needs exactly one key="true" field, always first -->
-    <Field name="..." type="string|integer|decimal|date|boolean|enum" required="true-or-omit" unique="true-or-omit" maxLength="50" min="0" precision="18" scale="2" autoNumber="id-or-omit"/>
+    <Field name="..." type="string|integer|decimal|date|boolean|enum|image" required="true-or-omit" unique="true-or-omit" maxLength="50" min="0" precision="18" scale="2" autoNumber="id-or-omit"/>
     <!-- type="enum" fields list their choices as <Value>choice</Value> children -->
+    <!-- type="image" is for a real picture (a profile photo, a company logo, ...) — its value is
+         always just the uploaded picture's own URL, handled entirely by the Run panel's upload
+         control; never required="true" (a record should be creatable before a picture exists) -->
   </Entity>
   Fields stay plain-typed — NEVER put a foreign-key-ish attribute on a Field. A field like
   vendorId is just type="string"; the Relationship element below is what carries the whole link.
+  REAL END-USER ACCOUNTS: if the description implies real end users logging in (not just the
+  person building the app poking at data), add exactly ONE Entity with isAccount="true" — always
+  named "User" — with EXACTLY this field set and NO others (fixed convention the login/register
+  built-ins look for by name): <Field name="id" type="string" key="true" maxLength="36"/>, <Field
+  name="username" type="string" required="true" unique="true"/>, <Field name="passwordHash"
+  type="string" required="true"/>, <Field name="mustChangePassword" type="boolean"
+  required="true"/>. This is a hard rule, not a suggestion — the built-in signup/login code ONLY
+  ever sets id/username/passwordHash/mustChangePassword, so ANY other required field on User
+  (a role, an employee link, an account code, anything) makes every signup fail outright with a
+  "required" error and nobody can ever log in. If the description wants to link an account to a
+  role or to a business entity (e.g. an Employee, or an AccessRole), do NOT add that as a field on
+  User — instead add a Relationship FROM that other entity TO User (e.g. <Relationship
+  fromEntity="Employee" fromField="userId" toEntity="User" toField="id".../>), so User itself
+  stays exactly those 4 fields and signup keeps working.
 - <Relationship name="..." fromEntity="..." fromField="..." toEntity="..." toField="id" cardinality="N:1|1:N|1:1|N:N" onDelete="restrict|cascade|setNull"/>
   fromEntity is the "many" side holding the foreign key (fromField); toEntity is the "one" side,
   toField is normally its key field.
@@ -945,7 +968,10 @@ VOCABULARY RULES:
   wrap a to-one reference in sum()/etc., just write policy.premiumAmount directly); basic
   arithmetic with * / + - between any two of the above, e.g. "claimAmount <= policy.premiumAmount
   * 10" — ALWAYS put a space on both sides of the operator (policy.premiumAmount * 10, never
-  policy.premiumAmount*10), since this also keeps a hyphenated literal elsewhere unambiguous.
+  policy.premiumAmount*10), since this also keeps a hyphenated literal elsewhere unambiguous;
+  "and"/"or" combining two whole comparisons for a range check, e.g. "hoursWorked &gt;= 0 and
+  hoursWorked &lt;= 24" — left-to-right only, no parentheses, so don't mix and/or in one test
+  without being sure the left-to-right reading is what you mean.
   alias is a RELATED entity reached through a Relationship, referenced the SAME way in DependsOn
   via a <Field name="theRelatedField" via="alias"/> entry. The alias is the related entity's name,
   lowercased-first-letter, pluralized with a trailing s, for BOTH directions — a to-many child
@@ -975,9 +1001,20 @@ VOCABULARY RULES:
       <UIField label="..." control="dropdown" valueFrom="field:fieldName" optionsFrom="query:dataSourceName"/>
       <UIField label="..." bind="fieldName"><On event="change" action="actionName"/></UIField>  <!-- UIField's On has NO Events wrapper -->
     </Fields>
-    <Buttons><Button label="Save" event="click" action="save"/></Buttons>  <!-- built-ins: save, cancel, delete, openRecord -->
+    <Buttons><Button label="Save" event="click" action="save"/></Buttons>  <!-- built-ins: save, cancel, delete, openRecord, login, register, changePassword -->
     <Events><On event="load" action="actionName"/></Events>  <!-- Screen/Grid's On IS wrapped in Events, unlike UIField's -->
   </Screen>
+  If you added a "User" isAccount entity above, you MUST also add exactly these three Screens,
+  named exactly this way: a Screen named "Signup" with entity="User", type="form", two UIFields
+  bound to "username" and "password", and a Button action="register" — THIS is how the very
+  first real account ever gets created (there is no other way; without it nobody could ever log
+  in, since there would be no accounts to log into); a Screen named "Login" with entity="User",
+  type="form", two UIFields bound to "username" and "password" (password is not a real Field on
+  User — the login built-in reads it straight from the submitted form, never stored), and a
+  Button action="login"; and a Screen named "ChangePassword" with entity="User", type="form",
+  UIFields bound to "currentPassword" and "newPassword" (same as password, submitted-only, not
+  real Fields), and a Button action="changePassword". Do not add a Logout button to any Screen —
+  logging out is handled outside the Screen/Action system entirely.
   A browse/list screen instead has: <Screen name="..." entity="...">
     <Grid name="..." entity="..." readonly="true">
       <Column header="..." bind="fieldName"/>
@@ -1059,12 +1096,39 @@ etc.), give that entity a matching named Action with the right Steps, not just a
 Now generate a complete, valid Application for this description — cover everything in it:
 ${description}`;
 
-export async function generateApplicationXml(description: string, usageSink?: UsageEntry[], signal?: AbortSignal): Promise<string> {
+// The "rework an existing Application" variant — used whenever the caller already has elements
+// (adding another entity, a screen, a rule, etc. in a later message) instead of starting fresh.
+// Reuses every vocabulary/completeness rule above by splicing the SAME instructions in before the
+// current-XML + new-requirement pair, so an incremental edit is held to the same bar as a from-
+// scratch generation (enterprise Theme choice, isAccount/Login/ChangePassword convention, etc.).
+const APPLICATION_XML_REWORK_SUFFIX = (existingXml: string, description: string) => `
+
+You are now REWORKING an EXISTING Application instead of starting from scratch. Here is its
+current, complete XML:
+${existingXml}
+
+Incorporate this new or changed requirement, reworking entities, relationships, validations,
+data sources, screens, and actions as needed so the WHOLE application stays internally
+consistent (e.g. if a new field affects an existing Validation's DependsOn, or a new Relationship
+needs a dropdown DataSource, fix those too — don't just bolt the new piece on). Keep everything
+from the current XML that the new requirement doesn't touch. Return the COMPLETE updated
+Application XML (not a diff, not just the new piece) — ONLY the XML, no explanations, no
+markdown fences.
+
+The new or changed requirement:
+${description}`;
+
+export async function generateApplicationXml(
+  description: string, existingXml?: string, usageSink?: UsageEntry[], signal?: AbortSignal
+): Promise<string> {
+  const userPrompt = existingXml
+    ? APPLICATION_XML_PROMPT(description) + APPLICATION_XML_REWORK_SUFFIX(existingXml, description)
+    : APPLICATION_XML_PROMPT(description);
   const xml = stripMarkdownFence(
     await callOpenAI(
       [
         { role: "system", content: "You are an enterprise application architect. Return ONLY valid XML, no markdown fences." },
-        { role: "user", content: APPLICATION_XML_PROMPT(description) },
+        { role: "user", content: userPrompt },
       ],
       { usageSink, signal }
     )

@@ -100,6 +100,18 @@ export async function getEntityRow(
   return res.records[0] ? (fromDriverValue(res.records[0].get("n")) as Record<string, unknown>) : null;
 }
 
+// Same lookup as getEntityRow, but keyed on an arbitrary field instead of the entity's own key —
+// used by the login built-in to find a User row by its "username" field (see applicationEngine.ts
+// and appAuth.ts), since a login submits a username, never the row's internal id.
+export async function getEntityRowByField(
+  tx: Transaction, applicationId: string | number, entity: EntityDef, fieldName: string, value: unknown
+): Promise<Record<string, unknown> | null> {
+  const label = entityLabelFor(applicationId, entity.name);
+  const field = safeIdent(fieldName);
+  const res = await tx.run(`MATCH (n:${label}) WHERE n.${field} = $value RETURN n`, { value: toDriverValue(value) });
+  return res.records[0] ? (fromDriverValue(res.records[0].get("n")) as Record<string, unknown>) : null;
+}
+
 export async function saveEntityRow(
   tx: Transaction, applicationId: string | number, entity: EntityDef, relationships: RelationshipDef[],
   validations: ValidationDef[], auditing: AuditingDef | null, data: Record<string, unknown>,

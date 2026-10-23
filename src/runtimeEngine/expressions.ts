@@ -12,7 +12,9 @@
  * a bare alias.field (no aggregate wrapper) resolving to that related set's FIRST row's field —
  * correct for a to-one relationship (ctx.related holds exactly one row there), arbitrary-but-
  * harmless for a genuine to-many one; {session.x} template placeholders; basic left-to-right
- * arithmetic (* / + -) between any two resolved operands, e.g. "policy.premiumAmount * 10".
+ * arithmetic (* / + -) between any two resolved operands, e.g. "policy.premiumAmount * 10";
+ * evaluateCondition ALSO supports and/or combining two whole comparisons (left-to-right, no
+ * parentheses/precedence), e.g. "hoursWorked >= 0 and hoursWorked <= 24" for a range check.
  */
 
 export type ExpressionContext = {
@@ -132,13 +134,34 @@ function resolveArithmetic(token: string, ctx: ExpressionContext, single: (t: st
   }
 }
 
-// Splits on the FIRST top-level comparator — deliberately simple (no operator precedence, no
-// boolean composition) since every Validation Condition in the target vocabulary is one
-// comparison. Longest operators checked first so <= isn't split as < followed by a stray =.
+// Splits on the FIRST top-level comparator — deliberately simple (no operator precedence)
+// since every single COMPARISON in the target vocabulary is one such split; boolean composition
+// (and/or) is handled a level up, in evaluateCondition, before this is ever reached. Longest
+// operators checked first so <= isn't split as < followed by a stray =.
 const COMPARATOR_RE = /^(.+?)\s*(==|!=|<=|>=|<|>)\s*(.+)$/;
 
+// A range check like "hoursWorked >= 0 and hoursWorked <= 24" is the single most common thing a
+// Validation needs beyond one plain comparison — caught live: the AI wrote exactly this (a real,
+// natural way to express "between 0 and 24"), and it was silently ALWAYS rejecting regardless of
+// the actual value, because nothing before this split on "and"/"or" at all: the comparator regex
+// greedily took the FIRST >= it found and treated the entire remainder ("0 and hoursWorked <= 24")
+// as one bare right-hand operand, which doesn't resolve to any real field and compares as NaN.
+// Required whitespace around the keyword (never a bare substring match) means a field literally
+// named e.g. "brandId" is never mistaken for containing the word "and". Left-to-right, no
+// parentheses grouping — same "deliberately simple" tradeoff the arithmetic splitter already
+// documents; a Condition needing real precedence should split into separate Validations instead.
+const LOGICAL_RE = /^(.+?)\s+(and|or)\s+(.+)$/i;
+
 export function evaluateCondition(test: string, ctx: ExpressionContext): boolean {
-  const m = COMPARATOR_RE.exec(test.trim());
+  const trimmed = test.trim();
+  const logical = LOGICAL_RE.exec(trimmed);
+  if (logical) {
+    const [, leftRaw, op, rightRaw] = logical;
+    const left = evaluateCondition(leftRaw, ctx);
+    const right = evaluateCondition(rightRaw, ctx);
+    return op.toLowerCase() === "and" ? left && right : left || right;
+  }
+  const m = COMPARATOR_RE.exec(trimmed);
   if (!m) {
     console.warn(`Malformed Condition test, treating as false: ${JSON.stringify(test)}`);
     return false;

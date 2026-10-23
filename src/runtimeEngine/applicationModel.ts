@@ -15,6 +15,13 @@ import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
 import type { Element as XmlElement } from "@xmldom/xmldom";
 import { isElement, childElements } from "../runtime/screenModel.js";
 
+// For building a minimal <Application> shell (e.g. a brand-new, name-only Application before any
+// description has been given) rather than parsing one — name is user-supplied free text, so it
+// must be escaped before landing inside an XML attribute value.
+export function escapeXmlAttr(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function parseXml(xml: string): XmlElement {
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   const root = doc.documentElement;
@@ -85,7 +92,10 @@ export function parseApplicationXml(xml: string): ApplicationManifest {
 // ---------------------------------------------------------------------------
 // Entity
 // ---------------------------------------------------------------------------
-export type FieldType = "string" | "integer" | "decimal" | "date" | "enum" | "boolean";
+// "image" is stored exactly like "string" (its value is just the served upload URL — see
+// runtimeEngine/uploads.ts) — the distinct type only tells the Run panel to render a real file
+// picker + thumbnail for that field instead of a text box.
+export type FieldType = "string" | "integer" | "decimal" | "date" | "enum" | "boolean" | "image";
 export type FieldDef = {
   name: string;
   type: FieldType;
@@ -99,7 +109,11 @@ export type FieldDef = {
   autoNumber: string | null;
   values: string[]; // <Value> children, for type="enum"
 };
-export type EntityDef = { name: string; auditing: string | null; fields: FieldDef[] };
+// isAccount marks the ONE entity (by fixed convention, always named "User") that holds real
+// end-user accounts for login/logout/change-password — see appAuth.ts and the login/
+// changePassword built-ins in applicationEngine.ts. Its fields follow a fixed name convention
+// (username/passwordHash/mustChangePassword) documented in aiService.ts's prompt, not parsed here.
+export type EntityDef = { name: string; auditing: string | null; isAccount: boolean; fields: FieldDef[] };
 
 export function parseEntityElement(xml: string): EntityDef {
   const el = parseXml(xml);
@@ -116,7 +130,7 @@ export function parseEntityElement(xml: string): EntityDef {
     autoNumber: attrOrNull(f, "autoNumber"),
     values: childElements(f, "Value").map(textOf),
   }));
-  return { name: attr(el, "name"), auditing: attrOrNull(el, "auditing"), fields };
+  return { name: attr(el, "name"), auditing: attrOrNull(el, "auditing"), isAccount: attrBool(el, "isAccount"), fields };
 }
 
 // ---------------------------------------------------------------------------

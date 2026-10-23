@@ -28,6 +28,7 @@ function record(props: Record<string, unknown>) {
 const VENDOR: EntityDef = {
   name: "Vendor",
   auditing: "standard",
+  isAccount: false,
   fields: [
     { name: "id", type: "string", key: true, required: false, unique: false, autoNumber: null, values: [] },
     { name: "name", type: "string", key: false, required: true, unique: false, autoNumber: null, values: [] },
@@ -136,7 +137,7 @@ describe("entityStore.saveEntityRow: audit stamping", () => {
 
 describe("entityStore.saveEntityRow: validating against a single PARENT record (the real Insurance Claims case found live)", () => {
   const CLAIM: EntityDef = {
-    name: "Claim", auditing: null,
+    name: "Claim", auditing: null, isAccount: false,
     fields: [
       { name: "id", type: "string", key: true, required: false, unique: false, autoNumber: null, values: [] },
       { name: "policyId", type: "string", key: false, required: true, unique: false, autoNumber: null, values: [] },
@@ -177,7 +178,7 @@ describe("entityStore.saveEntityRow: validating against a single PARENT record (
 });
 
 describe("entityStore.deleteEntityRow: onDelete restrict vs cascade", () => {
-  const PO: EntityDef = { name: "PurchaseOrder", auditing: null, fields: [{ name: "id", type: "string", key: true, required: false, unique: false, autoNumber: null, values: [] }] };
+  const PO: EntityDef = { name: "PurchaseOrder", auditing: null, isAccount: false, fields: [{ name: "id", type: "string", key: true, required: false, unique: false, autoNumber: null, values: [] }] };
   const restrictRel: RelationshipDef = { name: "LineItem-to-PO", fromEntity: "LineItem", fromField: "poId", toEntity: "PurchaseOrder", toField: "id", cardinality: "N:1", onDelete: "restrict" };
   const cascadeRel: RelationshipDef = { ...restrictRel, onDelete: "cascade" };
 
