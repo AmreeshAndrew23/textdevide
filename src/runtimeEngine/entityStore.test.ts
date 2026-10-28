@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Transaction } from "neo4j-driver";
-import { saveEntityRow, deleteEntityRow, ValidationError, ConcurrencyError } from "./entityStore.js";
+import {
+  saveEntityRow, deleteEntityRow, restoreEntityRow, listEntityRows, getEntityRow,
+  setEntityOtp, consumeEntityOtp, ValidationError, ConcurrencyError,
+} from "./entityStore.js";
 import type { EntityDef, RelationshipDef, ValidationDef, AuditingDef } from "./applicationModel.js";
 
 // A minimal fake neo4j-driver Transaction: tx.run returns the next queued response in order,
@@ -55,26 +58,50 @@ describe("entityStore.saveEntityRow: required-field rejection happens before any
   });
 });
 
-describe("entityStore.saveEntityRow: concurrency check on update", () => {
-  it("rejects with ConcurrencyError when the submitted updatedOn doesn't match the stored row", async () => {
-    const { tx } = fakeTx([
-      { records: [record({ id: "v1", name: "Acme", updatedOn: "2024-01-01T00:00:00.000Z" })] }, // existing-row fetch
+describe("entityStore.saveEntityRow: stale-edit conflict via the system-managed __version", () => {
+  it("rejects with ConcurrencyError when the submitted __version doesn't match the stored row's", async () => {
+    const { tx, calls } = fakeTx([
+      { records: [record({ id: "v1", name: "Acme", __version: 2 })] }, // existing-row fetch
     ]);
     await expect(
       saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING,
-        { id: "v1", name: "Acme Renamed", updatedOn: "2023-01-01T00:00:00.000Z" }, SESSION)
+        { id: "v1", name: "Acme Renamed", __version: 1 }, SESSION)
     ).rejects.toThrow(ConcurrencyError);
+    expect(calls).toHaveLength(1); // never reaches the write
   });
 
-  it("proceeds when the submitted updatedOn matches", async () => {
+  it("proceeds when the submitted __version matches the stored row's", async () => {
     const { tx } = fakeTx([
-      { records: [record({ id: "v1", name: "Acme", updatedOn: "2024-01-01T00:00:00.000Z" })] }, // existing
-      { records: [] }, // MERGE write
-      { records: [record({ id: "v1", name: "Acme Renamed" })] }, // final read-back
+      { records: [record({ id: "v1", name: "Acme", __version: 1 })] }, // existing
+      { records: [record({ id: "v1" })] }, // conditional write — matched, succeeded
+      { records: [] }, // CREATED_BY edge upsert
+      { records: [record({ id: "v1", name: "Acme Renamed", __version: 2 })] }, // final read-back
     ]);
     const result = await saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING,
-      { id: "v1", name: "Acme Renamed", updatedOn: "2024-01-01T00:00:00.000Z" }, SESSION);
+      { id: "v1", name: "Acme Renamed", __version: 1 }, SESSION);
     expect(result.created).toBe(false);
+  });
+
+  it("skips the check gracefully when the client never submitted __version (a pre-migration row, or a non-UI caller)", async () => {
+    const { tx } = fakeTx([
+      { records: [record({ id: "v1", name: "Acme" })] }, // existing, no __version property at all
+      { records: [record({ id: "v1" })] },
+      { records: [] },
+      { records: [record({ id: "v1", name: "Acme Renamed" })] },
+    ]);
+    const result = await saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING,
+      { id: "v1", name: "Acme Renamed" }, SESSION); // no __version submitted
+    expect(result.created).toBe(false);
+  });
+
+  it("tight-race CAS: rejects with ConcurrencyError when the conditional write itself matches zero rows (another save landed between our read and our write)", async () => {
+    const { tx } = fakeTx([
+      { records: [record({ id: "v1", name: "Acme", __version: 1 })] }, // existing
+      { records: [] }, // conditional write matched nothing — someone else won the race
+    ]);
+    await expect(
+      saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING, { id: "v1", name: "Acme Renamed" }, SESSION)
+    ).rejects.toThrow(ConcurrencyError);
   });
 });
 
@@ -97,6 +124,7 @@ describe("entityStore.saveEntityRow: this entity's own Validations reject before
     const { tx } = fakeTx([
       { records: [] }, // no existing row — this is a create
       { records: [] }, // MERGE write
+      { records: [] }, // CREATED_BY edge upsert
       { records: [record({ id: "v1", name: "Acme", creditLimit: 500 })] }, // final read-back
     ]);
     const result = await saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [creditLimitNonNegative], AUDITING,
@@ -110,6 +138,7 @@ describe("entityStore.saveEntityRow: audit stamping", () => {
     const { tx, calls } = fakeTx([
       { records: [] }, // no existing row
       { records: [] }, // MERGE write
+      { records: [] }, // CREATED_BY edge upsert
       { records: [record({ id: "v1" })] }, // final read-back
     ]);
     await saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING, { id: "v1", name: "Acme" }, SESSION);
@@ -124,7 +153,8 @@ describe("entityStore.saveEntityRow: audit stamping", () => {
   it("does NOT re-stamp createdBy/createdOn on an update", async () => {
     const { tx, calls } = fakeTx([
       { records: [record({ id: "v1", name: "Acme", createdBy: "bob@example.com", createdOn: "2020-01-01T00:00:00.000Z" })] },
-      { records: [] },
+      { records: [record({ id: "v1" })] }, // conditional write — matched, succeeded
+      { records: [] }, // CREATED_BY edge upsert
       { records: [record({ id: "v1" })] },
     ]);
     await saveEntityRow(tx, 7, VENDOR, NO_RELATIONSHIPS, [], AUDITING, { id: "v1", name: "Acme Updated" }, SESSION);
@@ -156,6 +186,7 @@ describe("entityStore.saveEntityRow: validating against a single PARENT record (
       { records: [] }, // existing-row fetch — none, this is a create
       { records: [record({ id: "pol-1", premiumAmount: 500 })] }, // the parent Policy fetch
       { records: [] }, // MERGE write
+      { records: [] }, // CREATED_BY edge upsert
       { records: [record({ id: "claim-1" })] }, // final read-back
     ]);
     const result = await saveEntityRow(tx, 7, CLAIM, [claimToPolicy], [claimWithinLimit], null,
@@ -183,21 +214,141 @@ describe("entityStore.deleteEntityRow: onDelete restrict vs cascade", () => {
   const cascadeRel: RelationshipDef = { ...restrictRel, onDelete: "cascade" };
 
   it("restrict: refuses to delete when a child row still references it", async () => {
-    const { tx, calls } = fakeTx([{ records: [record({ cnt: 2 })] }]); // count check finds 2 LineItems
-    await expect(deleteEntityRow(tx, 7, PO, [restrictRel], "po1")).rejects.toThrow(ValidationError);
-    expect(calls).toHaveLength(1); // never reaches the actual delete
+    const { tx, calls } = fakeTx([
+      { records: [record({ id: "po1" })] }, // leading existing-row fetch (found, not deleted)
+      { records: [record({ cnt: 2 })] }, // count check finds 2 LineItems
+    ]);
+    await expect(deleteEntityRow(tx, 7, PO, [restrictRel], "po1", SESSION)).rejects.toThrow(ValidationError);
+    expect(calls).toHaveLength(2); // never reaches the actual delete
   });
 
   it("restrict: deletes cleanly when no child rows reference it", async () => {
-    const { tx, calls } = fakeTx([{ records: [record({ cnt: 0 })] }, { records: [] }]);
-    await deleteEntityRow(tx, 7, PO, [restrictRel], "po1");
-    expect(calls).toHaveLength(2); // count check, then the delete itself
+    const { tx, calls } = fakeTx([{ records: [record({ id: "po1" })] }, { records: [record({ cnt: 0 })] }, { records: [] }]);
+    await deleteEntityRow(tx, 7, PO, [restrictRel], "po1", SESSION);
+    expect(calls).toHaveLength(3); // existing fetch, count check, then the soft-delete itself
+    expect(calls[2].statement).toContain("SET n.__deletedAt");
   });
 
-  it("cascade: deletes child rows first, then this row", async () => {
-    const { tx, calls } = fakeTx([{ records: [record({ cnt: 2 })] }, { records: [] }, { records: [] }]);
-    await deleteEntityRow(tx, 7, PO, [cascadeRel], "po1");
-    expect(calls).toHaveLength(3); // count check, cascade delete of children, delete of this row
-    expect(calls[1].statement).toContain("DETACH DELETE c");
+  it("cascade: soft-deletes child rows first, then this row", async () => {
+    const { tx, calls } = fakeTx([
+      { records: [record({ id: "po1" })] }, { records: [record({ cnt: 2 })] }, { records: [] }, { records: [] },
+    ]);
+    await deleteEntityRow(tx, 7, PO, [cascadeRel], "po1", SESSION);
+    expect(calls).toHaveLength(4); // existing fetch, count check, cascade soft-delete of children, soft-delete of this row
+    expect(calls[2].statement).toContain("SET c.__deletedAt");
+    expect(calls[2].statement).not.toContain("DETACH DELETE");
+  });
+
+  it("rejects when the row doesn't exist", async () => {
+    const { tx, calls } = fakeTx([{ records: [] }]); // leading existing-row fetch finds nothing
+    await expect(deleteEntityRow(tx, 7, PO, [], "ghost", SESSION)).rejects.toThrow(ValidationError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("rejects when the row is already soft-deleted", async () => {
+    const { tx, calls } = fakeTx([{ records: [record({ id: "po1", __deletedAt: "2024-01-01T00:00:00.000Z" })] }]);
+    await expect(deleteEntityRow(tx, 7, PO, [], "po1", SESSION)).rejects.toThrow("already deleted");
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe("entityStore.restoreEntityRow", () => {
+  const PO: EntityDef = { name: "PurchaseOrder", auditing: null, isAccount: false, fields: [{ name: "id", type: "string", key: true, required: false, unique: false, autoNumber: null, values: [] }] };
+
+  it("un-deletes a soft-deleted row", async () => {
+    const { tx, calls } = fakeTx([
+      { records: [record({ id: "po1", __deletedAt: "2024-01-01T00:00:00.000Z" })] }, // found, deleted
+      { records: [] }, // the restore write
+    ]);
+    await restoreEntityRow(tx, 7, PO, "po1");
+    expect(calls).toHaveLength(2);
+    expect(calls[1].statement).toContain("__deletedAt = null");
+  });
+
+  it("rejects when the row isn't actually deleted", async () => {
+    const { tx } = fakeTx([{ records: [record({ id: "po1" })] }]); // found, not deleted
+    await expect(restoreEntityRow(tx, 7, PO, "po1")).rejects.toThrow("isn't deleted");
+  });
+
+  it("rejects when the row doesn't exist at all", async () => {
+    const { tx } = fakeTx([{ records: [] }]);
+    await expect(restoreEntityRow(tx, 7, PO, "ghost")).rejects.toThrow(ValidationError);
+  });
+});
+
+describe("entityStore.listEntityRows / getEntityRow: soft-deleted rows excluded by default", () => {
+  const PO: EntityDef = { name: "PurchaseOrder", auditing: null, isAccount: false, fields: [{ name: "id", type: "string", key: true, required: false, unique: false, autoNumber: null, values: [] }] };
+
+  it("listEntityRows filters __deletedAt IS NULL unless includeDeleted is passed", async () => {
+    const { tx: tx1, calls: calls1 } = fakeTx([{ records: [] }]);
+    await listEntityRows(tx1, 7, PO);
+    expect(calls1[0].statement).toContain("__deletedAt IS NULL");
+
+    const { tx: tx2, calls: calls2 } = fakeTx([{ records: [] }]);
+    await listEntityRows(tx2, 7, PO, { includeDeleted: true });
+    expect(calls2[0].statement).not.toContain("__deletedAt");
+  });
+
+  it("getEntityRow filters __deletedAt IS NULL unless includeDeleted is passed", async () => {
+    const { tx: tx1, calls: calls1 } = fakeTx([{ records: [] }]);
+    await getEntityRow(tx1, 7, PO, "po1");
+    expect(calls1[0].statement).toContain("__deletedAt IS NULL");
+
+    const { tx: tx2, calls: calls2 } = fakeTx([{ records: [] }]);
+    await getEntityRow(tx2, 7, PO, "po1", { includeDeleted: true });
+    expect(calls2[0].statement).not.toContain("__deletedAt");
+  });
+});
+
+describe("entityStore.setEntityOtp / consumeEntityOtp — the OTP mechanism behind email verification and forgot-password", () => {
+  const USER: EntityDef = { name: "User", auditing: null, isAccount: true, fields: [{ name: "id", type: "string", key: true, required: false, unique: false, autoNumber: null, values: [] }] };
+
+  it("setEntityOtp writes code/expiry/purpose as a single raw SET", async () => {
+    const { tx, calls } = fakeTx([{ records: [] }]);
+    await setEntityOtp(tx, 7, USER, "u1", "verifyEmail", "123456", 10);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].statement).toContain("__otpCode = $code");
+    expect(calls[0].statement).toContain("__otpExpiresAt = $expiresAt");
+    expect(calls[0].statement).toContain("__otpPurpose = $purpose");
+    const params = calls[0].params as { code: string; purpose: string };
+    expect(params.code).toBe("123456");
+    expect(params.purpose).toBe("verifyEmail");
+  });
+
+  it("consumeEntityOtp succeeds on a matching, unexpired code, and clears it in the same write", async () => {
+    const row = { id: "u1", __otpCode: "123456", __otpPurpose: "verifyEmail", __otpExpiresAt: new Date(Date.now() + 5 * 60000).toISOString() };
+    const { tx, calls } = fakeTx([{ records: [record(row)] }, { records: [] }]);
+    const result = await consumeEntityOtp(tx, 7, USER, "u1", "verifyEmail", "123456");
+    expect(result).toEqual({ ok: true });
+    expect(calls).toHaveLength(2);
+    expect(calls[1].statement).toContain("__otpCode = null");
+  });
+
+  it("rejects a mismatched code without clearing anything", async () => {
+    const row = { id: "u1", __otpCode: "123456", __otpPurpose: "verifyEmail", __otpExpiresAt: new Date(Date.now() + 5 * 60000).toISOString() };
+    const { tx, calls } = fakeTx([{ records: [record(row)] }]);
+    const result = await consumeEntityOtp(tx, 7, USER, "u1", "verifyEmail", "000000");
+    expect(result).toEqual({ ok: false, reason: "mismatch" });
+    expect(calls).toHaveLength(1); // no clearing write on failure
+  });
+
+  it("rejects an expired code", async () => {
+    const row = { id: "u1", __otpCode: "123456", __otpPurpose: "verifyEmail", __otpExpiresAt: new Date(Date.now() - 1000).toISOString() };
+    const { tx } = fakeTx([{ records: [record(row)] }]);
+    const result = await consumeEntityOtp(tx, 7, USER, "u1", "verifyEmail", "123456");
+    expect(result).toEqual({ ok: false, reason: "expired" });
+  });
+
+  it("rejects a code submitted for the wrong purpose (verify-email code replayed against a password reset)", async () => {
+    const row = { id: "u1", __otpCode: "123456", __otpPurpose: "verifyEmail", __otpExpiresAt: new Date(Date.now() + 5 * 60000).toISOString() };
+    const { tx } = fakeTx([{ records: [record(row)] }]);
+    const result = await consumeEntityOtp(tx, 7, USER, "u1", "resetPassword", "123456");
+    expect(result).toEqual({ ok: false, reason: "none" });
+  });
+
+  it("rejects when there's no OTP on the row at all", async () => {
+    const { tx } = fakeTx([{ records: [record({ id: "u1" })] }]);
+    const result = await consumeEntityOtp(tx, 7, USER, "u1", "verifyEmail", "123456");
+    expect(result).toEqual({ ok: false, reason: "none" });
   });
 });

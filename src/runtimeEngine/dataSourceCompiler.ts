@@ -34,7 +34,7 @@ export function compileDataSource(
   }
 
   const params: Record<string, unknown> = {};
-  const whereClauses: string[] = [];
+  const whereClauses: string[] = ["n.__deletedAt IS NULL"];
   def.conditions.forEach((c, i) => {
     const paramName = `cond${i}`;
     const op = OPERATOR_TO_CYPHER[c.operator];

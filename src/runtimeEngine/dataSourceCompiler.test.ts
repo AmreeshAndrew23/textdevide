@@ -27,7 +27,7 @@ describe("dataSourceCompiler: activeVendors — the simple, Phase-1-supported ca
 
   it("compiles to a parameterized Cypher statement, resolving {session.branch} into a bound param, never interpolated into the text", () => {
     const { statement, params } = compileDataSource(def, 7, ENTITIES, { branch: "NYC" });
-    expect(statement).toBe('MATCH (n:RtApp7_Vendor) WHERE n.status = $cond0 AND n.branch = $cond1 RETURN n.id AS id, n.name AS name ORDER BY n.name ASC');
+    expect(statement).toBe('MATCH (n:RtApp7_Vendor) WHERE n.__deletedAt IS NULL AND n.status = $cond0 AND n.branch = $cond1 RETURN n.id AS id, n.name AS name ORDER BY n.name ASC');
     expect(params).toEqual({ cond0: "active", cond1: "NYC" });
     expect(statement).not.toContain("NYC"); // the resolved session value is bound, not inlined
   });

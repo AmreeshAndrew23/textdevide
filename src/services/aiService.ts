@@ -907,9 +907,11 @@ export async function generateUiXml(
 // the simple, actually-executable case — no aggregate/GroupBy/cross-entity dotted fields yet),
 // Screens (UIField bind/valueFrom/optionsFrom, a Grid, Buttons, Events), and named Actions
 // (Set/Save/Notify steps) — built-ins save/cancel/delete/openRecord are never redefined as one.
-const APPLICATION_XML_PROMPT = (description: string) => `You are an enterprise application architect. Given a plain-English description, generate ONE complete <Application> XML document in the exact vocabulary below. Return ONLY the XML, no explanations, no markdown fences.
-
-VOCABULARY RULES:
+// The vocabulary rules + worked example + completeness note — shared verbatim by both the
+// from-scratch prompt below and the fix/merge prompt further down, so an incremental fix is held
+// to the exact same vocabulary/completeness bar as a from-scratch generation. Takes no
+// description param itself; each call site appends its own final per-call instruction.
+const APPLICATION_VOCABULARY_RULES = `VOCABULARY RULES:
 - Root: <Application name="..." theme="..." database="relational">, containing any number of
   Entity/Relationship/Validation/DataSource/Screen/Action elements (Theme/Session/Auditing/
   AutoNumber are optional, at most one of each unless the request needs several AutoNumbers).
@@ -935,22 +937,60 @@ VOCABULARY RULES:
          always just the uploaded picture's own URL, handled entirely by the Run panel's upload
          control; never required="true" (a record should be creatable before a picture exists) -->
   </Entity>
+  Entity also takes an optional icon="..." attribute — the Run panel's left nav and dashboard use
+  it for that entity's icon (a real line-icon, not an emoji) instead of guessing from the name.
+  Pick the single closest match from EXACTLY this list (any other value is ignored, falling back to
+  a keyword guess): users, user-cog, building, home, folder, dollar-sign, clock, palm-tree,
+  warehouse, shopping-cart, receipt, credit-card, shield, wrench, clipboard-check, file-text,
+  graduation-cap, book-open, heart-pulse, stethoscope, lock, notebook, car, package, briefcase.
+  E.g. an Employee/Staff entity gets icon="users", a Vendor gets icon="warehouse", a LeaveRequest
+  gets icon="palm-tree", a PurchaseOrder gets icon="shopping-cart". If truly nothing on the list
+  fits, omit the attribute rather than forcing a bad match.
   Fields stay plain-typed — NEVER put a foreign-key-ish attribute on a Field. A field like
   vendorId is just type="string"; the Relationship element below is what carries the whole link.
   REAL END-USER ACCOUNTS: if the description implies real end users logging in (not just the
-  person building the app poking at data), add exactly ONE Entity with isAccount="true" — always
-  named "User" — with EXACTLY this field set and NO others (fixed convention the login/register
-  built-ins look for by name): <Field name="id" type="string" key="true" maxLength="36"/>, <Field
-  name="username" type="string" required="true" unique="true"/>, <Field name="passwordHash"
-  type="string" required="true"/>, <Field name="mustChangePassword" type="boolean"
-  required="true"/>. This is a hard rule, not a suggestion — the built-in signup/login code ONLY
-  ever sets id/username/passwordHash/mustChangePassword, so ANY other required field on User
-  (a role, an employee link, an account code, anything) makes every signup fail outright with a
-  "required" error and nobody can ever log in. If the description wants to link an account to a
-  role or to a business entity (e.g. an Employee, or an AccessRole), do NOT add that as a field on
-  User — instead add a Relationship FROM that other entity TO User (e.g. <Relationship
-  fromEntity="Employee" fromField="userId" toEntity="User" toField="id".../>), so User itself
-  stays exactly those 4 fields and signup keeps working.
+  person building the app poking at data), add exactly ONE Entity with isAccount="true" — this
+  attribute on the Entity tag itself is NOT optional and is easy to forget; double-check every
+  <Entity name="User" ...> you write actually has isAccount="true" on it, every single time, even
+  when its fields are already exactly right — always named "User" — with EXACTLY this field set
+  and NO others, with ONE narrow exception below (fixed convention the login/register/verifyEmail/
+  OAuth built-ins look for by name — this is a hard rule, not a suggestion):
+    <Field name="id" type="string" key="true" maxLength="36"/>
+    <Field name="email" type="string" required="true" unique="true"/>
+    <Field name="passwordHash" type="string"/>                      <!-- NOT required — an OAuth-only account has none -->
+    <Field name="mustChangePassword" type="boolean" required="true"/>
+    <Field name="firstName" type="string"/>                         <!-- NOT required at the Field level; register enforces it directly -->
+    <Field name="lastName" type="string"/>                          <!-- same as firstName -->
+    <Field name="dob" type="date"/>                                 <!-- NOT required at the Field level; register enforces an age minimum directly -->
+    <Field name="emailVerified" type="boolean" required="true"/>
+    <Field name="authProvider" type="string" required="true"/>      <!-- "password" | "google" | "github", set by the built-ins themselves -->
+  Do NOT add a Validation entity for email format or minimum age — the engine already enforces
+  both internally (a real email shape, and a minimum signup age checked against dob) inside the
+  register built-in; an AI-authored Validation for either would just be redundant/conflicting.
+  ANY other field on User (an employee link, an account code, anything) makes every signup fail
+  outright with a "required" error and nobody can ever log in, UNLESS you make it genuinely
+  optional (required="false") AND it's not one the built-ins themselves set — in practice, don't
+  add extra fields to User at all. If the description wants to link an account to a business
+  entity (e.g. an Employee), do NOT add that as a field on User — instead add a Relationship FROM
+  that other entity TO User (e.g. <Relationship fromEntity="Employee" fromField="userId"
+  toEntity="User" toField="id".../>), so User itself stays exactly this fixed shape and signup
+  keeps working. The built-ins already handle email verification (a 6-digit code emailed on
+  signup, login blocked until verified), forgot-password (an emailed 6-digit code resets the
+  password), and Google/GitHub sign-in (the frontend adds those buttons automatically whenever
+  User has an "email" field — nothing else to declare for them).
+  OPTIONAL ROLE-BASED ACCESS (only add this when the description genuinely implies different kinds
+  of users needing different access — e.g. "HR can see payroll but regular employees can't"; most
+  apps don't need this): the ONE allowed exception to the User shape above is a 5th field, <Field
+  name="roleId" type="string"/> — it MUST NOT be required="true" (a required roleId breaks signup
+  exactly like any other required extra field would, since register never sets it). Pair it with a
+  Relationship from User's roleId to the role entity's key, e.g. <Relationship fromEntity="User"
+  fromField="roleId" toEntity="AccessRole" toField="id" cardinality="N:1" onDelete="setNull"/> —
+  the role entity (commonly named AccessRole) needs a "name" field (its display name, e.g. "HR",
+  "Admin", "Employee") since that's what gets compared against a Screen's requiresRole below. Then
+  gate the screens that should be restricted with requiresRole="RoleA,RoleB" (comma-separated,
+  matching the role entity's "name" values exactly) on the <Screen> tag itself — a logged-in
+  session whose resolved role isn't in that list gets a 403 and never sees that screen in the nav.
+  Leave requiresRole off every screen everyone should be able to use.
 - <Relationship name="..." fromEntity="..." fromField="..." toEntity="..." toField="id" cardinality="N:1|1:N|1:1|N:N" onDelete="restrict|cascade|setNull"/>
   fromEntity is the "many" side holding the foreign key (fromField); toEntity is the "one" side,
   toField is normally its key field.
@@ -959,6 +999,16 @@ VOCABULARY RULES:
     <Condition test="..."/>
     <Message>...</Message>
   </Validation>
+  EVERY Entity should have at least one Validation connected to it via entity="ThatEntityName" — a
+  bare Field required="true" doesn't count (that's just presence, not a business rule). Find a
+  real constraint appropriate to that entity's own fields: a numeric field that must be positive
+  or within a sane range (an amount, a quantity, a rating, a percentage), a date field that can't
+  be in the future (or can't precede another date on the same entity), an enum-consistency rule, or
+  — for an entity reached by a Relationship — a rule against the related entity's fields the same
+  way the Claim/Policy and PurchaseOrder/LineItem examples below do. Only skip this for an entity
+  that is genuinely just a plain lookup table with nothing meaningful to constrain (e.g. a simple
+  Department or Category with just a code and a name) — treat that as the rare exception, not the
+  default for every entity.
   test describes the condition that must hold for the record to be VALID (e.g. test's value
   meaning "orderDate is not after today" means "reject a future date", NOT "reject unless in the
   future"). Supported in test: comparators == != < <= > >=; now(); age(fieldName); sum/avg/count/
@@ -995,26 +1045,39 @@ VOCABULARY RULES:
   </DataSource>
   Keep every DataSource to this simple shape — no GroupBy, no aggregate attribute, no dotted field
   names — those parts of the vocabulary exist but this runtime can't execute them yet.
-- <Screen name="..." entity="..." type="form">
+- <Screen name="..." entity="..." type="form" requiresRole="RoleA,RoleB-or-omit">
+    <!-- requiresRole is optional RBAC (see the OPTIONAL ROLE-BASED ACCESS note above) — omit it
+         unless this specific screen should only be reachable by certain roles. -->
     <Fields>
       <UIField label="..." bind="fieldName" readonly="true-or-omit"/>
       <UIField label="..." control="dropdown" valueFrom="field:fieldName" optionsFrom="query:dataSourceName"/>
       <UIField label="..." bind="fieldName"><On event="change" action="actionName"/></UIField>  <!-- UIField's On has NO Events wrapper -->
     </Fields>
-    <Buttons><Button label="Save" event="click" action="save"/></Buttons>  <!-- built-ins: save, cancel, delete, openRecord, login, register, changePassword -->
+    <Buttons><Button label="Save" event="click" action="save"/></Buttons>
+    <!-- built-ins: save, cancel, delete, openRecord, login, register, changePassword, verifyEmail,
+         requestPasswordReset, resetPassword, googleLogin, githubLogin (the last two are never
+         wired to a Button — the frontend injects those buttons itself; see below) -->
     <Events><On event="load" action="actionName"/></Events>  <!-- Screen/Grid's On IS wrapped in Events, unlike UIField's -->
   </Screen>
-  If you added a "User" isAccount entity above, you MUST also add exactly these three Screens,
-  named exactly this way: a Screen named "Signup" with entity="User", type="form", two UIFields
-  bound to "username" and "password", and a Button action="register" — THIS is how the very
-  first real account ever gets created (there is no other way; without it nobody could ever log
-  in, since there would be no accounts to log into); a Screen named "Login" with entity="User",
-  type="form", two UIFields bound to "username" and "password" (password is not a real Field on
-  User — the login built-in reads it straight from the submitted form, never stored), and a
-  Button action="login"; and a Screen named "ChangePassword" with entity="User", type="form",
-  UIFields bound to "currentPassword" and "newPassword" (same as password, submitted-only, not
-  real Fields), and a Button action="changePassword". Do not add a Logout button to any Screen —
-  logging out is handled outside the Screen/Action system entirely.
+  If you added a "User" isAccount entity above, you MUST also add exactly these six Screens, named
+  exactly this way (field names below are all submitted-only — current password, OTP code, etc.
+  are never real Fields on User, the built-ins read them straight off the submitted form):
+    - "Signup": entity="User", type="form", UIFields bound to "email", "password", "firstName",
+      "lastName", "dob" (type="date"), Button action="register" — THIS is how the very first real
+      account ever gets created; register sends a verification code and does NOT log the user in.
+    - "VerifyEmail": entity="User", type="form", UIFields bound to "email" and "otpCode", Button
+      action="verifyEmail" — confirms the code register just emailed and logs the user in.
+    - "Login": entity="User", type="form", UIFields bound to "email" and "password", Button
+      action="login".
+    - "ForgotPassword": entity="User", type="form", UIField bound to "email", Button
+      action="requestPasswordReset".
+    - "ResetPassword": entity="User", type="form", UIFields bound to "email", "otpCode",
+      "newPassword", Button action="resetPassword".
+    - "ChangePassword": entity="User", type="form", UIFields bound to "currentPassword" and
+      "newPassword", Button action="changePassword".
+  Do not add a Logout button to any Screen — logging out is handled outside the Screen/Action
+  system entirely. Do not add Buttons for googleLogin/githubLogin on Login or Signup — the
+  frontend renders those automatically whenever User has an "email" field.
   A browse/list screen instead has: <Screen name="..." entity="...">
     <Grid name="..." entity="..." readonly="true">
       <Column header="..." bind="fieldName"/>
@@ -1091,44 +1154,21 @@ named just to keep the output short — a description naming 4 entities and 2 ru
 Application with all 4 entities and both rules as real Validation/Entity elements, not a smaller
 subset. Add a Screen for every entity a real user would need to create/browse records for. If the
 description mentions an action happening on a status change (approval, rejection, completion,
-etc.), give that entity a matching named Action with the right Steps, not just a bare Screen.
+etc.), give that entity a matching named Action with the right Steps, not just a bare Screen.`;
+
+const APPLICATION_XML_PROMPT = (description: string) => `You are an enterprise application architect. Given a plain-English description, generate ONE complete <Application> XML document in the exact vocabulary below. Return ONLY the XML, no explanations, no markdown fences.
+
+${APPLICATION_VOCABULARY_RULES}
 
 Now generate a complete, valid Application for this description — cover everything in it:
 ${description}`;
 
-// The "rework an existing Application" variant — used whenever the caller already has elements
-// (adding another entity, a screen, a rule, etc. in a later message) instead of starting fresh.
-// Reuses every vocabulary/completeness rule above by splicing the SAME instructions in before the
-// current-XML + new-requirement pair, so an incremental edit is held to the same bar as a from-
-// scratch generation (enterprise Theme choice, isAccount/Login/ChangePassword convention, etc.).
-const APPLICATION_XML_REWORK_SUFFIX = (existingXml: string, description: string) => `
-
-You are now REWORKING an EXISTING Application instead of starting from scratch. Here is its
-current, complete XML:
-${existingXml}
-
-Incorporate this new or changed requirement, reworking entities, relationships, validations,
-data sources, screens, and actions as needed so the WHOLE application stays internally
-consistent (e.g. if a new field affects an existing Validation's DependsOn, or a new Relationship
-needs a dropdown DataSource, fix those too — don't just bolt the new piece on). Keep everything
-from the current XML that the new requirement doesn't touch. Return the COMPLETE updated
-Application XML (not a diff, not just the new piece) — ONLY the XML, no explanations, no
-markdown fences.
-
-The new or changed requirement:
-${description}`;
-
-export async function generateApplicationXml(
-  description: string, existingXml?: string, usageSink?: UsageEntry[], signal?: AbortSignal
-): Promise<string> {
-  const userPrompt = existingXml
-    ? APPLICATION_XML_PROMPT(description) + APPLICATION_XML_REWORK_SUFFIX(existingXml, description)
-    : APPLICATION_XML_PROMPT(description);
+export async function generateApplicationXml(description: string, usageSink?: UsageEntry[], signal?: AbortSignal): Promise<string> {
   const xml = stripMarkdownFence(
     await callOpenAI(
       [
         { role: "system", content: "You are an enterprise application architect. Return ONLY valid XML, no markdown fences." },
-        { role: "user", content: userPrompt },
+        { role: "user", content: APPLICATION_XML_PROMPT(description) },
       ],
       { usageSink, signal }
     )
@@ -1137,6 +1177,53 @@ export async function generateApplicationXml(
     parseApplicationXml(xml); // deterministic validation of the AI's own output, same philosophy as lintScreenXml
   } catch (e) {
     throw new Error(`Generated XML failed to parse: ${e instanceof Error ? e.message : e}`);
+  }
+  return xml;
+}
+
+// The "fix/update an existing Application" path — caught live: asking the AI to reproduce the
+// WHOLE application byte-for-byte on every single change (the old "rework" approach) meant any
+// slip reproducing one of 30+ unrelated screens was a silent regression, and got worse the bigger
+// the app got. Instead: the AI still SEES the full current XML (so it understands existing entity
+// names/fields/conventions precisely) but is told to OUTPUT ONLY the elements that are new or
+// actually changed — applicationStore.ts's mergeApplicationNodes then touches ONLY those specific
+// Neo4j nodes, so everything the AI correctly omits (and all real data rows, which this never
+// touches at all) is provably untouched, not just "hopefully reproduced correctly."
+const APPLICATION_XML_FIX_PROMPT = (existingXml: string, description: string) => `You are an enterprise application architect, fixing or extending an EXISTING Application built
+in the vocabulary below. Here is its current, complete XML (for context — match its existing
+entity names, field names, and conventions exactly when you reference them):
+${existingXml}
+
+${APPLICATION_VOCABULARY_RULES}
+
+Now apply this fix or change: ${description}
+
+OUTPUT CONTRACT — this is the part that matters most: return a <Application> fragment containing
+ONLY the top-level elements (Entity/Relationship/Validation/DataSource/Screen/Action/Theme/
+Auditing/AutoNumber) that are BRAND NEW or that actually NEED TO CHANGE because of this fix. When
+modifying an EXISTING element, reuse its exact same tag and name attribute (so it can be matched
+and replaced) and give its COMPLETE corrected content, not a partial patch of it. Do NOT include
+any element that doesn't need any change at all — every element you omit is left completely
+untouched, so omitting correctly is exactly how existing screens/entities/data stay safe. If
+fixing one Validation only requires changing that one Validation, output just that one
+Validation and nothing else. Return ONLY the XML fragment, no explanations, no markdown fences.`;
+
+export async function generateApplicationFixXml(
+  description: string, existingXml: string, usageSink?: UsageEntry[], signal?: AbortSignal
+): Promise<string> {
+  const xml = stripMarkdownFence(
+    await callOpenAI(
+      [
+        { role: "system", content: "You are an enterprise application architect. Return ONLY a valid XML fragment, no markdown fences." },
+        { role: "user", content: APPLICATION_XML_FIX_PROMPT(existingXml, description) },
+      ],
+      { usageSink, signal }
+    )
+  );
+  try {
+    parseApplicationXml(xml); // same deterministic validation as the from-scratch path
+  } catch (e) {
+    throw new Error(`Generated fix XML failed to parse: ${e instanceof Error ? e.message : e}`);
   }
   return xml;
 }

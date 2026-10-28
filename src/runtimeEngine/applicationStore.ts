@@ -42,32 +42,56 @@ function assertKnownTag(tag: string): void {
 
 // Caught live: the AI once added extra required fields (an account code, a role link) straight
 // onto an isAccount Entity "to model RBAC" — every signup then failed with "X is required" since
-// the login/register built-ins only ever set id/username/passwordHash/mustChangePassword (see
-// applicationEngine.ts). Enforced here, at save time, rather than only discovered at first
-// signup — the whole point of validating deterministically before anything is stored.
-const USER_ACCOUNT_FIELDS = new Set(["id", "username", "passwordHash", "mustChangePassword"]);
+// the login/register built-ins only ever set a fixed field list (see applicationEngine.ts).
+// Enforced here, at save time, rather than only discovered at first signup — the whole point of
+// validating deterministically before anything is stored.
+//
+// TWO complete shapes are accepted — kept in lockstep with applicationModel.ts's
+// looksLikeAccountEntity (and RuntimeEngine.jsx's own frontend mirror). LEGACY is never generated
+// by the AI anymore but must keep validating cleanly forever, since already-generated apps with
+// real seeded accounts still use it and must stay editable. CURRENT is what every new generation
+// uses from now on (email identity, OTP verification, OAuth). Mixing fields from both shapes is
+// rejected — that's the "extra field" bug class this function exists to catch, same as before.
+const LEGACY_ACCOUNT_FIELDS = new Set(["id", "username", "passwordHash", "mustChangePassword"]);
+const CURRENT_ACCOUNT_FIELDS = new Set([
+  "id", "email", "passwordHash", "mustChangePassword", "firstName", "lastName", "dob", "emailVerified", "authProvider",
+]);
+// The ONE optional exception to "exactly these fields and no others", for EITHER shape — an RBAC
+// convention: a plain, non-required FK-ish field linking to an AccessRole-style entity via a normal
+// Relationship (see aiService.ts's prompt). Still never REQUIRED — a required extra field is
+// exactly the bug class this function exists to prevent (every signup fails with "X is required"
+// the moment the built-in register/login code doesn't supply it).
+const OPTIONAL_ACCOUNT_FIELDS = new Set(["roleId"]);
 function assertAccountEntityShape(el: ParsedTopLevelElement): void {
   if (el.tag !== "Entity") return;
   const entity = parseEntityElement(el.xml);
   if (!entity.isAccount) return;
   const names = entity.fields.map((f) => f.name);
-  const extra = names.filter((n) => !USER_ACCOUNT_FIELDS.has(n));
-  const missing = [...USER_ACCOUNT_FIELDS].filter((n) => !names.includes(n));
-  if (extra.length || missing.length) {
-    throw new Error(
-      `Entity "${entity.name}" is marked isAccount="true" but its fields don't match the fixed ` +
-        `convention (id, username, passwordHash, mustChangePassword) — ` +
-        `${extra.length ? `extra field(s): ${extra.join(", ")}` : ""}${extra.length && missing.length ? "; " : ""}` +
-        `${missing.length ? `missing field(s): ${missing.join(", ")}` : ""}. ` +
-        `Link any role/employee/etc. via a Relationship pointing AT this entity instead of adding a field to it.`
-    );
+  const requiredRoleId = entity.fields.find((f) => f.name === "roleId" && f.required);
+
+  for (const shape of [LEGACY_ACCOUNT_FIELDS, CURRENT_ACCOUNT_FIELDS]) {
+    const extra = names.filter((n) => !shape.has(n) && !OPTIONAL_ACCOUNT_FIELDS.has(n));
+    const missing = [...shape].filter((n) => !names.includes(n));
+    if (!extra.length && !missing.length && !requiredRoleId) return; // matches this shape cleanly
   }
+
+  throw new Error(
+    `Entity "${entity.name}" is marked isAccount="true" but its fields don't match either known ` +
+      `account shape — current convention: id, email, passwordHash, mustChangePassword, firstName, ` +
+      `lastName, dob, emailVerified, authProvider; legacy convention (older apps only): id, ` +
+      `username, passwordHash, mustChangePassword — either way plus an optional non-required ` +
+      `roleId. ${requiredRoleId ? "roleId must not be required=\"true\". " : ""}` +
+      `Link any role/employee/etc. via a Relationship pointing AT this entity instead of adding a field to it.`
+  );
 }
 
 // Built-ins have fixed runtime semantics and are never a named Action to link to — same set
 // applicationEngine.ts's BUILTIN_ACTIONS defines, duplicated rather than imported (a tiny literal
 // list, same tradeoff as pluralizeCamel elsewhere in this engine).
-const BUILTIN_BUTTON_ACTIONS = new Set(["save", "cancel", "delete", "openRecord", "login", "register", "changePassword"]);
+const BUILTIN_BUTTON_ACTIONS = new Set([
+  "save", "cancel", "delete", "openRecord", "login", "register", "changePassword",
+  "verifyEmail", "requestPasswordReset", "resetPassword", "googleLogin", "githubLogin",
+]);
 
 function dsNameOf(ref: string | null): string | null {
   return ref ? ref.replace(/^query:/, "") : null;
@@ -99,8 +123,11 @@ async function linkElements(tx: Transaction, applicationId: number, manifest: { 
         `MATCH (a:RtApplication {applicationId: $id})-[:CONTAINS]->(r:Relationship {applicationId: $id, name: $relName}) ` +
           `MATCH (a)-[:CONTAINS]->(from:Entity {applicationId: $id, name: $fromEntity}) ` +
           `MATCH (a)-[:CONTAINS]->(to:Entity {applicationId: $id, name: $toEntity}) ` +
-          "MERGE (r)-[:FROM_ENTITY]->(from) MERGE (r)-[:TO_ENTITY]->(to)",
-        { id, relName: el.name, fromEntity: rel.fromEntity, toEntity: rel.toEntity }
+          "MERGE (r)-[:FROM_ENTITY]->(from) MERGE (r)-[:TO_ENTITY]->(to) " +
+          // ALSO a direct Entity-to-Entity edge (not just mediated through the Relationship node)
+          // — "entity all linked" should be visible as one hop, not two, in any graph view.
+          "MERGE (from)-[rel2:RELATES_TO {relationshipName: $relName}]->(to) SET rel2.cardinality = $cardinality",
+        { id, relName: el.name, fromEntity: rel.fromEntity, toEntity: rel.toEntity, cardinality: rel.cardinality }
       );
     } else if (el.tag === "Validation") {
       await forEntity("Validation", el.name, parseValidationElement(el.xml).entity);
@@ -151,11 +178,24 @@ async function linkElements(tx: Transaction, applicationId: number, manifest: { 
   }
 }
 
+// The owning Studio account as a real graph node, not just a userId sitting in Postgres —
+// "everything created by user should be linked to him": one :RtUser per email (MERGE, never
+// duplicated across however many applications that person owns), with the Application itself
+// linked to it. Every element already reaches RtApplication via CONTAINS, so this one edge is
+// what makes the WHOLE application's structure (and, via entityStore.ts's own CREATED_BY edges on
+// data rows, every record in it too) reachable from the owning person's own node.
+async function linkOwner(tx: Transaction, applicationId: number, ownerEmail: string): Promise<void> {
+  await tx.run(
+    "MATCH (a:RtApplication {applicationId: $id}) MERGE (u:RtUser {email: $email}) MERGE (a)-[:OWNED_BY]->(u)",
+    { id: toDriverValue(applicationId), email: ownerEmail }
+  );
+}
+
 // Replaces this Application's whole node set — same "full replace, no partial patch" semantics
 // the old engine's replaceAllRows already uses for a bulk grid save; there's no meaningful partial
 // update of an Application's structure, only "here is the new XML, make the graph match it."
 export async function saveApplicationNodes(
-  applicationId: number, xml: string
+  applicationId: number, xml: string, ownerEmail: string
 ): Promise<{ name: string; theme: string | null; database: string | null; elementCounts: Record<string, number> }> {
   // Parsing/validation failures are the CALLER's XML being wrong, not a server problem — a clean
   // 400 with the real reason, never the generic 500 an unconverted plain Error would otherwise
@@ -188,12 +228,97 @@ export async function saveApplicationNodes(
         );
       }
       await linkElements(tx, applicationId, manifest);
+      await linkOwner(tx, applicationId, ownerEmail);
     })
   );
 
   const elementCounts: Record<string, number> = {};
   for (const el of manifest.elements) elementCounts[el.tag] = (elementCounts[el.tag] || 0) + 1;
   return { name: manifest.name, theme: manifest.theme, database: manifest.database, elementCounts };
+}
+
+// The targeted counterpart to saveApplicationNodes's full replace — touches ONLY the elements
+// present in `fragmentXml` (by tag+name), upserting each one in place and leaving every other
+// element, and every real data row (which lives under a completely different label namespace —
+// see labels.ts), provably untouched. This is what makes "describe a fix/change to an existing
+// application" safe at any size: the AI only ever has to get the CHANGED pieces right, and
+// nothing it correctly omits can ever regress. See aiService.ts's generateApplicationFixXml for
+// the prompt that produces this fragment shape.
+export async function mergeApplicationNodes(
+  applicationId: number, fragmentXml: string, ownerEmail: string
+): Promise<{ name: string; theme: string | null; database: string | null; elementCounts: Record<string, number> }> {
+  let manifest: ReturnType<typeof parseApplicationXml>;
+  try {
+    manifest = parseApplicationXml(fragmentXml);
+    for (const el of manifest.elements) {
+      assertKnownTag(el.tag);
+      assertAccountEntityShape(el);
+    }
+  } catch (e) {
+    throw new HttpError(400, e instanceof Error ? e.message : String(e));
+  }
+
+  await guard(() =>
+    withTx(async (tx) => {
+      // The fragment's own root attrs are optional — only touch the RtApplication node's name/
+      // theme/database if the AI actually specified them (e.g. the fix explicitly renamed the app
+      // or changed its theme); otherwise leave those exactly as they are.
+      const rootSets: string[] = [];
+      const rootParams: Record<string, unknown> = { id: toDriverValue(applicationId) };
+      if (manifest.name) { rootSets.push("a.name = $name"); rootParams.name = manifest.name; }
+      if (manifest.theme) { rootSets.push("a.theme = $theme"); rootParams.theme = manifest.theme; }
+      if (manifest.database) { rootSets.push("a.database = $database"); rootParams.database = manifest.database; }
+      if (rootSets.length) {
+        await tx.run(`MATCH (a:RtApplication {applicationId: $id}) SET ${rootSets.join(", ")}`, rootParams);
+      }
+
+      // Brand-new elements get appended after everything that already exists; an element that
+      // matches an EXISTING (tag, name) keeps its original position — ON CREATE SET only assigns
+      // position on the branch where the MERGE actually created a new node.
+      const maxPosRes = await tx.run(
+        "MATCH (a:RtApplication {applicationId: $id})-[:CONTAINS]->(child) RETURN coalesce(max(child.position), -1) AS maxPos",
+        { id: toDriverValue(applicationId) }
+      );
+      let nextPosition = Number(fromDriverValue(maxPosRes.records[0].get("maxPos"))) + 1;
+
+      for (const el of manifest.elements) {
+        await tx.run(
+          `MATCH (a:RtApplication {applicationId: $id}) ` +
+            `MERGE (a)-[:CONTAINS]->(child:${el.tag} {applicationId: $id, name: $name}) ` +
+            "ON CREATE SET child.position = $position, child.createdAt = $now " +
+            "SET child.xml = $xml, child.updatedAt = $now",
+          { id: toDriverValue(applicationId), name: el.name, xml: el.xml, position: toDriverValue(nextPosition), now: new Date().toISOString() }
+        );
+        nextPosition++;
+      }
+
+      // Re-derive the structural graph for the WHOLE application (not just the merged pieces) —
+      // a changed Screen's old entity binding could otherwise leave a stale edge behind; deleting
+      // and re-deriving every semantic edge from the current full manifest is simpler than, and
+      // just as correct as, diffing which specific edges changed.
+      await tx.run(
+        "MATCH (a:RtApplication {applicationId: $id})-[:CONTAINS]->(child)-[r:FOR_ENTITY|FROM_ENTITY|TO_ENTITY|RELATES_TO|USES_DATASOURCE|RUNS_ACTION|OPENS_SCREEN]->() DELETE r",
+        { id: toDriverValue(applicationId) }
+      );
+      const fullRes = await tx.run(
+        "MATCH (a:RtApplication {applicationId: $id})-[:CONTAINS]->(child) RETURN labels(child)[0] AS tag, child.name AS name, child.xml AS xml, child.position AS position",
+        { id: toDriverValue(applicationId) }
+      );
+      const fullManifest = {
+        elements: fullRes.records.map((r) => ({
+          tag: r.get("tag") as string, name: r.get("name") as string, xml: r.get("xml") as string,
+          position: Number(fromDriverValue(r.get("position"))),
+        })),
+      };
+      await linkElements(tx, applicationId, fullManifest);
+      await linkOwner(tx, applicationId, ownerEmail);
+    })
+  );
+
+  const detail = await getApplication(applicationId);
+  const elementCounts: Record<string, number> = {};
+  for (const el of detail?.elements ?? []) elementCounts[el.tag] = (elementCounts[el.tag] || 0) + 1;
+  return { name: detail?.name ?? "", theme: detail?.theme ?? null, database: detail?.database ?? null, elementCounts };
 }
 
 export async function getApplication(applicationId: number): Promise<ApplicationDetail | null> {

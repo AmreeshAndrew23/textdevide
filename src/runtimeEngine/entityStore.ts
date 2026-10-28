@@ -70,7 +70,10 @@ async function fetchRelatedRows(
       const alias = pluralizeCamel(rel.fromEntity);
       const childLabel = entityLabelFor(applicationId, rel.fromEntity);
       const fkField = safeIdent(rel.fromField);
-      const res = await tx.run(`MATCH (c:${childLabel}) WHERE c.${fkField} = $key RETURN c`, { key: toDriverValue(keyValue) });
+      const res = await tx.run(
+        `MATCH (c:${childLabel}) WHERE c.${fkField} = $key AND c.__deletedAt IS NULL RETURN c`,
+        { key: toDriverValue(keyValue) }
+      );
       related[alias] = res.records.map((r) => fromDriverValue(r.get("c")) as Record<string, unknown>);
     } else if (rel.fromEntity === entity.name) {
       const fkValue = data[rel.fromField];
@@ -78,37 +81,58 @@ async function fetchRelatedRows(
       const alias = pluralizeCamel(rel.toEntity);
       const parentLabel = entityLabelFor(applicationId, rel.toEntity);
       const parentKeyField = safeIdent(rel.toField);
-      const res = await tx.run(`MATCH (p:${parentLabel}) WHERE p.${parentKeyField} = $key RETURN p`, { key: toDriverValue(fkValue) });
+      const res = await tx.run(
+        `MATCH (p:${parentLabel}) WHERE p.${parentKeyField} = $key AND p.__deletedAt IS NULL RETURN p`,
+        { key: toDriverValue(fkValue) }
+      );
       related[alias] = res.records.map((r) => fromDriverValue(r.get("p")) as Record<string, unknown>);
     }
   }
   return related;
 }
 
-export async function listEntityRows(tx: Transaction, applicationId: string | number, entity: EntityDef): Promise<Record<string, unknown>[]> {
+export interface RowReadOptions {
+  /** Include soft-deleted rows — only ever set by the "Show deleted"/restore paths. */
+  includeDeleted?: boolean;
+}
+
+export async function listEntityRows(
+  tx: Transaction, applicationId: string | number, entity: EntityDef, opts: RowReadOptions = {}
+): Promise<Record<string, unknown>[]> {
   const label = entityLabelFor(applicationId, entity.name);
-  const res = await tx.run(`MATCH (n:${label}) RETURN n`);
+  const where = opts.includeDeleted ? "" : " WHERE n.__deletedAt IS NULL";
+  const res = await tx.run(`MATCH (n:${label})${where} RETURN n`);
   return res.records.map((r) => fromDriverValue(r.get("n")) as Record<string, unknown>);
 }
 
 export async function getEntityRow(
-  tx: Transaction, applicationId: string | number, entity: EntityDef, keyValue: unknown
+  tx: Transaction, applicationId: string | number, entity: EntityDef, keyValue: unknown, opts: RowReadOptions = {}
 ): Promise<Record<string, unknown> | null> {
   const label = entityLabelFor(applicationId, entity.name);
   const keyField = safeIdent(keyFieldOf(entity).name);
-  const res = await tx.run(`MATCH (n:${label}) WHERE n.${keyField} = $key RETURN n`, { key: toDriverValue(keyValue) });
+  const deletedClause = opts.includeDeleted ? "" : " AND n.__deletedAt IS NULL";
+  const res = await tx.run(
+    `MATCH (n:${label}) WHERE n.${keyField} = $key${deletedClause} RETURN n`,
+    { key: toDriverValue(keyValue) }
+  );
   return res.records[0] ? (fromDriverValue(res.records[0].get("n")) as Record<string, unknown>) : null;
 }
 
 // Same lookup as getEntityRow, but keyed on an arbitrary field instead of the entity's own key —
 // used by the login built-in to find a User row by its "username" field (see applicationEngine.ts
-// and appAuth.ts), since a login submits a username, never the row's internal id.
+// and appAuth.ts), since a login submits a username, never the row's internal id. A soft-deleted
+// account can never log in — same as any other soft-deleted row being treated as gone.
 export async function getEntityRowByField(
-  tx: Transaction, applicationId: string | number, entity: EntityDef, fieldName: string, value: unknown
+  tx: Transaction, applicationId: string | number, entity: EntityDef, fieldName: string, value: unknown,
+  opts: RowReadOptions = {}
 ): Promise<Record<string, unknown> | null> {
   const label = entityLabelFor(applicationId, entity.name);
   const field = safeIdent(fieldName);
-  const res = await tx.run(`MATCH (n:${label}) WHERE n.${field} = $value RETURN n`, { value: toDriverValue(value) });
+  const deletedClause = opts.includeDeleted ? "" : " AND n.__deletedAt IS NULL";
+  const res = await tx.run(
+    `MATCH (n:${label}) WHERE n.${field} = $value${deletedClause} RETURN n`,
+    { value: toDriverValue(value) }
+  );
   return res.records[0] ? (fromDriverValue(res.records[0].get("n")) as Record<string, unknown>) : null;
 }
 
@@ -128,13 +152,16 @@ export async function saveEntityRow(
 
   const existing = await getEntityRow(tx, applicationId, entity, keyValue);
 
-  // 2. concurrency check — only meaningful on an update, and only when the caller actually
-  // submitted the updatedOn it loaded (a create has nothing to compare against).
-  if (existing && auditing?.concurrency === "timestamp") {
-    const updatedOnField = auditing.fields.find((f) => f.role === "updatedOn")?.name;
-    if (updatedOnField && !isBlank(data[updatedOnField]) && String(data[updatedOnField]) !== String(existing[updatedOnField])) {
-      throw new ConcurrencyError(`${entity.name} was modified by someone else since you loaded it — reload and try again`);
-    }
+  // 2. stale-edit check — every row carries a system-managed __version (never an AI-declared Field,
+  // never gated behind an Auditing opt-in attribute, so this applies to every entity in every app
+  // automatically). The frontend round-trips __version for free: openRowForEdit seeds the edit
+  // form with the ENTIRE loaded row (listEntityRows/getEntityRow return raw, unfiltered node
+  // properties), and a save posts that object back verbatim — so __version naturally carries the
+  // value the editor actually saw, with zero new frontend plumbing. Skipped gracefully when either
+  // side has no version yet (a row saved before this feature existed, or a non-UI caller) — a
+  // one-time grace period, not a bug; every row gets a real version after its first save here on.
+  if (existing && data.__version !== undefined && Number(data.__version) !== Number(existing.__version ?? 1)) {
+    throw new ConcurrencyError(`${entity.name} was modified by someone else since you loaded it — reload and try again`);
   }
 
   // 3. validations — this entity's OWN declared Validations (cross-entity re-validation when a
@@ -172,32 +199,134 @@ export async function saveEntityRow(
   const keyProp = safeIdent(keyField.name);
   const keyDriverValue = toDriverValue(coerceValue(keyValue, sqlTypeOf(keyField)));
   props[keyProp] = keyDriverValue;
-  await tx.run(`MERGE (n:${label} {${keyProp}: $key}) SET n += $props`, { key: keyDriverValue, props });
+
+  if (existing) {
+    // Tight-race CAS (defense in depth, on top of the stale-edit check above): the write itself is
+    // conditioned on __version still being exactly what we just read a moment ago in THIS
+    // transaction. Zero rows matched despite `existing` having just been found means another save
+    // landed in the gap between our read and this write — also a real conflict.
+    const readVersion = existing.__version != null ? Number(existing.__version) : null;
+    props.__version = toDriverValue((readVersion ?? 0) + 1);
+    const res = await tx.run(
+      `MATCH (n:${label} {${keyProp}: $key}) WHERE n.__deletedAt IS NULL AND (n.__version = $readVersion OR n.__version IS NULL) SET n += $props RETURN n`,
+      { key: keyDriverValue, readVersion: readVersion === null ? null : toDriverValue(readVersion), props }
+    );
+    if (res.records.length === 0) {
+      throw new ConcurrencyError(`${entity.name} was modified by someone else since you loaded it — reload and try again`);
+    }
+  } else {
+    props.__version = toDriverValue(1);
+    await tx.run(`MERGE (n:${label} {${keyProp}: $key}) SET n += $props`, { key: keyDriverValue, props });
+  }
+  // "everything created by user should be linked to him" — a REAL graph edge, not just a
+  // createdBy string property buried on the node. session.identity is whoever actually ran this
+  // save (the Studio builder's own email for an application with no real accounts, or the logged-
+  // in end user's own username for one that has them — see routes/runtimeApplications.ts).
+  if (session.identity) {
+    await tx.run(
+      `MATCH (n:${label} {${keyProp}: $key}) MERGE (u:RtUser {email: $email}) MERGE (n)-[:CREATED_BY]->(u)`,
+      { key: keyDriverValue, email: session.identity }
+    );
+  }
   const row = (await getEntityRow(tx, applicationId, entity, keyValue))!;
   return { row, created: !existing, validationResults };
 }
 
+// Soft delete: a row is never actually removed, just stamped __deletedAt/__deletedBy and excluded
+// from every normal read (listEntityRows/getEntityRow/getEntityRowByField/dataSourceCompiler all
+// filter it out by default). Recoverable via restoreEntityRow. Known limitation, not silently
+// papered over: restoring a cascade-deleted parent does NOT cascade-restore its children — they
+// stay deleted and must be restored individually.
 export async function deleteEntityRow(
-  tx: Transaction, applicationId: string | number, entity: EntityDef, relationships: RelationshipDef[], keyValue: unknown
+  tx: Transaction, applicationId: string | number, entity: EntityDef, relationships: RelationshipDef[],
+  keyValue: unknown, session: { identity: string | null }
 ): Promise<void> {
   const label = entityLabelFor(applicationId, entity.name);
   const keyField = safeIdent(keyFieldOf(entity).name);
+
+  const existing = await getEntityRow(tx, applicationId, entity, keyValue, { includeDeleted: true });
+  if (!existing) throw new ValidationError(`${entity.name} not found`);
+  if (existing.__deletedAt) throw new ValidationError(`This ${entity.name} is already deleted`);
 
   for (const rel of relationships) {
     if (rel.toEntity !== entity.name) continue; // only relationships where other rows point AT this one
     const childLabel = entityLabelFor(applicationId, rel.fromEntity);
     const fkField = safeIdent(rel.fromField);
-    const countRes = await tx.run(`MATCH (c:${childLabel}) WHERE c.${fkField} = $key RETURN count(c) AS cnt`, { key: toDriverValue(keyValue) });
+    const countRes = await tx.run(
+      `MATCH (c:${childLabel}) WHERE c.${fkField} = $key AND c.__deletedAt IS NULL RETURN count(c) AS cnt`,
+      { key: toDriverValue(keyValue) }
+    );
     const count = Number(fromDriverValue(countRes.records[0].get("cnt")));
     if (count === 0) continue;
     if (rel.onDelete === "restrict") {
       throw new ValidationError(`Cannot delete this ${entity.name} — ${count} ${rel.fromEntity} row(s) still reference it`);
     }
     if (rel.onDelete === "cascade") {
-      await tx.run(`MATCH (c:${childLabel}) WHERE c.${fkField} = $key DETACH DELETE c`, { key: toDriverValue(keyValue) });
+      await tx.run(
+        `MATCH (c:${childLabel}) WHERE c.${fkField} = $key AND c.__deletedAt IS NULL SET c.__deletedAt = $now, c.__deletedBy = $identity`,
+        { key: toDriverValue(keyValue), now: new Date().toISOString(), identity: session.identity }
+      );
     }
     // onDelete="setNull": Phase 2 — needs the FK field to be nullable in practice, not just in theory.
   }
 
-  await tx.run(`MATCH (n:${label}) WHERE n.${keyField} = $key DETACH DELETE n`, { key: toDriverValue(keyValue) });
+  await tx.run(
+    `MATCH (n:${label}) WHERE n.${keyField} = $key SET n.__deletedAt = $now, n.__deletedBy = $identity`,
+    { key: toDriverValue(keyValue), now: new Date().toISOString(), identity: session.identity }
+  );
+}
+
+export async function restoreEntityRow(
+  tx: Transaction, applicationId: string | number, entity: EntityDef, keyValue: unknown
+): Promise<void> {
+  const label = entityLabelFor(applicationId, entity.name);
+  const keyField = safeIdent(keyFieldOf(entity).name);
+  const existing = await getEntityRow(tx, applicationId, entity, keyValue, { includeDeleted: true });
+  if (!existing) throw new ValidationError(`${entity.name} not found`);
+  if (!existing.__deletedAt) throw new ValidationError(`This ${entity.name} isn't deleted`);
+  await tx.run(
+    `MATCH (n:${label}) WHERE n.${keyField} = $key SET n.__deletedAt = null, n.__deletedBy = null`,
+    { key: toDriverValue(keyValue) }
+  );
+}
+
+export type OtpPurpose = "verifyEmail" | "resetPassword";
+
+// A one-time code for email verification / forgot-password, stored directly on the row as raw
+// system properties — never a declared Field, never AI-authored, same treatment as
+// __version/__deletedAt above. `purpose` scopes the code so a verify-email code can't be replayed
+// to reset a password (one mechanism, two call sites in applicationEngine.ts).
+export async function setEntityOtp(
+  tx: Transaction, applicationId: string | number, entity: EntityDef, keyValue: unknown,
+  purpose: OtpPurpose, code: string, ttlMinutes: number
+): Promise<void> {
+  const label = entityLabelFor(applicationId, entity.name);
+  const keyField = safeIdent(keyFieldOf(entity).name);
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+  await tx.run(
+    `MATCH (n:${label}) WHERE n.${keyField} = $key SET n.__otpCode = $code, n.__otpExpiresAt = $expiresAt, n.__otpPurpose = $purpose`,
+    { key: toDriverValue(keyValue), code, expiresAt, purpose }
+  );
+}
+
+export type OtpResult = { ok: true } | { ok: false; reason: "none" | "expired" | "mismatch" };
+
+// Checks the submitted code against what's stored for this exact purpose, and — on success —
+// clears all three OTP properties in the SAME write, so a code can never be consumed twice.
+export async function consumeEntityOtp(
+  tx: Transaction, applicationId: string | number, entity: EntityDef, keyValue: unknown,
+  purpose: OtpPurpose, submittedCode: string
+): Promise<OtpResult> {
+  const row = await getEntityRow(tx, applicationId, entity, keyValue);
+  if (!row || !row.__otpCode || row.__otpPurpose !== purpose) return { ok: false, reason: "none" };
+  if (!row.__otpExpiresAt || new Date(String(row.__otpExpiresAt)).getTime() < Date.now()) return { ok: false, reason: "expired" };
+  if (String(row.__otpCode) !== submittedCode) return { ok: false, reason: "mismatch" };
+
+  const label = entityLabelFor(applicationId, entity.name);
+  const keyField = safeIdent(keyFieldOf(entity).name);
+  await tx.run(
+    `MATCH (n:${label}) WHERE n.${keyField} = $key SET n.__otpCode = null, n.__otpExpiresAt = null, n.__otpPurpose = null`,
+    { key: toDriverValue(keyValue) }
+  );
+  return { ok: true };
 }

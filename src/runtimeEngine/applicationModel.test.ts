@@ -186,6 +186,74 @@ describe("applicationModel: per-tag typed parsers against the real sample elemen
     expect(user.isAccount).toBe(true);
   });
 
+  // Regression test for a real incident: the AI wrote a User entity with the exact
+  // id/username/passwordHash/mustChangePassword shape but forgot isAccount="true" itself, which
+  // would have silently broken login/signup for that application.
+  it("parseEntityElement — recognizes a User entity by its exact field shape even if isAccount is missing", () => {
+    const user = parseEntityElement(
+      `<Entity name="User"><Field name="id" type="string" key="true"/><Field name="username" type="string" required="true" unique="true"/><Field name="passwordHash" type="string" required="true"/><Field name="mustChangePassword" type="boolean" required="true"/></Entity>`
+    );
+    expect(user.isAccount).toBe(true);
+  });
+
+  it("parseEntityElement — does NOT treat an unrelated entity named User as an account entity", () => {
+    const user = parseEntityElement(
+      `<Entity name="User"><Field name="id" type="string" key="true"/><Field name="displayName" type="string"/></Entity>`
+    );
+    expect(user.isAccount).toBe(false);
+  });
+
+  it("parseEntityElement — does NOT treat a differently-named entity with the account shape as an account entity", () => {
+    const account = parseEntityElement(
+      `<Entity name="Account"><Field name="id" type="string" key="true"/><Field name="username" type="string" required="true" unique="true"/><Field name="passwordHash" type="string" required="true"/><Field name="mustChangePassword" type="boolean" required="true"/></Entity>`
+    );
+    expect(account.isAccount).toBe(false); // the fixed convention is specifically the name "User"
+  });
+
+  // The RBAC convention's one allowed extra field (roleId) must still be recognized by this
+  // structural fallback, not just by assertAccountEntityShape — otherwise a User entity that has
+  // roleId but forgot isAccount="true" would silently stop being recognized as the account entity
+  // at all, a real regression distinct from (and easy to miss alongside) that other check.
+  it("parseEntityElement — recognizes a User entity with the optional roleId field even if isAccount is missing", () => {
+    const user = parseEntityElement(
+      `<Entity name="User"><Field name="id" type="string" key="true"/><Field name="username" type="string" required="true" unique="true"/><Field name="passwordHash" type="string" required="true"/><Field name="mustChangePassword" type="boolean" required="true"/><Field name="roleId" type="string"/></Entity>`
+    );
+    expect(user.isAccount).toBe(true);
+  });
+
+  // CURRENT (email-based) shape — what every app generates from now on. The LEGACY
+  // (username-based) tests above exercise the other half of the dual-shape fallback.
+  it("parseEntityElement — recognizes a User entity with the current (email-based) shape even if isAccount is missing", () => {
+    const user = parseEntityElement(
+      `<Entity name="User">
+        <Field name="id" type="string" key="true"/>
+        <Field name="email" type="string" required="true" unique="true"/>
+        <Field name="passwordHash" type="string"/>
+        <Field name="mustChangePassword" type="boolean" required="true"/>
+        <Field name="firstName" type="string"/>
+        <Field name="lastName" type="string"/>
+        <Field name="dob" type="date"/>
+        <Field name="emailVerified" type="boolean" required="true"/>
+        <Field name="authProvider" type="string" required="true"/>
+      </Entity>`
+    );
+    expect(user.isAccount).toBe(true);
+  });
+
+  it("parseEntityElement — does NOT recognize a User entity mixing legacy and current fields", () => {
+    const user = parseEntityElement(
+      `<Entity name="User"><Field name="id" type="string" key="true"/><Field name="username" type="string" required="true" unique="true"/><Field name="email" type="string" required="true" unique="true"/><Field name="passwordHash" type="string"/><Field name="mustChangePassword" type="boolean" required="true"/></Entity>`
+    );
+    expect(user.isAccount).toBe(false);
+  });
+
+  it("parseEntityElement — does NOT recognize a User entity with any OTHER extra field as an account entity", () => {
+    const user = parseEntityElement(
+      `<Entity name="User"><Field name="id" type="string" key="true"/><Field name="username" type="string" required="true" unique="true"/><Field name="passwordHash" type="string" required="true"/><Field name="mustChangePassword" type="boolean" required="true"/><Field name="employeeCode" type="string"/></Entity>`
+    );
+    expect(user.isAccount).toBe(false);
+  });
+
   it("parseRelationshipElement — fromField/toField/cardinality/onDelete all read correctly", () => {
     const rel = parseRelationshipElement(xmlOf("Relationship", "LineItem-to-PO"));
     expect(rel).toEqual({ name: "LineItem-to-PO", fromEntity: "LineItem", fromField: "poId", toEntity: "PurchaseOrder", toField: "id", cardinality: "N:1", onDelete: "cascade" });
@@ -238,6 +306,21 @@ describe("applicationModel: per-tag typed parsers against the real sample elemen
     expect(screen.grid?.entity).toBe("PurchaseOrder");
     expect(screen.grid?.columns).toHaveLength(5);
     expect(screen.grid?.onEvents).toEqual([{ event: "rowClick", action: "openRecord", targetScreen: "PurchaseOrderForm" }]);
+  });
+
+  it("parseScreenElement — PurchaseOrderForm has no requiresRole (the common, unrestricted case)", () => {
+    const screen = parseScreenElement(xmlOf("Screen", "PurchaseOrderForm"));
+    expect(screen.requiresRole).toBeNull();
+  });
+
+  it("parseScreenElement — requiresRole splits and trims a comma-separated role list", () => {
+    const screen = parseScreenElement(`<Screen name="Payroll" entity="Payroll" type="form" requiresRole="HR, Admin"><Fields/></Screen>`);
+    expect(screen.requiresRole).toEqual(["HR", "Admin"]);
+  });
+
+  it("parseScreenElement — a blank requiresRole attribute is treated as no restriction", () => {
+    const screen = parseScreenElement(`<Screen name="Payroll" entity="Payroll" type="form" requiresRole=""><Fields/></Screen>`);
+    expect(screen.requiresRole).toBeNull();
   });
 
   it("parseScreenElement — VendorSpendReport's query-bound Grid (no entity)", () => {

@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
+import rateLimit from "@fastify/rate-limit";
 import { ZodError } from "zod";
 import { MAX_UPLOAD_BYTES } from "./runtimeEngine/uploads.js";
 import { HttpError } from "./services/authService.js";
@@ -35,6 +36,9 @@ export async function buildServer() {
   // byte limit here is the HARD stop (a request over it is rejected before any handler even
   // runs); uploads.ts's own check is the one that actually fires for a real oversized file.
   await app.register(multipart, { limits: { fileSize: MAX_UPLOAD_BYTES } });
+  // Generic, blanket abuse protection — not targeted at any one endpoint (login specifically gets
+  // its own tighter, identity-keyed lockout; see runtimeEngine/loginAttemptGuard.ts).
+  await app.register(rateLimit, { global: true, max: 120, timeWindow: "1 minute" });
 
   app.get("/api/health", async () => ({ status: "ok" }));
 
