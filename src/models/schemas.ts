@@ -85,6 +85,13 @@ export const RuntimeApplicationGenerateSchema = z.object({
   existingXml: z.string().optional(),
 });
 
+// "Ask about this app" — a read-only metadata question, plus the last few Q&A turns so a
+// follow-up question can refer back to the previous answer.
+export const RuntimeApplicationAskSchema = z.object({
+  question: z.string().trim().min(1).max(2000),
+  history: z.array(z.object({ question: z.string().max(2000), answer: z.string().max(20000) })).max(10).default([]),
+});
+
 export const RuntimeApplicationChangePasswordSchema = z.object({
   currentPassword: z.string().min(1),
   newPassword: z.string().min(1),

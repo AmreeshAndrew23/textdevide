@@ -1228,6 +1228,59 @@ export async function generateApplicationFixXml(
   return xml;
 }
 
+// The "Ask about this app" metadata query — answers a plain-English question about an existing
+// Application strictly from its own XML (never invents an entity/field/screen that isn't there),
+// for a reader who may not know the XML vocabulary at all. The vocabulary rules are included so
+// the model reads attributes like onViolation/requiresRole/rowClick with their real meaning
+// rather than guessing. Read-only: nothing here ever writes to the application.
+export type ApplicationQaTurn = { question: string; answer: string };
+
+const APPLICATION_QUESTION_PROMPT = (applicationXml: string, question: string) => `You are the built-in assistant of an AI app builder. The user is asking about ONE existing
+application, defined entirely by the XML below. Answer using ONLY what this XML actually
+defines — if the answer isn't in it, say plainly that the application doesn't define that yet,
+and (in one short line) what they could ask the builder to add. Never invent entities, fields,
+screens, validations, roles or rules.
+
+For background, this is the vocabulary the XML is written in (use it to interpret attributes
+correctly — do not quote it back to the user):
+${APPLICATION_VOCABULARY_RULES}
+
+THE APPLICATION'S CURRENT XML:
+${applicationXml}
+
+HOW TO ANSWER:
+- Write for a business user, not a developer: say "the Claim form requires an amount" rather
+  than "UIField bind=amount". Use real names from the XML in **bold** (e.g. **Claim**, **status**).
+- Open with a one or two sentence direct answer, then supporting detail.
+- Format as GitHub-flavored Markdown: short "###" headings only when the answer has several
+  parts, "-" bullet lists for enumerations, and a Markdown table when listing fields (columns
+  like Field | Type | Required | Notes) or comparing several items.
+- Keep it concise and skimmable; no preamble like "Based on the XML".
+- Only show raw XML if the user explicitly asks for it, in a fenced \`\`\`xml block.
+
+QUESTION: ${question}`;
+
+export async function answerApplicationQuestion(
+  question: string, applicationXml: string, history: ApplicationQaTurn[] = [], usageSink?: UsageEntry[], signal?: AbortSignal
+): Promise<string> {
+  // Earlier turns go in as real chat history (not pasted into the prompt) so a follow-up like
+  // "and which of those are required?" resolves against the previous answer; capped so a long
+  // conversation can't push the application XML itself out of the context window.
+  const priorTurns = history.slice(-6).flatMap((t) => [
+    { role: "user", content: t.question },
+    { role: "assistant", content: t.answer },
+  ]);
+  const answer = await callOpenAI(
+    [
+      { role: "system", content: "You answer questions about a specific application's metadata, accurately and readably, in Markdown." },
+      ...priorTurns,
+      { role: "user", content: APPLICATION_QUESTION_PROMPT(applicationXml, question) },
+    ],
+    { usageSink, signal }
+  );
+  return answer.trim();
+}
+
 type ChatMessage = { role: string; content: string | unknown[] };
 
 async function sleep(ms: number) {

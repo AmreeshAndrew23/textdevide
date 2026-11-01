@@ -4,12 +4,12 @@ import { db } from "../db/connection.js";
 import { runtimeApplications } from "../db/schema.js";
 import {
   RuntimeApplicationCreateSchema, RuntimeApplicationGenerateSchema, RuntimeApplicationRunSchema, RuntimeApplicationUpdateSchema,
-  RuntimeApplicationChangePasswordSchema,
+  RuntimeApplicationChangePasswordSchema, RuntimeApplicationAskSchema,
 } from "../models/schemas.js";
 import { HttpError } from "../services/authService.js";
 import { requireAuth } from "./authGuard.js";
 import { withTx } from "../runtime/neo4jStore.js";
-import { generateApplicationXml, generateApplicationFixXml } from "../services/aiService.js";
+import { generateApplicationXml, generateApplicationFixXml, answerApplicationQuestion } from "../services/aiService.js";
 import { saveApplicationNodes, mergeApplicationNodes, getApplication, deleteApplicationNodes, listApplicationSummaries, guard } from "../runtimeEngine/applicationStore.js";
 import {
   parseEntityElement, parseRelationshipElement, parseValidationElement, parseScreenElement,
@@ -101,6 +101,16 @@ function dispatchEmailActions(actions: RuntimeAction[]): void {
   }
 }
 
+// Reassembles the whole <Application> document from its stored per-element pieces (Neo4j keeps
+// one node per element, never the original document) — same shape as the frontend's own
+// buildFullXml, used to hand the AI the complete application as context.
+function buildApplicationXml(detail: ApplicationDetail): string {
+  const attrs = [`name="${escapeXmlAttr(detail.name)}"`];
+  if (detail.theme) attrs.push(`theme="${escapeXmlAttr(detail.theme)}"`);
+  if (detail.database) attrs.push(`database="${escapeXmlAttr(detail.database)}"`);
+  return `<Application ${attrs.join(" ")}>\n${detail.elements.map((el) => el.xml).join("\n")}\n</Application>`;
+}
+
 export default async function runtimeApplicationRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireAuth);
 
@@ -178,6 +188,25 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
     const detail = await getApplication(owned.id);
     if (!detail) throw new HttpError(404, "Application not found");
     return reply.send({ id: owned.id, ...detail });
+  });
+
+  // "Ask about this app" — a read-only, plain-English metadata query answered strictly from the
+  // application's own XML (see aiService.ts's answerApplicationQuestion). Never writes anything,
+  // so unlike /generate there is no review/apply step: the answer is the whole result.
+  app.post("/runtime-applications/:id/ask", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const owned = await getOwnedApplication(Number(req.params.id), req.user.id);
+    const body = RuntimeApplicationAskSchema.parse(req.body);
+    const detail = await getApplication(owned.id);
+    if (!detail) throw new HttpError(404, "Application not found");
+    if (detail.elements.length === 0) {
+      return reply.send({ answer: "This application is still empty — describe what it should do first, then ask about it here." });
+    }
+    try {
+      const answer = await answerApplicationQuestion(body.question, buildApplicationXml(detail), body.history);
+      return reply.send({ answer });
+    } catch (e) {
+      throw new HttpError(500, `Couldn't answer that right now: ${e instanceof Error ? e.message : e}`);
+    }
   });
 
   app.delete("/runtime-applications/:id", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {

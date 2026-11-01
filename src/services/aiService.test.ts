@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { callOpenAI, callOpenAIWithTools, generateApplicationXml, generateApplicationFixXml } from "./aiService.js";
+import { callOpenAI, callOpenAIWithTools, generateApplicationXml, generateApplicationFixXml, answerApplicationQuestion } from "./aiService.js";
 
 // Regression test for a real incident: switching the platform's default model to gpt-5.6-luna
 // broke every single AI generation call, because that model 400s on ANY explicit temperature
@@ -106,5 +106,44 @@ describe("aiService.generateApplicationFixXml: outputs a targeted fragment, not 
   it("still validates the AI's own fragment output and throws a clear error on malformed XML", async () => {
     mockXmlResponse("not xml at all {{{");
     await expect(generateApplicationFixXml("whatever", `<Application name="X"></Application>`)).rejects.toThrow(/Generated fix XML failed to parse/);
+  });
+});
+
+// The "Ask about this app" metadata query — grounded strictly in the application's own XML, with
+// earlier turns sent as real chat history so a follow-up can refer back to the previous answer.
+describe("aiService.answerApplicationQuestion: grounded, read-only metadata Q&A", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function mockAnswer(content: string) {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content }, finish_reason: "stop" }], usage: {} }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("sends the application XML, the question, and the grounding instruction", async () => {
+    const xml = `<Application name="Claims"><Entity name="Claim"><Field name="id" type="string" key="true"/></Entity></Application>`;
+    const fetchMock = mockAnswer("  The app has one entity, **Claim**.  ");
+    const answer = await answerApplicationQuestion("What entities are there?", xml);
+    expect(answer).toBe("The app has one entity, **Claim**.");
+    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const lastMessage = sentBody.messages[sentBody.messages.length - 1];
+    expect(lastMessage.role).toBe("user");
+    expect(lastMessage.content).toContain(xml);
+    expect(lastMessage.content).toContain("What entities are there?");
+    expect(lastMessage.content).toMatch(/ONLY what this XML actually\s+defines/);
+  });
+
+  it("replays earlier turns as chat history, capped to the most recent six", async () => {
+    const fetchMock = mockAnswer("ok");
+    const history = Array.from({ length: 8 }, (_, i) => ({ question: `q${i}`, answer: `a${i}` }));
+    await answerApplicationQuestion("and the next?", `<Application name="X"></Application>`, history);
+    const sentBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const replayed = sentBody.messages.slice(1, -1);
+    expect(replayed).toHaveLength(12);
+    expect(replayed[0]).toEqual({ role: "user", content: "q2" });
+    expect(replayed[11]).toEqual({ role: "assistant", content: "a7" });
   });
 });
