@@ -915,13 +915,36 @@ const APPLICATION_VOCABULARY_RULES = `VOCABULARY RULES:
 - Root: <Application name="..." theme="..." database="relational">, containing any number of
   Entity/Relationship/Validation/DataSource/Screen/Action elements (Theme/Session/Auditing/
   AutoNumber are optional, at most one of each unless the request needs several AutoNumbers).
-- <Theme name="..."><Logo src="..." placement="top-left"/><Colors primary="#.." accent="#.." background="#.."/><Font family="..." size="14"/><Style cornerRadius="8" density="comfortable"/></Theme>
-  Pick Theme values to match the application's own register: a business/enterprise/corporate
-  domain (insurance, hospital, procurement, HR, finance, logistics, banking, government, and the
-  like) should get a professional, muted color palette (navy/slate/steel-blue primaries, not
-  bright playful ones), density="compact", and a clean corporate sans-serif (e.g. "Inter",
-  "Segoe UI", "Roboto"). A simpler consumer-facing or personal-tool description can keep
-  density="comfortable" and a friendlier accent color.
+- <Theme name="..."><Logo src="..." placement="top-left"/><Colors primary="#.." accent="#.." background="#.."/><Font family="..." headingFamily="..." size="14"/><Style cornerRadius="8" density="comfortable"/><Layout shell="..." nav="..." appearance="..." header="..." cards="..." tables="..." canvas="..." auth="..."/></Theme>
+  ALWAYS include a Theme. It is the app's whole visual identity, not just colors — every app must
+  look like its own product, never like a recolored template. Choose deliberately for the domain:
+  - <Layout> attributes (each from exactly these values):
+      shell = sidebar | topnav | rail   (topnav suits apps with few modules and customer-facing tools;
+              rail suits creative/education/project tools; sidebar suits data-heavy back offices)
+      nav = light | tinted | solid | dark       appearance = light | dark
+      header = banner | pattern | split | minimal   (the dashboard's opening section)
+      cards = bordered | elevated | soft         tables = lines | striped | cards
+      canvas = cool | warm | tinted              auth = split | split-right | centered
+  - Font family and headingFamily from exactly this list: Inter, Plus Jakarta Sans, DM Sans,
+    Manrope, Poppins, Nunito, Nunito Sans, IBM Plex Sans, Space Grotesk, Outfit, Lexend, Work Sans,
+    Rubik, Sora, Figtree, Archivo, Source Sans 3, Barlow, Fraunces, Playfair Display, Lora
+    (the last three are serif display faces — headingFamily only). headingFamily may be omitted.
+  - Colors: a primary and accent that fit the domain and differ from the generic navy/slate every
+    business app used to get. background stays a light neutral (#ffffff or close) — appearance
+    controls dark mode. Domain starting points (vary them, don't copy verbatim):
+      healthcare/clinic: teal or sky primary, rounded (cornerRadius 12–16), Plus Jakarta Sans/Figtree, split header
+      finance/insurance/banking: deep emerald, burgundy or ink-blue with a gold/amber accent, IBM Plex Sans or Source Sans 3, sharp (4–8), compact, striped tables, dark or solid nav
+      education: indigo/violet with amber accent, Nunito/Lexend, rounded, pattern header, rail
+      HR/people: violet or purple with pink/teal accent, Manrope/DM Sans, tinted nav, soft cards
+      retail/e-commerce: orange, rose or green, Poppins/Outfit, topnav, card-style tables, pill-round
+      logistics/fleet: amber or cyan with slate, Archivo/Barlow, dark nav, sharp, compact
+      music/media/creative: appearance="dark", pink/violet/cyan, Space Grotesk/Outfit/Sora, rail
+      CRM/sales: bright blue or cyan, DM Sans/Figtree, solid nav, split header
+      property/real estate: green or teal with amber, Lexend/Manrope (Playfair Display headings fit), topnav
+      hospitality/events/bookings: coral, rose or terracotta, Outfit, warm canvas, pattern header
+      project/task tools: indigo or ink with violet accent, Inter/Space Grotesk, rail, minimal header
+  - cornerRadius 4–20 and density (compact for data-heavy back offices, comfortable otherwise)
+    should agree with the rest of the look.
 - <Session><Variable name="branch" from="user.branch"/>...</Session> — only variables the Actions actually reference via {session.x}.
 - <Auditing name="standard" concurrency="timestamp"><Field role="createdBy" name="createdBy"/><Field role="createdOn" name="createdOn"/><Field role="updatedBy" name="updatedBy"/><Field role="updatedOn" name="updatedOn"/></Auditing>
   Reference it from an Entity via auditing="standard". Only add concurrency="timestamp" if the
