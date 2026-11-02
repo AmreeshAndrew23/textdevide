@@ -4,12 +4,13 @@ import { db } from "../db/connection.js";
 import { runtimeApplications } from "../db/schema.js";
 import {
   RuntimeApplicationCreateSchema, RuntimeApplicationGenerateSchema, RuntimeApplicationRunSchema, RuntimeApplicationUpdateSchema,
-  RuntimeApplicationChangePasswordSchema, RuntimeApplicationAskSchema,
+  RuntimeApplicationChangePasswordSchema, RuntimeApplicationAskSchema, RuntimeApplicationDesignSchema, BrandFromUrlSchema,
 } from "../models/schemas.js";
+import { fetchBrand, BrandFetchError } from "../services/brandFetch.js";
 import { HttpError } from "../services/authService.js";
 import { requireAuth } from "./authGuard.js";
 import { withTx } from "../runtime/neo4jStore.js";
-import { generateApplicationXml, generateApplicationFixXml, answerApplicationQuestion } from "../services/aiService.js";
+import { generateApplicationXml, generateApplicationFixXml, answerApplicationQuestion, generateThemeXml } from "../services/aiService.js";
 import { saveApplicationNodes, mergeApplicationNodes, getApplication, deleteApplicationNodes, listApplicationSummaries, guard } from "../runtimeEngine/applicationStore.js";
 import {
   parseEntityElement, parseRelationshipElement, parseValidationElement, parseScreenElement,
@@ -206,6 +207,35 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
       return reply.send({ answer });
     } catch (e) {
       throw new HttpError(500, `Couldn't answer that right now: ${e instanceof Error ? e.message : e}`);
+    }
+  });
+
+  // Design tab — "describe the look": returns a new <Theme> element for review. Like /generate it
+  // writes nothing; applying it is an ordinary PATCH with that Theme as the fragment.
+  app.post("/runtime-applications/:id/design", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const owned = await getOwnedApplication(Number(req.params.id), req.user.id);
+    const body = RuntimeApplicationDesignSchema.parse(req.body);
+    const detail = await getApplication(owned.id);
+    if (!detail) throw new HttpError(404, "Application not found");
+    const themeXml = detail.elements.find((e) => e.tag === "Theme")?.xml || "";
+    const entityNames = detail.elements.filter((e) => e.tag === "Entity").map((e) => e.name);
+    const summary = `"${detail.name}" — entities: ${entityNames.join(", ") || "none yet"}`;
+    try {
+      return reply.send({ xml: await generateThemeXml(body.description, themeXml, summary) });
+    } catch (e) {
+      throw new HttpError(500, `Couldn't design that look: ${e instanceof Error ? e.message : e}`);
+    }
+  });
+
+  // Design tab — "bring your own brand": colors and fonts read from a public website. Fenced
+  // against SSRF in brandFetch.ts (public addresses only, checked at connect time).
+  app.post("/runtime-applications/brand-from-url", async (req, reply) => {
+    const body = BrandFromUrlSchema.parse(req.body);
+    try {
+      return reply.send(await fetchBrand(body.url));
+    } catch (e) {
+      if (e instanceof BrandFetchError) throw new HttpError(422, e.message);
+      throw new HttpError(502, "Couldn't read that website.");
     }
   });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { callOpenAI, callOpenAIWithTools, generateApplicationXml, generateApplicationFixXml, answerApplicationQuestion } from "./aiService.js";
+import { callOpenAI, callOpenAIWithTools, generateApplicationXml, generateApplicationFixXml, answerApplicationQuestion, generateThemeXml } from "./aiService.js";
 
 // Regression test for a real incident: switching the platform's default model to gpt-5.6-luna
 // broke every single AI generation call, because that model 400s on ANY explicit temperature
@@ -145,5 +145,32 @@ describe("aiService.answerApplicationQuestion: grounded, read-only metadata Q&A"
     expect(replayed).toHaveLength(12);
     expect(replayed[0]).toEqual({ role: "user", content: "q2" });
     expect(replayed[11]).toEqual({ role: "assistant", content: "a7" });
+  });
+});
+
+// "Describe the look" — must come back as exactly one well-formed <Theme>, never other elements.
+describe("aiService.generateThemeXml: restyles an app with a single Theme element", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const reply = (content: string) => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content }, finish_reason: "stop" }], usage: {} }) });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  };
+
+  it("returns the Theme and sends the look, the current theme and the app summary", async () => {
+    const theme = `<Theme name="t"><Colors primary="#be123c" accent="#f59e0b" background="#faf7f1"/><Layout style="editorial" shell="topnav"/></Theme>`;
+    const fetchMock = reply("```xml\n" + theme + "\n```");
+    const xml = await generateThemeXml("warm and luxurious", `<Theme name="t"/>`, `"Hotel" — entities: Room`);
+    expect(xml).toContain(`<Layout style="editorial"`);
+    const prompt = JSON.parse(fetchMock.mock.calls[0][1].body).messages[1].content;
+    expect(prompt).toContain("warm and luxurious");
+    expect(prompt).toContain(`"Hotel" — entities: Room`);
+  });
+
+  it("rejects anything that isn't exactly one Theme", async () => {
+    reply(`<Theme name="t"/><Entity name="Sneaky"><Field name="id" type="string" key="true"/></Entity>`);
+    await expect(generateThemeXml("x", "", "app")).rejects.toThrow(/single <Theme>/);
+    reply("not xml {{");
+    await expect(generateThemeXml("x", "", "app")).rejects.toThrow(/failed to parse|single <Theme>/);
   });
 });

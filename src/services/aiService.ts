@@ -915,10 +915,19 @@ const APPLICATION_VOCABULARY_RULES = `VOCABULARY RULES:
 - Root: <Application name="..." theme="..." database="relational">, containing any number of
   Entity/Relationship/Validation/DataSource/Screen/Action elements (Theme/Session/Auditing/
   AutoNumber are optional, at most one of each unless the request needs several AutoNumbers).
-- <Theme name="..."><Logo src="..." placement="top-left"/><Colors primary="#.." accent="#.." background="#.."/><Font family="..." headingFamily="..." size="14"/><Style cornerRadius="8" density="comfortable"/><Layout shell="..." nav="..." appearance="..." header="..." cards="..." tables="..." canvas="..." auth="..."/></Theme>
+- <Theme name="..."><Logo src="..." placement="top-left"/><Colors primary="#.." accent="#.." background="#.."/><Font family="..." headingFamily="..." size="14"/><Style cornerRadius="8" density="comfortable"/><Layout style="..." shell="..." nav="..." appearance="..." header="..." cards="..." tables="..." canvas="..." auth="..."/><Tokens surface="#.." canvas="#.." text="#.." muted="#.." border="#.." shadow="..." borderWidth="1" spacing="..." typeScale="1" headingWeight="700"/></Theme>
   ALWAYS include a Theme. It is the app's whole visual identity, not just colors — every app must
   look like its own product, never like a recolored template. Choose deliberately for the domain:
   - <Layout> attributes (each from exactly these values):
+      style = corporate | soft | playful | editorial | glass | brutal | minimal — the design LANGUAGE,
+              the single biggest decision; the other attributes must agree with it:
+                corporate: dense, sharp (cornerRadius 2–6), dark nav, striped tables, minimal header — finance, insurance, logistics
+                soft: pastel, very round (16–22), tinted nav, elevated cards, split header, centered sign-in — healthcare, HR, wellness
+                playful: saturated, round (16–20), solid nav, pattern header, card tables — education, kids, retail
+                editorial: serif headings (Playfair Display/Fraunces/Lora), warm canvas, hairlines, cornerRadius 0–2 — hotels, restaurants, events, luxury
+                glass: appearance="dark", frosted cards, glowing gradients — personal finance/UPI/wallets, media, music
+                brutal: thick ink borders, hard shadows, Space Grotesk/Archivo, cornerRadius 4–6 — CRM, project tools, startups
+                minimal: monochrome, ink buttons, cornerRadius 6–10 — property, portfolios, internal tools
       shell = sidebar | topnav | rail   (topnav suits apps with few modules and customer-facing tools;
               rail suits creative/education/project tools; sidebar suits data-heavy back offices)
       nav = light | tinted | solid | dark       appearance = light | dark
@@ -945,6 +954,13 @@ const APPLICATION_VOCABULARY_RULES = `VOCABULARY RULES:
       project/task tools: indigo or ink with violet accent, Inter/Space Grotesk, rail, minimal header
   - cornerRadius 4–20 and density (compact for data-heavy back offices, comfortable otherwise)
     should agree with the rest of the look.
+  - <Tokens> (optional but encouraged — it is what makes two apps of the same style differ):
+      surface/canvas: soft tinted off-whites for light apps (never pure #ffffff — e.g. #f6f4ef,
+        #eef2f7), very dark tinted greys for appearance="dark" (e.g. #12141b); canvas slightly
+        darker than surface. text/muted: readable on surface (text contrast at least 4.5:1).
+      border: a hairline tone between canvas and text.
+      shadow = none | soft | deep | hard | glow    borderWidth = 0–3    spacing = tight | normal | airy
+      typeScale = 0.9–1.2    headingWeight = 500–800
 - <Session><Variable name="branch" from="user.branch"/>...</Session> — only variables the Actions actually reference via {session.x}.
 - <Auditing name="standard" concurrency="timestamp"><Field role="createdBy" name="createdBy"/><Field role="createdOn" name="createdOn"/><Field role="updatedBy" name="updatedBy"/><Field role="updatedOn" name="updatedOn"/></Auditing>
   Reference it from an Entity via auditing="standard". Only add concurrency="timestamp" if the
@@ -1302,6 +1318,47 @@ export async function answerApplicationQuestion(
     { usageSink, signal }
   );
   return answer.trim();
+}
+
+// "Describe the look" from the Studio's Design tab — restyles an EXISTING app by returning only a new
+// <Theme> element (never entities/screens), validated to be exactly one well-formed Theme.
+const THEME_DESIGN_PROMPT = (existingThemeXml: string, appSummary: string, look: string) => `You are the visual designer for a generated
+business application. Design its complete visual identity as ONE <Theme> element.
+
+The application: ${appSummary}
+Its current Theme (reuse its name attribute and its <Logo> if present):
+${existingThemeXml || "(none yet)"}
+
+${APPLICATION_VOCABULARY_RULES}
+
+The user describes the look they want: ${look}
+
+Return ONLY the <Theme>...</Theme> element — Colors, Font, Style, Layout (with style) and Tokens —
+interpreting the description boldly and specifically (it should look clearly different from a
+default template). No other elements, no explanations, no markdown fences.`;
+
+export async function generateThemeXml(
+  look: string, existingThemeXml: string, appSummary: string, usageSink?: UsageEntry[], signal?: AbortSignal
+): Promise<string> {
+  const xml = stripMarkdownFence(
+    await callOpenAI(
+      [
+        { role: "system", content: "You are a senior product designer. Return ONLY one valid <Theme> XML element." },
+        { role: "user", content: THEME_DESIGN_PROMPT(existingThemeXml, appSummary, look) },
+      ],
+      { usageSink, signal }
+    )
+  ).trim();
+  let manifest;
+  try {
+    manifest = parseApplicationXml(`<Application>${xml}</Application>`);
+  } catch (e) {
+    throw new Error(`Generated theme failed to parse: ${e instanceof Error ? e.message : e}`);
+  }
+  if (manifest.elements.length !== 1 || manifest.elements[0].tag !== "Theme") {
+    throw new Error("The AI returned something other than a single <Theme> element — try rephrasing the look.");
+  }
+  return manifest.elements[0].xml;
 }
 
 type ChatMessage = { role: string; content: string | unknown[] };

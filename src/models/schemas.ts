@@ -92,6 +92,14 @@ export const RuntimeApplicationAskSchema = z.object({
   history: z.array(z.object({ question: z.string().max(2000), answer: z.string().max(20000) })).max(10).default([]),
 });
 
+// The Studio Design tab: "describe the look" (AI restyle), and reading a website's brand.
+export const RuntimeApplicationDesignSchema = z.object({
+  description: z.string().trim().min(1).max(1000),
+});
+export const BrandFromUrlSchema = z.object({
+  url: z.string().trim().min(3).max(500),
+});
+
 export const RuntimeApplicationChangePasswordSchema = z.object({
   currentPassword: z.string().min(1),
   newPassword: z.string().min(1),
