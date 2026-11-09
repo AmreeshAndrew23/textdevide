@@ -36,7 +36,7 @@ export async function guard<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-function assertKnownTag(tag: string): void {
+export function assertKnownTag(tag: string): void {
   if (!KNOWN_TAGS.has(tag)) throw new Error(`Unknown top-level Application element <${tag}> — expected one of ${[...KNOWN_TAGS].join(", ")}`);
 }
 
@@ -62,7 +62,7 @@ const CURRENT_ACCOUNT_FIELDS = new Set([
 // exactly the bug class this function exists to prevent (every signup fails with "X is required"
 // the moment the built-in register/login code doesn't supply it).
 const OPTIONAL_ACCOUNT_FIELDS = new Set(["roleId"]);
-function assertAccountEntityShape(el: ParsedTopLevelElement): void {
+export function assertAccountEntityShape(el: ParsedTopLevelElement): void {
   if (el.tag !== "Entity") return;
   const entity = parseEntityElement(el.xml);
   if (!entity.isAccount) return;

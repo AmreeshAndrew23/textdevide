@@ -1,6 +1,7 @@
 import { OPENAI_API_KEY } from "../config.js";
 import { usedParams, validateCypherStatic } from "../runtime/cypher.js";
 import { parseApplicationXml } from "../runtimeEngine/applicationModel.js";
+import { lintApplication, type LintIssue } from "../runtimeEngine/appLint.js";
 
 // Port of ai_service.py's shared prompt fragments and OpenAI call helpers. Prompts are copied
 // verbatim (same wording = same model behavior) — only Python's str.format() {{ }} escaping is
@@ -1324,6 +1325,68 @@ export async function answerApplicationQuestion(
     { usageSink, signal }
   );
   return answer.trim();
+}
+
+// The self-check: every generated app or change is linted, and real defects go back to the AI to
+// repair — at most twice, keeping whichever version has the fewest. A sound app costs no extra
+// call, and a failed repair never loses the original.
+export type SelfCheck = { repaired: number; remaining: string[]; warnings: string[] };
+export type CheckedXml = { xml: string; check: SelfCheck };
+const MAX_REPAIRS = 2;
+const errorsOf = (issues: LintIssue[]) => issues.filter((i) => i.severity === "error").map((i) => i.message);
+const warningsOf = (issues: LintIssue[]) => issues.filter((i) => i.severity === "warning").map((i) => i.message);
+
+async function selfCheck(
+  initialXml: string, lint: (xml: string) => LintIssue[], repair: (xml: string, problems: string[]) => Promise<string>
+): Promise<CheckedXml> {
+  let best = initialXml;
+  let bestIssues = lint(initialXml);
+  const initialErrors = errorsOf(bestIssues).length;
+  for (let attempt = 0; attempt < MAX_REPAIRS && errorsOf(bestIssues).length > 0; attempt++) {
+    try {
+      const candidate = await repair(best, errorsOf(bestIssues));
+      const issues = lint(candidate);
+      if (errorsOf(issues).length < errorsOf(bestIssues).length) {
+        best = candidate;
+        bestIssues = issues;
+      }
+    } catch {
+      break;
+    }
+  }
+  return { xml: best, check: { repaired: initialErrors - errorsOf(bestIssues).length, remaining: errorsOf(bestIssues), warnings: warningsOf(bestIssues) } };
+}
+
+const problemList = (problems: string[]) => problems.map((p) => `- ${p}`).join("\n");
+
+export async function generateCheckedApplication(description: string, usageSink?: UsageEntry[], signal?: AbortSignal): Promise<CheckedXml> {
+  const xml = await generateApplicationXml(description, usageSink, signal);
+  return selfCheck(xml, (x) => lintApplication(parseApplicationXml(x).elements), async (current, problems) => stripMarkdownFence(
+    await callOpenAI([
+      { role: "system", content: "You are an enterprise application architect. Return ONLY valid XML, no markdown fences." },
+      { role: "user", content: `${APPLICATION_VOCABULARY_RULES}\n\nThis Application was generated for: ${description}\n\n${current}\n\nAn automatic check found these defects:\n${problemList(problems)}\n\nReturn the COMPLETE corrected <Application>, fixing every defect and changing nothing else.` },
+    ], { usageSink, signal })
+  ));
+}
+
+export async function generateCheckedFix(description: string, existingXml: string, usageSink?: UsageEntry[], signal?: AbortSignal): Promise<CheckedXml> {
+  const existing = parseApplicationXml(existingXml).elements;
+  const key = (e: { tag: string; name: string }) => `${e.tag}:${e.name}`;
+  // Problems the app already had aren't this change's fault, so only new ones count.
+  const before = new Set(lintApplication(existing).map((i) => i.message));
+  const lint = (fragmentXml: string) => {
+    const changed = parseApplicationXml(fragmentXml).elements;
+    const replaced = new Set(changed.map(key));
+    return lintApplication([...existing.filter((e) => !replaced.has(key(e))), ...changed]).filter((i) => !before.has(i.message));
+  };
+  const xml = await generateApplicationFixXml(description, existingXml, usageSink, signal);
+  return selfCheck(xml, lint, async (current, problems) => {
+    const repaired = stripMarkdownFence(await callOpenAI([
+      { role: "system", content: "You are an enterprise application architect. Return ONLY a valid XML fragment, no markdown fences." },
+      { role: "user", content: `${APPLICATION_XML_FIX_PROMPT(existingXml, description)}\n\nYour previous fragment was:\n${current}\n\nAn automatic check found these defects when it was applied:\n${problemList(problems)}\n\nReturn the corrected fragment, fixing every defect. Same output contract: ONLY the top-level elements that are new or need to change.` },
+    ], { usageSink, signal }));
+    return repaired;
+  });
 }
 
 // "Describe the look" from the Studio's Design tab — restyles an EXISTING app by returning only a new

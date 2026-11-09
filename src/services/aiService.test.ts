@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { callOpenAI, callOpenAIWithTools, generateApplicationXml, generateApplicationFixXml, answerApplicationQuestion, generateThemeXml } from "./aiService.js";
+import { callOpenAI, callOpenAIWithTools, generateApplicationXml, generateApplicationFixXml, answerApplicationQuestion, generateThemeXml, generateCheckedApplication, generateCheckedFix } from "./aiService.js";
 
 // Regression test for a real incident: switching the platform's default model to gpt-5.6-luna
 // broke every single AI generation call, because that model 400s on ANY explicit temperature
@@ -172,5 +172,73 @@ describe("aiService.generateThemeXml: restyles an app with a single Theme elemen
     await expect(generateThemeXml("x", "", "app")).rejects.toThrow(/single <Theme>/);
     reply("not xml {{");
     await expect(generateThemeXml("x", "", "app")).rejects.toThrow(/failed to parse|single <Theme>/);
+  });
+});
+
+// The self-check: generated apps are linted, and real defects go back to the AI, at most twice.
+describe("aiService.generateCheckedApplication: repairs what the checker finds", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const entity = `<Entity name="Task"><Field name="id" type="string" key="true"/><Field name="title" type="string"/></Entity>`;
+  const form = (bind: string) => `<Screen name="TaskForm" entity="Task" type="form"><Fields><UIField label="T" bind="${bind}"/></Fields><Buttons><Button label="Save" event="click" action="save"/></Buttons></Screen>`;
+  const list = `<Screen name="TaskList" entity="Task"><Grid name="g" entity="Task"><Column header="T" bind="title"/><Events><On event="rowClick" action="openRecord" targetScreen="TaskForm"/></Events></Grid></Screen>`;
+  const app = (bind: string) => `<Application name="T">${entity}${form(bind)}${list}</Application>`;
+  const queue = (...replies: string[]) => {
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      const content = replies.length > 1 ? replies.shift() : replies[0];
+      return { ok: true, json: async () => ({ choices: [{ message: { content }, finish_reason: "stop" }], usage: {} }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  };
+  const userPrompt = (fetchMock: ReturnType<typeof vi.fn>, call: number) => JSON.parse(fetchMock.mock.calls[call][1].body).messages[1].content as string;
+
+  it("makes one AI call when the app is already sound", async () => {
+    const fetchMock = queue(app("title"));
+    const result = await generateCheckedApplication("tasks");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.check).toEqual({ repaired: 0, remaining: [], warnings: [] });
+  });
+
+  it("sends the defects back and returns the repaired app", async () => {
+    const fetchMock = queue(app("titel"), app("title"));
+    const result = await generateCheckedApplication("tasks");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(userPrompt(fetchMock, 1)).toContain("Task.titel");
+    expect(result.xml).toBe(app("title"));
+    expect(result.check).toMatchObject({ repaired: 1, remaining: [] });
+  });
+
+  it("stops after two repairs and reports what's left", async () => {
+    const fetchMock = queue(app("titel"));
+    const result = await generateCheckedApplication("tasks");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.check.remaining[0]).toContain("Task.titel");
+  });
+
+  it("keeps the original if a repair comes back unusable", async () => {
+    queue(app("titel"), "not xml {{");
+    const result = await generateCheckedApplication("tasks");
+    expect(result.xml).toBe(app("titel"));
+    expect(result.check.remaining).toHaveLength(1);
+  });
+
+  it("checks a change in the context of the whole app, ignoring problems that were already there", async () => {
+    const existing = `<Application name="T">${entity}${form("oldBroken")}${list}</Application>`;
+    const fragment = `<Application><Screen name="Extra" entity="Task" type="form"><Fields><UIField label="T" bind="title"/></Fields><Buttons><Button label="Save" event="click" action="save"/></Buttons></Screen></Application>`;
+    const fetchMock = queue(fragment);
+    const result = await generateCheckedFix("add a screen", existing);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.check.remaining).toEqual([]);
+  });
+
+  it("repairs a change that breaks a reference, as a fragment", async () => {
+    const existing = app("title");
+    const bad = `<Application><Screen name="Extra" entity="Task" type="form"><Fields><UIField label="T" bind="nope"/></Fields><Buttons><Button label="Save" event="click" action="save"/></Buttons></Screen></Application>`;
+    const good = bad.replace('bind="nope"', 'bind="title"');
+    const fetchMock = queue(bad, good);
+    const result = await generateCheckedFix("add a screen", existing);
+    expect(userPrompt(fetchMock, 1)).toContain("ONLY the top-level elements");
+    expect(result.xml).toBe(good);
+    expect(result.check.repaired).toBe(1);
   });
 });

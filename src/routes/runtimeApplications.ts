@@ -10,7 +10,7 @@ import { fetchBrand, BrandFetchError } from "../services/brandFetch.js";
 import { HttpError } from "../services/authService.js";
 import { requireAuth } from "./authGuard.js";
 import { withTx } from "../runtime/neo4jStore.js";
-import { generateApplicationXml, generateApplicationFixXml, answerApplicationQuestion, generateThemeXml } from "../services/aiService.js";
+import { generateCheckedApplication, generateCheckedFix, answerApplicationQuestion, generateThemeXml } from "../services/aiService.js";
 import { saveApplicationNodes, mergeApplicationNodes, getApplication, deleteApplicationNodes, listApplicationSummaries, guard } from "../runtimeEngine/applicationStore.js";
 import {
   parseEntityElement, parseRelationshipElement, parseValidationElement, parseScreenElement,
@@ -137,10 +137,10 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
   app.post("/runtime-applications/generate", async (req, reply) => {
     const body = RuntimeApplicationGenerateSchema.parse(req.body);
     try {
-      const xml = body.existingXml
-        ? await generateApplicationFixXml(body.description, body.existingXml)
-        : await generateApplicationXml(body.description);
-      return reply.send({ xml });
+      const result = body.existingXml
+        ? await generateCheckedFix(body.description, body.existingXml)
+        : await generateCheckedApplication(body.description);
+      return reply.send(result);
     } catch (e) {
       throw new HttpError(500, `AI generation failed: ${e instanceof Error ? e.message : e}`);
     }
