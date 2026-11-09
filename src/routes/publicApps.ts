@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { Transaction } from "neo4j-driver";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { runtimeApplications, runtimeAppInvites } from "../db/schema.js";
@@ -22,6 +23,7 @@ import {
   PROTECTED_ACCOUNT_FIELDS, sanitizeRow, type AppModel, type StoredElement,
 } from "../runtimeEngine/publicAccess.js";
 import { inviteIdFromToken, isInviteExpired, isInviteTokenValid, makeSignupPolicy, type SignupMode } from "../runtimeEngine/publishing.js";
+import { isScoped, matchesScope, resolveScope, type ResolvedScope } from "../runtimeEngine/rowScope.js";
 import { saveUpload, UploadError } from "../runtimeEngine/uploads.js";
 
 // A published application, used by real people through its public link. Registered WITHOUT the
@@ -93,6 +95,11 @@ function readableEntity(app: Published, name: string, session: Session): EntityD
   return entity;
 }
 
+// null when this viewer isn't limited on this entity.
+function scopeFor(tx: Transaction, app: Published, entity: EntityDef, session: Session): Promise<ResolvedScope | null> | null {
+  return isScoped(entity, session.role) ? resolveScope(tx, app.id, app.model, entity, session) : null;
+}
+
 // Brute-force protection for anything checking a secret: passwords and emailed one-time codes.
 function lockKeyFor(action: string, values: Record<string, unknown>): string | null {
   if (action === "login") return String(values.email ?? values.username ?? "");
@@ -133,7 +140,13 @@ export default async function publicAppRoutes(app: FastifyInstance) {
       const published = await loadPublished(req.params.slug);
       const session = await requireWorkingSession(req, published);
       const entity = readableEntity(published, req.params.entityName, session);
-      const rows = await guard(() => withTx((tx) => listEntityRows(tx, published.id, entity, { includeDeleted: req.query.includeDeleted === "true" })));
+      const rows = await guard(() =>
+        withTx(async (tx) => {
+          const all = await listEntityRows(tx, published.id, entity, { includeDeleted: req.query.includeDeleted === "true" });
+          const scope = await scopeFor(tx, published, entity, session);
+          return scope ? all.filter((r) => matchesScope(r, scope)) : all;
+        })
+      );
       return reply.send({ rows: rows.map(sanitizeRow) });
     }
   );
@@ -144,7 +157,13 @@ export default async function publicAppRoutes(app: FastifyInstance) {
       const published = await loadPublished(req.params.slug);
       const session = await requireWorkingSession(req, published);
       const entity = readableEntity(published, req.params.entityName, session);
-      const row = await guard(() => withTx((tx) => getEntityRow(tx, published.id, entity, req.params.key)));
+      const row = await guard(() =>
+        withTx(async (tx) => {
+          const found = await getEntityRow(tx, published.id, entity, req.params.key);
+          const scope = found ? await scopeFor(tx, published, entity, session) : null;
+          return found && scope && !matchesScope(found, scope) ? null : found;
+        })
+      );
       if (!row) throw new HttpError(404, "Row not found");
       return reply.send({ row: sanitizeRow(row) });
     }
@@ -158,6 +177,11 @@ export default async function publicAppRoutes(app: FastifyInstance) {
       const entity = readableEntity(published, req.params.entityName, session);
       await guard(() =>
         withTx(async (tx) => {
+          const scope = await scopeFor(tx, published, entity, session);
+          if (scope) {
+            const found = await getEntityRow(tx, published.id, entity, req.params.key, { includeDeleted: true });
+            if (!found || !matchesScope(found, scope)) throw new HttpError(404, "Row not found");
+          }
           try {
             await restoreEntityRow(tx, published.id, entity, req.params.key);
           } catch (e) {
@@ -192,7 +216,20 @@ export default async function publicAppRoutes(app: FastifyInstance) {
       );
       const valueField = source.valueField || "id";
       const displayField = source.displayField || valueField;
-      return reply.send({ options: rows.map((r) => ({ value: r[valueField], label: String(r[displayField] ?? r[valueField]) })) });
+      // A dropdown over a limited entity only offers the records this person can reach.
+      const sourceEntity = published.model.entities.find((e) => e.name === source.entity);
+      const reachable = sourceEntity && isScoped(sourceEntity, session.role)
+        ? await guard(() =>
+            withTx(async (tx) => {
+              const scope = await resolveScope(tx, published.id, published.model, sourceEntity, session);
+              return new Set((await listEntityRows(tx, published.id, sourceEntity)).filter((r) => matchesScope(r, scope)).map((r) => String(r[valueField])));
+            })
+          )
+        : null;
+      return reply.send({
+        options: rows.filter((r) => !reachable || reachable.has(String(r[valueField])))
+          .map((r) => ({ value: r[valueField], label: String(r[displayField] ?? r[valueField]) })),
+      });
     }
   );
 
@@ -255,6 +292,23 @@ export default async function publicAppRoutes(app: FastifyInstance) {
             const key = values[entity.fields.find((f) => f.key)?.name ?? "id"];
             const existing = key ? await getEntityRow(tx, published.id, entity, key) : null;
             if (existing) for (const f of PROTECTED_ACCOUNT_FIELDS) if (existing[f] !== undefined) values[f] = existing[f];
+          }
+          // Row-level access: the record being acted on must be this person's, and a save can't
+          // hand it to someone else. On a new record the owner link is filled in for them.
+          const scope = session && !entity.isAccount ? await scopeFor(tx, published, entity, session) : null;
+          if (scope) {
+            const keyName = entity.fields.find((f) => f.key)?.name ?? "id";
+            const key = values[keyName];
+            const existing = key ? await getEntityRow(tx, published.id, entity, key, { includeDeleted: true }) : null;
+            if (existing && !matchesScope(existing, scope)) throw new HttpError(403, "You don't have permission to do that.");
+            if (!scope.creator && body.action !== "delete") {
+              const proposed = { ...existing, ...values };
+              if ((proposed[scope.field] === undefined || proposed[scope.field] === "") && scope.fill !== undefined) {
+                values = { ...values, [scope.field]: scope.fill };
+                proposed[scope.field] = scope.fill;
+              }
+              if (body.action === "save" && !matchesScope(proposed, scope)) throw new HttpError(403, "You can only save records that belong to you.");
+            }
           }
           const out = await runButtonAction(
             {

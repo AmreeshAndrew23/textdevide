@@ -115,7 +115,8 @@ export type FieldDef = {
 // (email/passwordHash/mustChangePassword/firstName/lastName/dob/emailVerified/authProvider, or the
 // older username-based shape still supported for already-generated apps) documented in
 // aiService.ts's prompt, not parsed here.
-export type EntityDef = { name: string; auditing: string | null; isAccount: boolean; fields: FieldDef[] };
+// scopeBy/scopeExempt: row-level access for published apps, see rowScope.ts.
+export type EntityDef = { name: string; auditing: string | null; isAccount: boolean; fields: FieldDef[]; scopeBy?: string; scopeExempt?: string[] };
 
 // Caught live: the AI sometimes writes an Entity named "User" with EXACTLY the right
 // account-field shape (the convention it was told to follow) but forgets the isAccount="true"
@@ -174,7 +175,11 @@ export function parseEntityElement(xml: string): EntityDef {
   }));
   const name = attr(el, "name");
   const isAccount = attrBool(el, "isAccount") || looksLikeAccountEntity(name, fields);
-  return { name, auditing: attrOrNull(el, "auditing"), isAccount, fields };
+  const scopeBy = attrOrNull(el, "scopeBy");
+  const scope = scopeBy
+    ? { scopeBy, scopeExempt: (attrOrNull(el, "scopeExempt") ?? "").split(",").map((r) => r.trim()).filter(Boolean) }
+    : {};
+  return { name, auditing: attrOrNull(el, "auditing"), isAccount, fields, ...scope };
 }
 
 // ---------------------------------------------------------------------------

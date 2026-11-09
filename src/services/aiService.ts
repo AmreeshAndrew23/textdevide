@@ -1030,6 +1030,12 @@ const APPLICATION_VOCABULARY_RULES = `VOCABULARY RULES:
   matching the role entity's "name" values exactly) on the <Screen> tag itself — a logged-in
   session whose resolved role isn't in that list gets a 403 and never sees that screen in the nav.
   Leave requiresRole off every screen everyone should be able to use.
+  RECORD-LEVEL ACCESS: when users should only see their OWN records ("doctors see their own
+  appointments", "customers see only their orders"), add to that <Entity> scopeBy="..." and,
+  if some roles see everything, scopeExempt="Admin,Receptionist". scopeBy is "creator" (records they
+  created), or a field name: a field linked by a Relationship to the User entity, or to an entity
+  that has an "email" field matching the person's sign-in email (e.g. Doctor needs an email field),
+  or a plain field holding their email. Omit it wherever everyone may see all records.
 - <Relationship name="..." fromEntity="..." fromField="..." toEntity="..." toField="id" cardinality="N:1|1:N|1:1|N:N" onDelete="restrict|cascade|setNull"/>
   fromEntity is the "many" side holding the foreign key (fromField); toEntity is the "one" side,
   toField is normally its key field.

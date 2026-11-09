@@ -12,6 +12,7 @@ import { getApplication, guard } from "../runtimeEngine/applicationStore.js";
 import { deleteEntityRow, getEntityRow, listEntityRows, saveEntityRow, ValidationError } from "../runtimeEngine/entityStore.js";
 import { buildAppModel, isValidSlug, slugify, type AppModel } from "../runtimeEngine/publicAccess.js";
 import { ensureRoleRows, inviteToken, isInviteExpired, roleSetupOf } from "../runtimeEngine/publishing.js";
+import { scopeProblems } from "../runtimeEngine/rowScope.js";
 
 // The Studio's Publish panel — owner only. Publishing stores a snapshot of the app's definition,
 // so later Studio edits don't reach real users until the owner publishes again. Records are shared
@@ -87,6 +88,7 @@ export default async function publishingRoutes(app: FastifyInstance) {
       hasAccounts: !!account,
       hasLogin: model.screens.some((s) => s.name === "Login"),
       usesRoles: !!setup && setup.roleNames.length > 0,
+      accessProblems: scopeProblems(model),
       supportsInvites: identifierFieldOf(model) === "email",
       suggestedSlug: owned.slug || (await uniqueSlug(slugify(detail.name), owned.id)),
       roles,
