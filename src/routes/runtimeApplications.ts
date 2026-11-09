@@ -28,6 +28,7 @@ import { isLocked, recordFailure, recordSuccess } from "../runtimeEngine/loginAt
 import { sendEmail } from "../services/emailService.js";
 import { buildAppModel, sanitizeRow, PROTECTED_ACCOUNT_FIELDS } from "../runtimeEngine/publicAccess.js";
 import { makeSignupPolicy } from "../runtimeEngine/publishing.js";
+import { recordVersion } from "../runtimeEngine/versionStore.js";
 
 // The second, independent "Runtime Engine" — see runtimeEngine/. Deliberately top-level, NOT
 // nested under /projects/:id/..., since an Application isn't scoped to a project (confirmed with
@@ -114,6 +115,13 @@ export function buildApplicationXml(detail: ApplicationDetail): string {
   return `<Application ${attrs.join(" ")}>\n${detail.elements.map((el) => el.xml).join("\n")}\n</Application>`;
 }
 
+// Saves the definition as it stands, so the change about to happen can be undone. An empty app
+// has nothing worth going back to.
+async function snapshotBeforeChange(applicationId: number, label: string | undefined, email: string): Promise<void> {
+  const detail = await getApplication(applicationId);
+  if (detail && detail.elements.length > 0) await recordVersion(applicationId, buildApplicationXml(detail), `Before: ${label || "a change"}`, email);
+}
+
 export default async function runtimeApplicationRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireAuth);
 
@@ -162,6 +170,7 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
   app.put("/runtime-applications/:id", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     const owned = await getOwnedApplication(Number(req.params.id), req.user.id);
     const body = RuntimeApplicationUpdateSchema.parse(req.body);
+    await snapshotBeforeChange(owned.id, body.label, req.user.email);
     const parsed = await saveApplicationNodes(owned.id, body.xml, req.user.email);
     return reply.send({ id: owned.id, name: parsed.name, theme: parsed.theme, database: parsed.database, elementCounts: parsed.elementCounts });
   });
@@ -173,6 +182,7 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
   app.patch("/runtime-applications/:id", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     const owned = await getOwnedApplication(Number(req.params.id), req.user.id);
     const body = RuntimeApplicationUpdateSchema.parse(req.body);
+    await snapshotBeforeChange(owned.id, body.label, req.user.email);
     const parsed = await mergeApplicationNodes(owned.id, body.xml, req.user.email);
     return reply.send({ id: owned.id, name: parsed.name, theme: parsed.theme, database: parsed.database, elementCounts: parsed.elementCounts });
   });

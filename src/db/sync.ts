@@ -99,6 +99,14 @@ const CREATE_TABLE_SQL = [
      created_at TIMESTAMPTZ DEFAULT now(),
      updated_at TIMESTAMPTZ DEFAULT now()
    )`,
+  `CREATE TABLE IF NOT EXISTS runtime_app_versions (
+     id SERIAL PRIMARY KEY,
+     application_id INTEGER NOT NULL REFERENCES runtime_applications(id) ON DELETE CASCADE,
+     xml TEXT NOT NULL,
+     label VARCHAR NOT NULL,
+     created_by VARCHAR,
+     created_at TIMESTAMPTZ DEFAULT now()
+   )`,
   `CREATE TABLE IF NOT EXISTS runtime_app_invites (
      id SERIAL PRIMARY KEY,
      application_id INTEGER NOT NULL REFERENCES runtime_applications(id) ON DELETE CASCADE,

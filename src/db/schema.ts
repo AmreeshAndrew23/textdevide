@@ -124,6 +124,16 @@ export const runtimeAppInvites = pgTable("runtime_app_invites", {
   acceptedAt: timestamp("accepted_at", { withTimezone: true }),
 });
 
+// Earlier definitions of an application, for undo (see runtimeEngine/versionStore.ts).
+export const runtimeAppVersions = pgTable("runtime_app_versions", {
+  id: serial("id").primaryKey(),
+  applicationId: integer("application_id").notNull().references(() => runtimeApplications.id, { onDelete: "cascade" }),
+  xml: text("xml").notNull(),
+  label: varchar("label").notNull(),
+  createdBy: varchar("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
 export type UserRow = typeof users.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type PromptLogRow = typeof promptLogs.$inferSelect;

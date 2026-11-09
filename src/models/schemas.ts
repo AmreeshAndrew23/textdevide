@@ -75,6 +75,7 @@ export const RuntimeApplicationCreateSchema = z.object({
 
 export const RuntimeApplicationUpdateSchema = z.object({
   xml: z.string().min(1),
+  label: z.string().trim().max(200).optional(), // what this change is, for the version history
 });
 
 // existingXml (optional) is the application's CURRENT whole document — when present,

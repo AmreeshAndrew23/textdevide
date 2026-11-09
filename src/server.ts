@@ -21,6 +21,7 @@ import runtimeApplicationRoutes, { runtimeUploadsPublicRoutes } from "./routes/r
 import publishingRoutes from "./routes/publishing.js";
 import publicAppRoutes from "./routes/publicApps.js";
 import sampleDataRoutes from "./routes/sampleData.js";
+import versionRoutes from "./routes/versions.js";
 export async function buildServer() {
   // One proxy hop (Railway's edge): without this every visitor shares the proxy's IP, and with it
   // the rate limits below — one busy public app would throttle everybody.
@@ -54,6 +55,7 @@ export async function buildServer() {
   await app.register(runtimeApplicationRoutes, { prefix: "/api" });
   await app.register(publishingRoutes, { prefix: "/api" });
   await app.register(sampleDataRoutes, { prefix: "/api" });
+  await app.register(versionRoutes, { prefix: "/api" });
   await app.register(runtimeUploadsPublicRoutes, { prefix: "/api" }); // no requireAuth — see its own comment
   await app.register(publicAppRoutes, { prefix: "/api" }); // no requireAuth — its own per-app session and access rules
   // await app.register(projectsAiRoutes, { prefix: "/api" });
