@@ -29,6 +29,7 @@ import { sendEmail } from "../services/emailService.js";
 import { buildAppModel, sanitizeRow, PROTECTED_ACCOUNT_FIELDS } from "../runtimeEngine/publicAccess.js";
 import { makeSignupPolicy } from "../runtimeEngine/publishing.js";
 import { recordVersion } from "../runtimeEngine/versionStore.js";
+import { autoNumbersOf } from "../runtimeEngine/autoNumber.js";
 
 // The second, independent "Runtime Engine" — see runtimeEngine/. Deliberately top-level, NOT
 // nested under /projects/:id/..., since an Application isn't scoped to a project (confirmed with
@@ -448,6 +449,7 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
             {
               applicationId: owned.id, entity, relationships, validations, auditing, session, tx,
               signup: makeSignupPolicy(buildAppModel(detail.elements), { mode: "open", invites: [], promoteOnLogin: true }),
+              autoNumbers: autoNumbersOf(detail.elements),
             },
             body.action, actions, fieldValues
           );

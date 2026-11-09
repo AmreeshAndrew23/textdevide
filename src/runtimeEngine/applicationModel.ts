@@ -394,6 +394,22 @@ export function parseScreenElement(xml: string): ScreenDef {
 // never redefined. Custom logic lives in named actions composed of runtime steps; all steps run
 // in one transaction."
 // ---------------------------------------------------------------------------
+// AutoNumber — "PO-{YYYY}-" + a padded counter, see autoNumber.ts.
+export type AutoNumberDef = { id: string; start: number; increment: number; padLength: number; reset: "yearly" | "never"; prefix: string };
+
+export function parseAutoNumberElement(xml: string): AutoNumberDef {
+  const el = parseXml(xml);
+  const prefixEl = childElements(el, "Prefix")[0];
+  return {
+    id: attr(el, "id"),
+    start: attrNum(el, "start") ?? 1,
+    increment: attrNum(el, "increment") ?? 1,
+    padLength: attrNum(el, "padLength") ?? 0,
+    reset: attr(el, "reset", "never") === "yearly" ? "yearly" : "never",
+    prefix: prefixEl ? textOf(prefixEl) : "",
+  };
+}
+
 export type Step =
   | { kind: "set"; field: string; value: string }
   | { kind: "save" }

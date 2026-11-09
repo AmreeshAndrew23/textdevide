@@ -42,6 +42,25 @@ export function isInviteExpired(createdAt: Date | null, now = Date.now()): boole
   return !createdAt || now - createdAt.getTime() > INVITE_LIFETIME_MS;
 }
 
+// Who a Notify step reaches: an email, a field holding one, or everyone with a named role.
+export async function recipientsOf(
+  tx: Transaction, applicationId: number, model: AppModel, n: { to: string; values: Record<string, unknown> }
+): Promise<string[]> {
+  const isEmail = (v: unknown): boolean => typeof v === "string" && /^[^\s@]+@[^\s@]+$/.test(v.trim());
+  const to = n.to.trim();
+  if (isEmail(to)) return [to.toLowerCase()];
+  if (isEmail(n.values[to])) return [(n.values[to] as string).trim().toLowerCase()];
+  const setup = roleSetupOf(model);
+  const account = model.accountEntity;
+  if (!setup || !account) return [];
+  const role = (await listEntityRows(tx, applicationId, setup.roleEntity)).find((r) => String(r.name).toLowerCase() === to.toLowerCase());
+  if (!role) return [];
+  const idField = account.fields.some((f) => f.name === "email") ? "email" : "username";
+  return (await listEntityRows(tx, applicationId, account))
+    .filter((a) => String(a.roleId) === String(role[setup.keyField]))
+    .map((a) => String(a[idField]).toLowerCase());
+}
+
 // null unless the app actually uses the convention: User.roleId → a role entity with a "name".
 export function roleSetupOf(model: AppModel): RoleSetup | null {
   const account = model.accountEntity;

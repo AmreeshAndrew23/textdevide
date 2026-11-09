@@ -968,7 +968,8 @@ const APPLICATION_VOCABULARY_RULES = `VOCABULARY RULES:
   Entity also gets createdBy/createdOn/updatedBy/updatedOn fields some other way (the runtime
   stamps them itself — never add those 4 columns as plain <Field>s yourself).
 - <AutoNumber id="..." start="1" increment="1" padLength="6" reset="yearly|never"><Prefix>PO-{YYYY}-</Prefix></AutoNumber>
-  — reference it from a Field via autoNumber="<id>" (cosmetic only right now, no live numbering yet).
+  — reference it from a Field via autoNumber="<id>". The runtime assigns the number when a record is
+  created, so never add that field to a form as an editable input; show it read-only or only in lists.
 - <Entity name="..." auditing="standard-or-omit">
     <Field name="id" type="string" key="true" maxLength="36"/>   <!-- EVERY entity needs exactly one key="true" field, always first -->
     <Field name="..." type="string|integer|decimal|date|boolean|enum|image" required="true-or-omit" unique="true-or-omit" maxLength="50" min="0" precision="18" scale="2" autoNumber="id-or-omit"/>
@@ -1139,6 +1140,8 @@ const APPLICATION_VOCABULARY_RULES = `VOCABULARY RULES:
       <Notify to="..." message="free text with {fieldName} placeholders"/>
     </Steps>
   </Action>
+  A Notify step's to is an email address, the name of a field holding an email, or a role name; it
+  appears as an in-app notification for those people.
   NEVER create an Action named save/cancel/delete/openRecord — those are fixed built-ins a Screen's
   Button references directly (action="save"), never redefined.
 

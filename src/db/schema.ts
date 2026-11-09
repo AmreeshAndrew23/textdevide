@@ -124,6 +124,16 @@ export const runtimeAppInvites = pgTable("runtime_app_invites", {
   acceptedAt: timestamp("accepted_at", { withTimezone: true }),
 });
 
+// In-app notifications for a published app's users, from its Notify steps.
+export const runtimeAppNotifications = pgTable("runtime_app_notifications", {
+  id: serial("id").primaryKey(),
+  applicationId: integer("application_id").notNull().references(() => runtimeApplications.id, { onDelete: "cascade" }),
+  recipient: varchar("recipient").notNull(),
+  message: text("message").notNull(),
+  readAt: timestamp("read_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
 // Earlier definitions of an application, for undo (see runtimeEngine/versionStore.ts).
 export const runtimeAppVersions = pgTable("runtime_app_versions", {
   id: serial("id").primaryKey(),

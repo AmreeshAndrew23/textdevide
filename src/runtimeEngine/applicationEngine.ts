@@ -15,13 +15,14 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { EntityDef, RelationshipDef, ValidationDef, AuditingDef, ActionDef } from "./applicationModel.js";
 import { evaluateExpression, type ExpressionContext } from "./expressions.js";
 import {
-  saveEntityRow, deleteEntityRow, getEntityRowByField, setEntityOtp, consumeEntityOtp,
+  saveEntityRow, deleteEntityRow, getEntityRow, getEntityRowByField, setEntityOtp, consumeEntityOtp,
   ValidationError, ConcurrencyError,
 } from "./entityStore.js";
 import { hashPassword, verifyPassword } from "../services/authService.js";
 import { entityLabelFor } from "./labels.js";
 import { safeIdent, toDriverValue } from "../runtime/values.js";
 import { GOOGLE_CLIENT_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET } from "../config.js";
+import { nextAutoNumber, numberedFields, type AutoNumbers } from "./autoNumber.js";
 
 export type RuntimeAction =
   // "conflict" is distinct from "error" specifically so the frontend can show the amber
@@ -50,7 +51,12 @@ export type ActionRunContext = {
   tx: Transaction;
   // Who may create an account here and with which role (see publishing.ts). Absent = anyone, no role.
   signup?: SignupPolicy;
+  autoNumbers?: AutoNumbers;
+  // Collects Notify steps when the caller can deliver them (published apps).
+  notifications?: PendingNotification[];
 };
+
+export type PendingNotification = { to: string; message: string; values: Record<string, unknown> };
 
 // verified: the signer already proved they own this email (a personal invite link), so the emailed code is skipped.
 export type SignupDecision = { allowed: boolean; message?: string; roleId?: string | null; verified?: boolean };
@@ -150,8 +156,22 @@ function substituteFieldTemplate(template: string, fieldValues: Record<string, u
   return template.replace(/\{(\w+)\}/g, (full, field: string) => (field in fieldValues ? String(fieldValues[field]) : full));
 }
 
-async function runSave(ctx: ActionRunContext, fieldValues: Record<string, unknown>): Promise<RuntimeAction[]> {
+// A new record gets the next number; an existing one keeps its own, whatever was submitted.
+async function withAutoNumbers(ctx: ActionRunContext, fieldValues: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const fields = numberedFields(ctx.entity, ctx.autoNumbers);
+  if (fields.length === 0) return fieldValues;
+  const key = fieldValues[ctx.entity.fields.find((f) => f.key)?.name ?? "id"];
+  const existing = key ? await getEntityRow(ctx.tx, ctx.applicationId, ctx.entity, key, { includeDeleted: true }) : null;
+  const values = { ...fieldValues };
+  for (const f of fields) {
+    values[f.name] = existing ? existing[f.name] : await nextAutoNumber(ctx.tx, ctx.applicationId, ctx.autoNumbers![f.autoNumber!]);
+  }
+  return values;
+}
+
+async function runSave(ctx: ActionRunContext, submitted: Record<string, unknown>): Promise<RuntimeAction[]> {
   try {
+    const fieldValues = await withAutoNumbers(ctx, submitted);
     const { created } = await saveEntityRow(ctx.tx, ctx.applicationId, ctx.entity, ctx.relationships, ctx.validations, ctx.auditing, fieldValues, { identity: ctx.session.identity });
     return [{ type: "message", messageType: "success", value: created ? "Created successfully." : "Saved successfully." }];
   } catch (e) {
@@ -479,7 +499,9 @@ export async function runAction(ctx: ActionRunContext, action: ActionDef, fieldV
       results.push(...saveResults);
       if (saveResults.some((r) => r.type === "message" && r.messageType === "error")) return results; // stop
     } else if (step.kind === "notify") {
-      results.push({ type: "message", messageType: "info", value: substituteFieldTemplate(step.message, values) });
+      const text = substituteFieldTemplate(step.message, values);
+      results.push({ type: "message", messageType: "info", value: text });
+      ctx.notifications?.push({ to: substituteFieldTemplate(step.to, values), message: text, values });
     }
   }
   return results;

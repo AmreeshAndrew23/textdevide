@@ -14,6 +14,7 @@ import { ConcurrencyError, listEntityRows, permanentlyDeleteRows, saveEntityRow,
 import { buildAppModel } from "../runtimeEngine/publicAccess.js";
 import { roleSetupOf } from "../runtimeEngine/publishing.js";
 import { buildSampleRows, entitiesToFill } from "../runtimeEngine/sampleData.js";
+import { autoNumbersOf, nextAutoNumber, numberedFields } from "../runtimeEngine/autoNumber.js";
 
 // Owner-only "fill this app with example records", so a new app can be tried without typing data
 // in by hand. The keys created are remembered so "Remove sample data" deletes exactly those rows.
@@ -76,6 +77,7 @@ export default async function sampleDataRoutes(app: FastifyInstance) {
       return keyField?.type === "integer" ? randomInt(1_000_000, 2_000_000_000) : randomUUID();
     };
     const planned = buildSampleRows(model, generated, fill, existingKeys, newKey);
+    const autoNumbers = autoNumbersOf(detail.elements);
     const validations = detail.elements.filter((e) => e.tag === "Validation").map((e) => parseValidationElement(e.xml));
 
     const { created, skipped, firstProblem } = await guard(() =>
@@ -86,6 +88,7 @@ export default async function sampleDataRoutes(app: FastifyInstance) {
         for (const { entity, key, row } of planned) {
           const auditingEl = entity.auditing ? detail.elements.find((e) => e.tag === "Auditing" && e.name === entity.auditing) : undefined;
           try {
+            for (const f of numberedFields(entity, autoNumbers)) row[f.name] = await nextAutoNumber(tx, owned.id, autoNumbers[f.autoNumber!]);
             await saveEntityRow(tx, owned.id, entity, model.relationships, validations, auditingEl ? parseAuditingElement(auditingEl.xml) : null, row, { identity: req.user.email });
             (done[entity.name] ??= []).push(key);
           } catch (e) {

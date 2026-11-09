@@ -1,8 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { Transaction } from "neo4j-driver";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { db } from "../db/connection.js";
-import { runtimeApplications, runtimeAppInvites } from "../db/schema.js";
+import { runtimeApplications, runtimeAppInvites, runtimeAppNotifications } from "../db/schema.js";
 import { RuntimeApplicationRunSchema } from "../models/schemas.js";
 import { HttpError } from "../services/authService.js";
 import { withTx } from "../runtime/neo4jStore.js";
@@ -12,7 +12,7 @@ import { guard } from "../runtimeEngine/applicationStore.js";
 import {
   parseActionElement, parseApplicationXml, parseAuditingElement, parseValidationElement, type EntityDef,
 } from "../runtimeEngine/applicationModel.js";
-import { resolveAccountRole, identifierFieldOf, runButtonAction, type RuntimeAction } from "../runtimeEngine/applicationEngine.js";
+import { resolveAccountRole, identifierFieldOf, runButtonAction, type PendingNotification, type RuntimeAction } from "../runtimeEngine/applicationEngine.js";
 import { signRtAppSession, verifyRtAppSession } from "../runtimeEngine/appAuth.js";
 import { logAuditEvent } from "../runtimeEngine/auditLog.js";
 import { compileDataSource } from "../runtimeEngine/dataSourceCompiler.js";
@@ -22,7 +22,8 @@ import {
   buildAppModel, canEnterScreen, canReadEntity, canUseDataSource, elementsForViewer, isActionAllowed,
   PROTECTED_ACCOUNT_FIELDS, sanitizeRow, type AppModel, type StoredElement,
 } from "../runtimeEngine/publicAccess.js";
-import { inviteIdFromToken, isInviteExpired, isInviteTokenValid, makeSignupPolicy, type SignupMode } from "../runtimeEngine/publishing.js";
+import { inviteIdFromToken, isInviteExpired, isInviteTokenValid, makeSignupPolicy, recipientsOf, type SignupMode } from "../runtimeEngine/publishing.js";
+import { autoNumbersOf } from "../runtimeEngine/autoNumber.js";
 import { isScoped, matchesScope, resolveScope, type ResolvedScope } from "../runtimeEngine/rowScope.js";
 import { saveUpload, UploadError } from "../runtimeEngine/uploads.js";
 
@@ -121,6 +122,26 @@ export default async function publicAppRoutes(app: FastifyInstance) {
       elements: elementsForViewer(published.elements, published.model, viewerOf(session)),
       session,
     });
+  });
+
+  app.get("/public-apps/:slug/notifications", async (req: FastifyRequest<Slug>, reply) => {
+    const published = await loadPublished(req.params.slug);
+    const session = await requireWorkingSession(req, published);
+    const rows = await db.select().from(runtimeAppNotifications)
+      .where(and(eq(runtimeAppNotifications.applicationId, published.id), eq(runtimeAppNotifications.recipient, session.identity.toLowerCase())))
+      .orderBy(desc(runtimeAppNotifications.id)).limit(30);
+    return reply.send({ notifications: rows.map((n) => ({ id: n.id, message: n.message, createdAt: n.createdAt, read: !!n.readAt })) });
+  });
+
+  app.post("/public-apps/:slug/notifications/read", async (req: FastifyRequest<Slug>, reply) => {
+    const published = await loadPublished(req.params.slug);
+    const session = await requireWorkingSession(req, published);
+    await db.update(runtimeAppNotifications).set({ readAt: new Date() }).where(and(
+      eq(runtimeAppNotifications.applicationId, published.id),
+      eq(runtimeAppNotifications.recipient, session.identity.toLowerCase()),
+      isNull(runtimeAppNotifications.readAt),
+    ));
+    return reply.status(204).send();
   });
 
   app.get(
@@ -282,6 +303,8 @@ export default async function publicAppRoutes(app: FastifyInstance) {
       const linkInvite = body.action === "register" ? await inviteFromToken(body.inviteToken, published.id) : null;
       const verifiedInvite = linkInvite && linkInvite.email === String(body.fieldValues.email ?? "").trim().toLowerCase() ? linkInvite : null;
 
+      const pending: PendingNotification[] = [];
+      let deliveries: { recipient: string; message: string }[] = [];
       const results = await guard(() =>
         withTx(async (tx) => {
           let values = body.fieldValues;
@@ -315,9 +338,16 @@ export default async function publicAppRoutes(app: FastifyInstance) {
               applicationId: published.id, entity, relationships: model.relationships, validations, auditing,
               session: { identity: session?.identity ?? null, vars: {}, role: session?.role ?? null }, tx,
               signup: makeSignupPolicy(model, { mode: published.signupMode, invites, verifiedEmail: verifiedInvite?.email ?? null }),
+              autoNumbers: autoNumbersOf(published.elements),
+              notifications: pending,
             },
             body.action, actions, values
           );
+          for (const n of pending) {
+            const message = n.message.slice(0, 500);
+            for (const recipient of await recipientsOf(tx, published.id, model, n)) deliveries.push({ recipient, message });
+          }
+          deliveries = deliveries.slice(0, 200);
           if (lockKey) {
             const ok = actionSucceeded(body.action, out);
             if (ok) recordSuccess(published.id, lockKey); else recordFailure(published.id, lockKey);
@@ -327,6 +357,10 @@ export default async function publicAppRoutes(app: FastifyInstance) {
         })
       );
       dispatchEmailActions(results);
+      // After commit, and never at the cost of the action that already succeeded.
+      if (deliveries.length > 0) {
+        await db.insert(runtimeAppNotifications).values(deliveries.map((d) => ({ applicationId: published.id, ...d }))).catch((e) => req.log.error(e));
+      }
       const established = results.find((a) => a.type === "session");
       if (verifiedInvite && established) {
         await db.update(runtimeAppInvites).set({ acceptedAt: new Date() }).where(eq(runtimeAppInvites.id, verifiedInvite.id));
