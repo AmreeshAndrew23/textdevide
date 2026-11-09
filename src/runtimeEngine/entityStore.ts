@@ -290,6 +290,17 @@ export async function restoreEntityRow(
   );
 }
 
+// Really removes specific rows — only for records the system itself created as sample data, never
+// a user's delete (that's the recoverable soft delete above).
+export async function permanentlyDeleteRows(
+  tx: Transaction, applicationId: string | number, entity: EntityDef, keys: unknown[]
+): Promise<void> {
+  if (keys.length === 0) return;
+  const label = entityLabelFor(applicationId, entity.name);
+  const keyField = safeIdent(keyFieldOf(entity).name);
+  await tx.run(`MATCH (n:${label}) WHERE n.${keyField} IN $keys DETACH DELETE n`, { keys: keys.map(toDriverValue) });
+}
+
 export type OtpPurpose = "verifyEmail" | "resetPassword";
 
 // A one-time code for email verification / forgot-password, stored directly on the row as raw

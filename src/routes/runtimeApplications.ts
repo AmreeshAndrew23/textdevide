@@ -26,13 +26,15 @@ import { saveUpload, resolveUploadPath, createReadStream, UploadError } from "..
 import { logAuditEvent, listAuditEvents } from "../runtimeEngine/auditLog.js";
 import { isLocked, recordFailure, recordSuccess } from "../runtimeEngine/loginAttemptGuard.js";
 import { sendEmail } from "../services/emailService.js";
+import { buildAppModel, sanitizeRow, PROTECTED_ACCOUNT_FIELDS } from "../runtimeEngine/publicAccess.js";
+import { makeSignupPolicy } from "../runtimeEngine/publishing.js";
 
 // The second, independent "Runtime Engine" — see runtimeEngine/. Deliberately top-level, NOT
 // nested under /projects/:id/..., since an Application isn't scoped to a project (confirmed with
 // the user: "we need to have a separate space for both"). Ownership is checked against this row's
 // own userId, the same shape domains.ts already uses for user_chosen_domains, just without a
 // project in between.
-async function getOwnedApplication(id: number, userId: number) {
+export async function getOwnedApplication(id: number, userId: number) {
   const [row] = await db.select().from(runtimeApplications).where(eq(runtimeApplications.id, id)).limit(1);
   if (!row || row.userId !== userId) throw new HttpError(404, "Application not found");
   return row;
@@ -96,7 +98,7 @@ function applySessionResults(reply: import("fastify").FastifyReply, applicationI
 // never have already emailed someone). This is the ONE place that acts on it, deliberately called
 // only AFTER withTx(...) has resolved successfully — fire-and-forget, same as emailService.ts's
 // own "never throw" design.
-function dispatchEmailActions(actions: RuntimeAction[]): void {
+export function dispatchEmailActions(actions: RuntimeAction[]): void {
   for (const a of actions) {
     if (a.type === "sendEmail") void sendEmail(a.to, a.subject, a.body);
   }
@@ -105,7 +107,7 @@ function dispatchEmailActions(actions: RuntimeAction[]): void {
 // Reassembles the whole <Application> document from its stored per-element pieces (Neo4j keeps
 // one node per element, never the original document) — same shape as the frontend's own
 // buildFullXml, used to hand the AI the complete application as context.
-function buildApplicationXml(detail: ApplicationDetail): string {
+export function buildApplicationXml(detail: ApplicationDetail): string {
   const attrs = [`name="${escapeXmlAttr(detail.name)}"`];
   if (detail.theme) attrs.push(`theme="${escapeXmlAttr(detail.theme)}"`);
   if (detail.database) attrs.push(`database="${escapeXmlAttr(detail.database)}"`);
@@ -260,7 +262,7 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
       const entity = parseEntityElement(entityEl.xml);
       const includeDeleted = req.query.includeDeleted === "true";
       const rows = await guard(() => withTx((tx) => listEntityRows(tx, owned.id, entity, { includeDeleted })));
-      return reply.send({ rows });
+      return reply.send({ rows: rows.map(sanitizeRow) });
     }
   );
 
@@ -278,7 +280,7 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
       const entity = parseEntityElement(entityEl.xml);
       const row = await guard(() => withTx((tx) => getEntityRow(tx, owned.id, entity, req.params.key)));
       if (!row) throw new HttpError(404, "Row not found");
-      return reply.send({ row });
+      return reply.send({ row: sanitizeRow(row) });
     }
   );
 
@@ -421,9 +423,23 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
 
       const resultActions = await guard(() =>
         withTx(async (tx) => {
+          // Rows reach the browser without their secret fields, so an edit form can't resend them:
+          // put the stored values back (the save's required-field check needs them).
+          let fieldValues = body.fieldValues;
+          if (entity.isAccount && body.action === "save") {
+            const key = fieldValues[entity.fields.find((f) => f.key)?.name ?? "id"];
+            const existing = key ? await getEntityRow(tx, owned.id, entity, key) : null;
+            if (existing) {
+              fieldValues = { ...fieldValues };
+              for (const f of PROTECTED_ACCOUNT_FIELDS) if (existing[f] !== undefined) fieldValues[f] = existing[f];
+            }
+          }
           const actionResults = await runButtonAction(
-            { applicationId: owned.id, entity, relationships, validations, auditing, session, tx },
-            body.action, actions, body.fieldValues
+            {
+              applicationId: owned.id, entity, relationships, validations, auditing, session, tx,
+              signup: makeSignupPolicy(buildAppModel(detail.elements), { mode: "open", invites: [], promoteOnLogin: true }),
+            },
+            body.action, actions, fieldValues
           );
           // Audit + lockout bookkeeping, in the SAME transaction the action itself ran in.
           if (loginIdentifier) {

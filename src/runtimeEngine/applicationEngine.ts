@@ -48,14 +48,37 @@ export type ActionRunContext = {
   auditing: AuditingDef | null;
   session: { identity: string | null; vars: Record<string, unknown>; role?: string | null };
   tx: Transaction;
+  // Who may create an account here and with which role (see publishing.ts). Absent = anyone, no role.
+  signup?: SignupPolicy;
 };
+
+// verified: the signer already proved they own this email (a personal invite link), so the emailed code is skipped.
+export type SignupDecision = { allowed: boolean; message?: string; roleId?: string | null; verified?: boolean };
+export type SignupPolicy = {
+  decide(ctx: ActionRunContext, identifier: string): Promise<SignupDecision>;
+  // Studio preview only: accounts created before roles worked have no role, so the first of them
+  // to sign in is treated like the first account.
+  promoteOnLogin?: boolean;
+};
+
+class SignupDenied extends Error {}
+
+// The fields a new account starts with beyond its own — currently just its role, if any.
+async function signupFields(ctx: ActionRunContext, identifier: string): Promise<Record<string, unknown>> {
+  if (!ctx.signup) return {};
+  const decision = await ctx.signup.decide(ctx, identifier);
+  if (!decision.allowed) throw new SignupDenied(decision.message || "Sign-up isn't available.");
+  return { ...(decision.roleId ? { roleId: decision.roleId } : {}), ...(decision.verified ? { emailVerified: true } : {}) };
+}
 
 // RBAC role resolution — strictly conditional on the account entity actually declaring a roleId
 // field at all (checked by the caller before this runs), so an application with no roles never
 // pays for an extra query. Follows the fixed convention: a Relationship from the account entity's
 // roleId field to some other entity's key, whose "name" property is the role's display name —
 // the same value a Screen's requiresRole="..." attribute is expected to list.
-async function resolveAccountRole(ctx: ActionRunContext, roleId: unknown): Promise<string | null> {
+export async function resolveAccountRole(
+  ctx: Pick<ActionRunContext, "applicationId" | "entity" | "relationships" | "tx">, roleId: unknown
+): Promise<string | null> {
   if (roleId === undefined || roleId === null || roleId === "") return null;
   const rel = ctx.relationships.find((r) => r.fromEntity === ctx.entity.name && r.fromField === "roleId");
   if (!rel) return null;
@@ -79,7 +102,7 @@ function hasRoleIdField(entity: EntityDef): boolean {
 // Dual-shape support (see applicationModel.ts's looksLikeAccountEntity for the full rationale):
 // an older, already-generated app's User entity has "username", a current one has "email" — every
 // built-in below picks the right identifier field at runtime instead of assuming one.
-function identifierFieldOf(entity: EntityDef): "email" | "username" {
+export function identifierFieldOf(entity: EntityDef): "email" | "username" {
   return hasField(entity, "email") ? "email" : "username";
 }
 
@@ -111,8 +134,9 @@ async function findOrCreateOAuthRow(
 ): Promise<Record<string, unknown>> {
   const existing = await getEntityRowByField(ctx.tx, ctx.applicationId, ctx.entity, "email", email);
   if (existing) return existing;
+  const extra = await signupFields(ctx, email);
   const { row } = await saveEntityRow(ctx.tx, ctx.applicationId, ctx.entity, ctx.relationships, ctx.validations, ctx.auditing, {
-    id: randomUUID(), email, mustChangePassword: false, firstName, lastName, emailVerified: true, authProvider: provider,
+    id: randomUUID(), email, mustChangePassword: false, firstName, lastName, emailVerified: true, authProvider: provider, ...extra,
   }, { identity: email });
   return row;
 }
@@ -161,6 +185,13 @@ async function runLogin(ctx: ActionRunContext, fieldValues: Record<string, unkno
   if (identifierField === "email" && row.emailVerified !== true) {
     return [{ type: "message", messageType: "error", value: "Please verify your email before logging in." }];
   }
+  if (ctx.signup?.promoteOnLogin && hasRoleIdField(ctx.entity) && !row.roleId) {
+    const { roleId } = await ctx.signup.decide(ctx, identifier);
+    if (roleId) {
+      await saveEntityRow(ctx.tx, ctx.applicationId, ctx.entity, ctx.relationships, [], ctx.auditing, { ...row, roleId }, { identity: identifier });
+      row.roleId = roleId;
+    }
+  }
   const role = hasRoleIdField(ctx.entity) ? await resolveAccountRole(ctx, row.roleId) : null;
   return [
     { type: "message", messageType: "success", value: "Logged in." },
@@ -183,9 +214,10 @@ async function runRegister(ctx: ActionRunContext, fieldValues: Record<string, un
     if (!username || !password) return [{ type: "message", messageType: "error", value: "Username and password are required." }];
     const existing = await getEntityRowByField(ctx.tx, ctx.applicationId, ctx.entity, "username", username);
     if (existing) return [{ type: "message", messageType: "error", value: "That username is already taken." }];
+    const legacyExtra = await signupFields(ctx, username);
     try {
       await saveEntityRow(ctx.tx, ctx.applicationId, ctx.entity, ctx.relationships, ctx.validations, ctx.auditing, {
-        id: randomUUID(), username, passwordHash: hashPassword(password), mustChangePassword: false,
+        id: randomUUID(), username, passwordHash: hashPassword(password), mustChangePassword: false, ...legacyExtra,
       }, { identity: username });
     } catch (e) {
       if (e instanceof ConcurrencyError) return [{ type: "message", messageType: "conflict", value: e.message }];
@@ -213,15 +245,23 @@ async function runRegister(ctx: ActionRunContext, fieldValues: Record<string, un
   if (existing) return [{ type: "message", messageType: "error", value: "An account with that email already exists." }];
 
   const id = randomUUID();
+  const extra = await signupFields(ctx, email);
   try {
     await saveEntityRow(ctx.tx, ctx.applicationId, ctx.entity, ctx.relationships, ctx.validations, ctx.auditing, {
       id, email, passwordHash: hashPassword(password), mustChangePassword: false,
-      firstName, lastName, dob, emailVerified: false, authProvider: "password",
+      firstName, lastName, dob, emailVerified: false, authProvider: "password", ...extra,
     }, { identity: email });
   } catch (e) {
     if (e instanceof ConcurrencyError) return [{ type: "message", messageType: "conflict", value: e.message }];
     if (e instanceof ValidationError) return [{ type: "message", messageType: "error", value: e.message }];
     throw e;
+  }
+  if (extra.emailVerified === true) {
+    const role = hasRoleIdField(ctx.entity) ? await resolveAccountRole(ctx, extra.roleId) : null;
+    return [
+      { type: "message", messageType: "success", value: "Account created." },
+      { type: "session", identity: email, mustChangePassword: false, role },
+    ];
   }
   const code = generateOtpCode();
   await setEntityOtp(ctx.tx, ctx.applicationId, ctx.entity, id, "verifyEmail", code, 10);
@@ -451,6 +491,17 @@ const BUILTIN_ACTIONS = new Set([
 ]);
 
 export async function runButtonAction(
+  ctx: ActionRunContext, actionName: string, actions: ActionDef[], fieldValues: Record<string, unknown>
+): Promise<RuntimeAction[]> {
+  try {
+    return await dispatchAction(ctx, actionName, actions, fieldValues);
+  } catch (e) {
+    if (e instanceof SignupDenied) return [{ type: "message", messageType: "error", value: e.message }];
+    throw e;
+  }
+}
+
+async function dispatchAction(
   ctx: ActionRunContext, actionName: string, actions: ActionDef[], fieldValues: Record<string, unknown>
 ): Promise<RuntimeAction[]> {
   if (actionName === "save") return runSave(ctx, fieldValues);

@@ -106,6 +106,22 @@ export const runtimeApplications = pgTable("runtime_applications", {
   name: varchar("name").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+  // Public link: published_xml is the snapshot real users get; publishedAt null = not live.
+  slug: varchar("slug"),
+  publishedXml: text("published_xml"),
+  publishedAt: timestamp("published_at", { withTimezone: true }),
+  signupMode: varchar("signup_mode").default("invite"),
+  sampleRows: text("sample_rows"), // JSON of the example records' keys, so they can be removed exactly
+});
+
+// Emails allowed to create an account in an invite-only published app, and the role they get.
+export const runtimeAppInvites = pgTable("runtime_app_invites", {
+  id: serial("id").primaryKey(),
+  applicationId: integer("application_id").notNull().references(() => runtimeApplications.id, { onDelete: "cascade" }),
+  email: varchar("email").notNull(),
+  role: varchar("role"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
 });
 
 export type UserRow = typeof users.$inferSelect;

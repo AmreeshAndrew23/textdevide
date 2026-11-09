@@ -100,6 +100,19 @@ export const BrandFromUrlSchema = z.object({
   url: z.string().trim().min(3).max(500),
 });
 
+// Publishing an app to its public link.
+const SignupModeSchema = z.enum(["invite", "open"]);
+export const PublishSchema = z.object({
+  slug: z.string().trim().min(1).max(48).optional(),
+  signupMode: SignupModeSchema.optional(),
+});
+export const PublishingSettingsSchema = z.object({ signupMode: SignupModeSchema });
+export const InviteSchema = z.object({
+  email: z.string().trim().email().max(254),
+  role: z.string().trim().min(1).max(100).nullable().optional(),
+});
+export const MemberRoleSchema = z.object({ role: z.string().trim().min(1).max(100).nullable() });
+
 export const RuntimeApplicationChangePasswordSchema = z.object({
   currentPassword: z.string().min(1),
   newPassword: z.string().min(1),
@@ -109,6 +122,7 @@ export const RuntimeApplicationRunSchema = z.object({
   elementId: z.string(), // the Screen's button id/Grid name whose click/rowClick fired this
   action: z.string(), // the resolved action attribute — a built-in (save/cancel/delete/openRecord) or a named <Action>
   fieldValues: z.record(z.string(), z.any()).default({}),
+  inviteToken: z.string().max(200).optional(), // a personal invite link, on a published app's sign-up
 });
 
 export const RefineRequestSchema = z.object({

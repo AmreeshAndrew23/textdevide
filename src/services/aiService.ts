@@ -1361,6 +1361,39 @@ export async function generateThemeXml(
   return manifest.elements[0].xml;
 }
 
+// Example records for trying out an app. Returned as plain data and made safe by sampleData.ts.
+const SAMPLE_DATA_PROMPT = (applicationXml: string, entities: string[], today: string) => `Create realistic example records for this application, as JSON.
+
+THE APPLICATION:
+${applicationXml}
+
+Create records ONLY for these entities: ${entities.join(", ")}.
+
+Rules:
+- Return one JSON object: {"EntityName": [ {record}, ... ], ...}, using the exact field names from the XML.
+- Reference data (departments, categories, products): 4-8 records. People: 6-10. Day-to-day records (appointments, orders, payments): 12-20.
+- Give each record a simple unique value in its key field, and fill link fields with the key of a record in the entity they link to.
+- Every enum field must use one of its exact <Value>s, spread across the values so reports are interesting.
+- Today is ${today}. Spread dates across the past 60 days and next 30 days, with a few on today. Use YYYY-MM-DD.
+- Obey every Validation in the XML (required fields, positive amounts, end after start, unique values).
+- Everything must be fictional and suit the app's domain. Emails must end in @example.com; phone numbers must be obviously fake (e.g. 555-0100).
+- Leave out image fields and passwords.`;
+
+export async function generateSampleRows(
+  applicationXml: string, entities: string[], today: string, usageSink?: UsageEntry[], signal?: AbortSignal
+): Promise<Record<string, unknown>> {
+  const text = await callOpenAI(
+    [
+      { role: "system", content: "You generate realistic fictional test data. Return only valid JSON." },
+      { role: "user", content: SAMPLE_DATA_PROMPT(applicationXml, entities, today) },
+    ],
+    { useJson: true, usageSink, signal }
+  );
+  const parsed: unknown = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("The AI didn't return usable records — try again.");
+  return parsed as Record<string, unknown>;
+}
+
 type ChatMessage = { role: string; content: string | unknown[] };
 
 async function sleep(ms: number) {

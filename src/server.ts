@@ -18,8 +18,13 @@ import adminRoutes from "./routes/admin.js";
 // import themePreviewRoutes from "./routes/themePreview.js";
 import domainRoutes from "./routes/domains.js";
 import runtimeApplicationRoutes, { runtimeUploadsPublicRoutes } from "./routes/runtimeApplications.js";
+import publishingRoutes from "./routes/publishing.js";
+import publicAppRoutes from "./routes/publicApps.js";
+import sampleDataRoutes from "./routes/sampleData.js";
 export async function buildServer() {
-  const app = Fastify({ logger: true });
+  // One proxy hop (Railway's edge): without this every visitor shares the proxy's IP, and with it
+  // the rate limits below — one busy public app would throttle everybody.
+  const app = Fastify({ logger: true, trustProxy: (_addr: string, hop: number) => hop < 1 });
 
   // @fastify/cors defaults `methods` to the CORS-safelisted set (GET, HEAD, POST) — everything
   // else this API uses (PUT, DELETE) was silently blocked by the browser's preflight check before
@@ -47,7 +52,10 @@ export async function buildServer() {
   // await app.register(projectRoutes, { prefix: "/api" });
   await app.register(domainRoutes, { prefix: "/api" });
   await app.register(runtimeApplicationRoutes, { prefix: "/api" });
+  await app.register(publishingRoutes, { prefix: "/api" });
+  await app.register(sampleDataRoutes, { prefix: "/api" });
   await app.register(runtimeUploadsPublicRoutes, { prefix: "/api" }); // no requireAuth — see its own comment
+  await app.register(publicAppRoutes, { prefix: "/api" }); // no requireAuth — its own per-app session and access rules
   // await app.register(projectsAiRoutes, { prefix: "/api" });
   // await app.register(screensRoutes, { prefix: "/api" });
   // await app.register(previewDbRoutes, { prefix: "/api" });

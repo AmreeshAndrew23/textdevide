@@ -49,6 +49,13 @@ const COLUMN_DEFS: Record<string, { name: string; ddlType: string; defaultSql?: 
     { name: "created_at", ddlType: "TIMESTAMPTZ", defaultSql: "now()" },
     { name: "updated_at", ddlType: "TIMESTAMPTZ", defaultSql: "now()" },
   ],
+  runtime_applications: [
+    { name: "slug", ddlType: "VARCHAR" },
+    { name: "published_xml", ddlType: "TEXT" },
+    { name: "published_at", ddlType: "TIMESTAMPTZ" },
+    { name: "signup_mode", ddlType: "VARCHAR", defaultSql: "'invite'" },
+    { name: "sample_rows", ddlType: "TEXT" },
+  ],
   prompt_logs: [
     { name: "user_id", ddlType: "INTEGER" },
     { name: "project_id", ddlType: "INTEGER" },
@@ -92,6 +99,19 @@ const CREATE_TABLE_SQL = [
      created_at TIMESTAMPTZ DEFAULT now(),
      updated_at TIMESTAMPTZ DEFAULT now()
    )`,
+  `CREATE TABLE IF NOT EXISTS runtime_app_invites (
+     id SERIAL PRIMARY KEY,
+     application_id INTEGER NOT NULL REFERENCES runtime_applications(id) ON DELETE CASCADE,
+     email VARCHAR NOT NULL,
+     role VARCHAR,
+     created_at TIMESTAMPTZ DEFAULT now(),
+     accepted_at TIMESTAMPTZ
+   )`,
+];
+
+// Runs after the columns exist — a public link name can belong to only one app.
+const AFTER_COLUMNS_SQL = [
+  `CREATE UNIQUE INDEX IF NOT EXISTS runtime_applications_slug_idx ON runtime_applications (slug) WHERE slug IS NOT NULL`,
 ];
 
 export async function syncSchema(): Promise<void> {
@@ -115,6 +135,7 @@ export async function syncSchema(): Promise<void> {
         }
       }
     }
+    for (const sql of AFTER_COLUMNS_SQL) await client.query(sql);
   } finally {
     client.release();
   }
