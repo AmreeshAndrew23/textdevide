@@ -3,7 +3,7 @@ import type { Transaction } from "neo4j-driver";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { runtimeApplications, runtimeAppInvites, runtimeAppNotifications } from "../db/schema.js";
-import { RuntimeApplicationRunSchema } from "../models/schemas.js";
+import { ImportRowsSchema, RuntimeApplicationRunSchema } from "../models/schemas.js";
 import { HttpError } from "../services/authService.js";
 import { withTx } from "../runtime/neo4jStore.js";
 import { fromDriverValue } from "../runtime/values.js";
@@ -19,13 +19,18 @@ import { compileDataSource } from "../runtimeEngine/dataSourceCompiler.js";
 import { getEntityRow, getEntityRowByField, listEntityRows, restoreEntityRow, ValidationError } from "../runtimeEngine/entityStore.js";
 import { isLocked, recordFailure, recordSuccess } from "../runtimeEngine/loginAttemptGuard.js";
 import {
-  buildAppModel, canEnterScreen, canReadEntity, canUseDataSource, elementsForViewer, isActionAllowed,
+  buildAppModel, canEnterScreen, canImportInto, canReadEntity, canUseDataSource, elementsForViewer, isActionAllowed,
   PROTECTED_ACCOUNT_FIELDS, sanitizeRow, type AppModel, type StoredElement,
 } from "../runtimeEngine/publicAccess.js";
 import { inviteIdFromToken, isInviteExpired, isInviteTokenValid, makeSignupPolicy, recipientsOf, type SignupMode } from "../runtimeEngine/publishing.js";
 import { autoNumbersOf } from "../runtimeEngine/autoNumber.js";
 import { isScoped, matchesScope, resolveScope, type ResolvedScope } from "../runtimeEngine/rowScope.js";
 import { saveUpload, UploadError } from "../runtimeEngine/uploads.js";
+import { allowAttempt, PUBLIC_ACTION_LIMITS } from "../runtimeEngine/attemptLimiter.js";
+import { importRows } from "../runtimeEngine/csvImport.js";
+import { IMPORT_BODY_LIMIT } from "./runtimeApplications.js";
+import { BULK_LIMIT } from "./rateLimits.js";
+import { emailProvider, sendEmail } from "../services/emailService.js";
 
 // A published application, used by real people through its public link. Registered WITHOUT the
 // Studio's requireAuth: each request is authenticated with the app's own session token (sent as
@@ -35,18 +40,29 @@ import { saveUpload, UploadError } from "../runtimeEngine/uploads.js";
 
 type Slug = { Params: { slug: string } };
 type Session = { identity: string; role: string | null; mustChangePassword: boolean };
-type Published = { id: number; name: string; signupMode: SignupMode; elements: StoredElement[]; theme: string | null; database: string | null; model: AppModel };
+type Published = { id: number; slug: string | null; name: string; signupMode: SignupMode; elements: StoredElement[]; theme: string | null; database: string | null; model: AppModel };
 
 const AUTH_RATE_LIMITED = { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } };
+
+// Parsing the published XML and building its access model on every request was wasted work: it
+// only changes when the app is republished, and the row is re-read each time anyway, so a parse is
+// reused for exactly as long as the stored XML is the same text.
+const parsedPublished = new Map<number, { xml: string; manifest: ReturnType<typeof parseApplicationXml>; model: AppModel }>();
 
 async function loadPublished(slug: string): Promise<Published> {
   const [row] = await db.select().from(runtimeApplications).where(eq(runtimeApplications.slug, slug)).limit(1);
   if (!row || !row.publishedAt || !row.publishedXml) throw new HttpError(404, "This app isn't available.");
-  const manifest = parseApplicationXml(row.publishedXml);
+  let parsed = parsedPublished.get(row.id);
+  if (!parsed || parsed.xml !== row.publishedXml) {
+    const manifest = parseApplicationXml(row.publishedXml);
+    parsed = { xml: row.publishedXml, manifest, model: buildAppModel(manifest.elements) };
+    parsedPublished.set(row.id, parsed);
+  }
+  const { manifest, model } = parsed;
   return {
-    id: row.id, name: manifest.name, theme: manifest.theme, database: manifest.database,
+    id: row.id, slug: row.slug, name: manifest.name, theme: manifest.theme, database: manifest.database,
     signupMode: row.signupMode === "open" ? "open" : "invite",
-    elements: manifest.elements, model: buildAppModel(manifest.elements),
+    elements: manifest.elements, model,
   };
 }
 
@@ -110,6 +126,17 @@ function lockKeyFor(action: string, values: Record<string, unknown>): string | n
 function actionSucceeded(action: string, results: RuntimeAction[]): boolean {
   if (action === "resetPassword") return results.some((a) => a.type === "message" && a.messageType === "success");
   return results.some((a) => a.type === "session");
+}
+
+// Notify steps also arrive by email when email is set up — fire-and-forget, capped so one action
+// can't turn into a mass mailing.
+const MAX_NOTIFY_EMAILS = 50;
+function emailNotifications(app: Published, deliveries: { recipient: string; message: string }[], origin: string | undefined) {
+  if (!emailProvider()) return;
+  const link = origin && /^https?:\/\/[^/]+$/.test(origin) && app.slug ? `\n\nOpen ${app.name}:\n${origin}/a/${app.slug}` : "";
+  for (const d of deliveries.slice(0, MAX_NOTIFY_EMAILS)) {
+    void sendEmail(d.recipient, `${app.name}: ${d.message.split("\n")[0].slice(0, 80)}`, `${d.message}${link}`, { fromName: app.name });
+  }
 }
 
 export default async function publicAppRoutes(app: FastifyInstance) {
@@ -254,6 +281,38 @@ export default async function publicAppRoutes(app: FastifyInstance) {
     }
   );
 
+  // "Import CSV" for a signed-in member — only where they could add the same records by hand, and
+  // limited to records they own when the module is row-limited for them.
+  app.post(
+    "/public-apps/:slug/entities/:entityName/import",
+    { ...BULK_LIMIT, bodyLimit: IMPORT_BODY_LIMIT },
+    async (req: FastifyRequest<{ Params: { slug: string; entityName: string } }>, reply) => {
+      const published = await loadPublished(req.params.slug);
+      const session = await requireWorkingSession(req, published);
+      const body = ImportRowsSchema.parse(req.body);
+      const { model } = published;
+      const entity = model.entities.find((e) => e.name === req.params.entityName);
+      if (!entity || !canImportInto(model, entity.name, viewerOf(session))) throw new HttpError(403, "You don't have permission to add records here.");
+      const of = (tag: string) => published.elements.filter((e) => e.tag === tag);
+      const auditingEl = entity.auditing ? of("Auditing").find((e) => e.name === entity.auditing) : undefined;
+      const result = await guard(() =>
+        withTx(async (tx) => {
+          const res = await importRows(tx, {
+            applicationId: published.id, model, entity,
+            validations: of("Validation").map((e) => parseValidationElement(e.xml)),
+            auditing: auditingEl ? parseAuditingElement(auditingEl.xml) : null,
+            autoNumbers: autoNumbersOf(published.elements),
+            identity: session.identity, role: session.role,
+            scope: await scopeFor(tx, published, entity, session),
+          }, body.rows);
+          await logAuditEvent(tx, published.id, { type: "import", identity: session.identity, detail: `${entity.name}: ${res.created} added` });
+          return res;
+        })
+      );
+      return reply.send(result);
+    }
+  );
+
   app.post("/public-apps/:slug/uploads", AUTH_RATE_LIMITED, async (req: FastifyRequest<Slug>, reply) => {
     const published = await loadPublished(req.params.slug);
     await requireWorkingSession(req, published);
@@ -291,6 +350,10 @@ export default async function publicAppRoutes(app: FastifyInstance) {
 
       const lockKey = lockKeyFor(body.action, body.fieldValues);
       if (lockKey && isLocked(published.id, lockKey)) throw new HttpError(429, "Too many attempts — try again in a few minutes.");
+      const actionLimit = PUBLIC_ACTION_LIMITS[body.action];
+      if (actionLimit && !allowAttempt(`${published.id}:${body.action}:${req.ip}`, actionLimit.max, actionLimit.windowMs)) {
+        throw new HttpError(429, actionLimit.message);
+      }
 
       const of = (tag: string) => published.elements.filter((e) => e.tag === tag);
       const validations = of("Validation").map((e) => parseValidationElement(e.xml));
@@ -356,10 +419,11 @@ export default async function publicAppRoutes(app: FastifyInstance) {
           return out;
         })
       );
-      dispatchEmailActions(results);
+      dispatchEmailActions(results, published.name);
       // After commit, and never at the cost of the action that already succeeded.
       if (deliveries.length > 0) {
         await db.insert(runtimeAppNotifications).values(deliveries.map((d) => ({ applicationId: published.id, ...d }))).catch((e) => req.log.error(e));
+        emailNotifications(published, deliveries, req.headers.origin);
       }
       const established = results.find((a) => a.type === "session");
       if (verifiedInvite && established) {

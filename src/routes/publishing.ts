@@ -13,6 +13,7 @@ import { deleteEntityRow, getEntityRow, listEntityRows, saveEntityRow, Validatio
 import { buildAppModel, isValidSlug, slugify, type AppModel } from "../runtimeEngine/publicAccess.js";
 import { ensureRoleRows, inviteToken, isInviteExpired, roleSetupOf } from "../runtimeEngine/publishing.js";
 import { scopeProblems } from "../runtimeEngine/rowScope.js";
+import { EMAIL_LIMIT } from "./rateLimits.js";
 
 // The Studio's Publish panel — owner only. Publishing stores a snapshot of the app's definition,
 // so later Studio edits don't reach real users until the owner publishes again. Records are shared
@@ -143,17 +144,24 @@ export default async function publishingRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
-  app.post("/runtime-applications/:id/invites", async (req: FastifyRequest<Params>, reply) => {
+  app.post("/runtime-applications/:id/invites", EMAIL_LIMIT, async (req: FastifyRequest<Params>, reply) => {
     const owned = await getOwnedApplication(Number(req.params.id), req.user.id);
     const body = InviteSchema.parse(req.body);
     const email = body.email.toLowerCase();
     await db.delete(runtimeAppInvites).where(and(eq(runtimeAppInvites.applicationId, owned.id), eq(runtimeAppInvites.email, email)));
     const [invite] = await db.insert(runtimeAppInvites).values({ applicationId: owned.id, email, role: body.role ?? null }).returning();
     const origin = req.headers.origin;
+    let emailed = false;
     if (owned.publishedAt && owned.slug && origin && /^https?:\/\/[^/]+$/.test(origin)) {
-      void sendEmail(email, `You're invited to ${owned.name}`, `You've been invited to ${owned.name}. Create your account here: ${origin}/a/${owned.slug}?invite=${inviteToken(invite)}`);
+      const role = body.role ? ` as ${body.role}` : "";
+      emailed = await sendEmail(
+        email,
+        `You're invited to ${owned.name}`,
+        `${req.user.fullName || req.user.email} has invited you to join ${owned.name}${role}.\n\nCreate your account here (the link works for 14 days):\n${origin}/a/${owned.slug}?invite=${inviteToken(invite)}`,
+        { fromName: owned.name }
+      );
     }
-    return reply.status(201).send({ id: invite.id, email: invite.email, role: invite.role, joined: false, expired: false, token: inviteToken(invite) });
+    return reply.status(201).send({ id: invite.id, email: invite.email, role: invite.role, joined: false, expired: false, token: inviteToken(invite), emailed });
   });
 
   app.delete("/runtime-applications/:id/invites/:inviteId", async (req: FastifyRequest<{ Params: { id: string; inviteId: string } }>, reply) => {

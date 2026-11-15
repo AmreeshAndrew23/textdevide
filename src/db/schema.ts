@@ -134,6 +134,20 @@ export const runtimeAppNotifications = pgTable("runtime_app_notifications", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
+// One row per AI request a Studio user makes — what the daily allowance counts and what the usage
+// view adds up (see services/aiUsage.ts). Lean on purpose: prompt_logs keeps the full text.
+export const aiUsage = pgTable("ai_usage", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  kind: varchar("kind").notNull(),
+  applicationId: integer("application_id"),
+  model: varchar("model"),
+  promptTokens: integer("prompt_tokens").notNull().default(0),
+  completionTokens: integer("completion_tokens").notNull().default(0),
+  totalTokens: integer("total_tokens").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
 // Earlier definitions of an application, for undo (see runtimeEngine/versionStore.ts).
 export const runtimeAppVersions = pgTable("runtime_app_versions", {
   id: serial("id").primaryKey(),

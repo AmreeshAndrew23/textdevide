@@ -23,6 +23,7 @@ import { entityLabelFor } from "./labels.js";
 import { safeIdent, toDriverValue } from "../runtime/values.js";
 import { GOOGLE_CLIENT_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET } from "../config.js";
 import { nextAutoNumber, numberedFields, type AutoNumbers } from "./autoNumber.js";
+import { sanitizeRow } from "./publicAccess.js";
 
 export type RuntimeAction =
   // "conflict" is distinct from "error" specifically so the frontend can show the amber
@@ -39,7 +40,10 @@ export type RuntimeAction =
   // transaction it was handed, so it can't call emailService.ts's sendEmail directly (a slow/failed
   // send must never risk the transaction, and a transaction that later rolls back must never have
   // already emailed someone). The route layer sends it AFTER the transaction commits.
-  | { type: "sendEmail"; to: string; subject: string; body: string };
+  | { type: "sendEmail"; to: string; subject: string; body: string }
+  // The record exactly as just saved (new __version, generated number, audit stamps, no secrets),
+  // so the open form carries on from it — saving again without a reload must not look stale.
+  | { type: "record"; row: Record<string, unknown> };
 
 export type ActionRunContext = {
   applicationId: number;
@@ -172,8 +176,11 @@ async function withAutoNumbers(ctx: ActionRunContext, fieldValues: Record<string
 async function runSave(ctx: ActionRunContext, submitted: Record<string, unknown>): Promise<RuntimeAction[]> {
   try {
     const fieldValues = await withAutoNumbers(ctx, submitted);
-    const { created } = await saveEntityRow(ctx.tx, ctx.applicationId, ctx.entity, ctx.relationships, ctx.validations, ctx.auditing, fieldValues, { identity: ctx.session.identity });
-    return [{ type: "message", messageType: "success", value: created ? "Created successfully." : "Saved successfully." }];
+    const { created, row } = await saveEntityRow(ctx.tx, ctx.applicationId, ctx.entity, ctx.relationships, ctx.validations, ctx.auditing, fieldValues, { identity: ctx.session.identity });
+    return [
+      { type: "message", messageType: "success", value: created ? "Created successfully." : "Saved successfully." },
+      { type: "record", row: sanitizeRow(row) },
+    ];
   } catch (e) {
     if (e instanceof ConcurrencyError) return [{ type: "message", messageType: "conflict", value: e.message }];
     if (e instanceof ValidationError) return [{ type: "message", messageType: "error", value: e.message }];

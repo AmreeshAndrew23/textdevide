@@ -15,6 +15,8 @@ import { buildAppModel } from "../runtimeEngine/publicAccess.js";
 import { roleSetupOf } from "../runtimeEngine/publishing.js";
 import { buildSampleRows, entitiesToFill } from "../runtimeEngine/sampleData.js";
 import { autoNumbersOf, nextAutoNumber, numberedFields } from "../runtimeEngine/autoNumber.js";
+import { withAiAllowance } from "../services/aiUsage.js";
+import { AI_LIMIT } from "./rateLimits.js";
 
 // Owner-only "fill this app with example records", so a new app can be tried without typing data
 // in by hand. The keys created are remembered so "Remove sample data" deletes exactly those rows.
@@ -45,7 +47,7 @@ export default async function sampleDataRoutes(app: FastifyInstance) {
     return reply.send({ count: countOf(createdKeys(owned.sampleRows)), published: !!owned.publishedAt });
   });
 
-  app.post("/runtime-applications/:id/sample-data", async (req: FastifyRequest<Params>, reply) => {
+  app.post("/runtime-applications/:id/sample-data", AI_LIMIT, async (req: FastifyRequest<Params>, reply) => {
     const owned = await getOwnedApplication(Number(req.params.id), req.user.id);
     // Records are shared with the live app, so real users would see these.
     if (owned.publishedAt) throw new HttpError(409, "This app is live, so its users would see the sample records. Unpublish it first.");
@@ -65,12 +67,13 @@ export default async function sampleDataRoutes(app: FastifyInstance) {
     const fill = entitiesToFill(model, roleEntityName, existingKeys);
     if (fill.length === 0) throw new HttpError(409, "Every module already has records, so there's nothing to fill.");
 
-    let generated;
-    try {
-      generated = await generateSampleRows(buildApplicationXml(detail), fill.map((e) => e.name), new Date().toISOString().slice(0, 10));
-    } catch (e) {
-      throw new HttpError(500, `Couldn't create sample data: ${e instanceof Error ? e.message : e}`);
-    }
+    const generated = await withAiAllowance(req.user, "sample_data", owned.id, async (sink) => {
+      try {
+        return await generateSampleRows(buildApplicationXml(detail), fill.map((e) => e.name), new Date().toISOString().slice(0, 10), sink);
+      } catch (e) {
+        throw new HttpError(500, `Couldn't create sample data: ${e instanceof Error ? e.message : e}`);
+      }
+    });
 
     const newKey = (entity: (typeof fill)[number]) => {
       const keyField = entity.fields.find((f) => f.key);

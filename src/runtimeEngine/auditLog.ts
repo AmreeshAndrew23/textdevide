@@ -9,7 +9,7 @@ import { toDriverValue, fromDriverValue } from "../runtime/values.js";
 import { guard } from "./applicationStore.js";
 
 export type AuditEventType =
-  | "login_success" | "login_failure" | "register" | "delete" | "restore" | "access_denied";
+  | "login_success" | "login_failure" | "register" | "delete" | "restore" | "access_denied" | "import";
 
 export type AuditEvent = {
   type: AuditEventType;

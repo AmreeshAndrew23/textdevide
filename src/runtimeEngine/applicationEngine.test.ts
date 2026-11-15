@@ -71,6 +71,7 @@ describe("applicationEngine.runAction: the real submitForApproval sample — Set
     expect(results).toEqual([
       { type: "fieldUpdate", field: "status", value: "pending-approval" },
       { type: "message", messageType: "success", value: "Created successfully." },
+      { type: "record", row: { id: "po1", status: "pending-approval" } },
       { type: "message", messageType: "info", value: "PO po1 awaiting approval" },
     ]);
   });
@@ -90,7 +91,10 @@ describe("applicationEngine.runButtonAction: built-ins vs named actions", () => 
   it("\"save\" runs the built-in save pipeline directly, with no Action lookup needed", async () => {
     const tx = fakeTx([{ records: [] }, { records: [] }, { records: [] }, { records: [record({ id: "po1" })] }]);
     const results = await runButtonAction(ctx(tx), "save", [], { id: "po1" });
-    expect(results).toEqual([{ type: "message", messageType: "success", value: "Created successfully." }]);
+    expect(results).toEqual([
+      { type: "message", messageType: "success", value: "Created successfully." },
+      { type: "record", row: { id: "po1" } },
+    ]);
   });
 
   it("\"cancel\" and \"openRecord\" are no-ops server-side", async () => {

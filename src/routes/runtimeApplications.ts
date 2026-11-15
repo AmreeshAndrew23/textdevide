@@ -5,6 +5,7 @@ import { runtimeApplications } from "../db/schema.js";
 import {
   RuntimeApplicationCreateSchema, RuntimeApplicationGenerateSchema, RuntimeApplicationRunSchema, RuntimeApplicationUpdateSchema,
   RuntimeApplicationChangePasswordSchema, RuntimeApplicationAskSchema, RuntimeApplicationDesignSchema, BrandFromUrlSchema,
+  ImportRowsSchema,
 } from "../models/schemas.js";
 import { fetchBrand, BrandFetchError } from "../services/brandFetch.js";
 import { HttpError } from "../services/authService.js";
@@ -30,6 +31,12 @@ import { buildAppModel, sanitizeRow, PROTECTED_ACCOUNT_FIELDS } from "../runtime
 import { makeSignupPolicy } from "../runtimeEngine/publishing.js";
 import { recordVersion } from "../runtimeEngine/versionStore.js";
 import { autoNumbersOf } from "../runtimeEngine/autoNumber.js";
+import { withAiAllowance } from "../services/aiUsage.js";
+import { AI_LIMIT, BULK_LIMIT } from "./rateLimits.js";
+import { importRows } from "../runtimeEngine/csvImport.js";
+
+// 1,000 rows of a wide module can pass Fastify's 1 MB default.
+export const IMPORT_BODY_LIMIT = 8 * 1024 * 1024;
 
 // The second, independent "Runtime Engine" — see runtimeEngine/. Deliberately top-level, NOT
 // nested under /projects/:id/..., since an Application isn't scoped to a project (confirmed with
@@ -100,9 +107,9 @@ function applySessionResults(reply: import("fastify").FastifyReply, applicationI
 // never have already emailed someone). This is the ONE place that acts on it, deliberately called
 // only AFTER withTx(...) has resolved successfully — fire-and-forget, same as emailService.ts's
 // own "never throw" design.
-export function dispatchEmailActions(actions: RuntimeAction[]): void {
+export function dispatchEmailActions(actions: RuntimeAction[], appName?: string): void {
   for (const a of actions) {
-    if (a.type === "sendEmail") void sendEmail(a.to, a.subject, a.body);
+    if (a.type === "sendEmail") void sendEmail(a.to, a.subject, a.body, { fromName: appName });
   }
 }
 
@@ -135,16 +142,18 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
   // never the whole-application rework that used to risk the AI subtly dropping or altering an
   // unrelated screen just by being asked to reproduce everything. Without existingXml (a brand
   // new, empty application), it's the normal full generation, meant for POST/PUT.
-  app.post("/runtime-applications/generate", async (req, reply) => {
+  app.post("/runtime-applications/generate", AI_LIMIT, async (req, reply) => {
     const body = RuntimeApplicationGenerateSchema.parse(req.body);
-    try {
-      const result = body.existingXml
-        ? await generateCheckedFix(body.description, body.existingXml)
-        : await generateCheckedApplication(body.description);
-      return reply.send(result);
-    } catch (e) {
-      throw new HttpError(500, `AI generation failed: ${e instanceof Error ? e.message : e}`);
-    }
+    const result = await withAiAllowance(req.user, body.existingXml ? "app_change" : "app_generate", null, async (sink) => {
+      try {
+        return body.existingXml
+          ? await generateCheckedFix(body.description, body.existingXml, sink)
+          : await generateCheckedApplication(body.description, sink);
+      } catch (e) {
+        throw new HttpError(500, `AI generation failed: ${e instanceof Error ? e.message : e}`);
+      }
+    });
+    return reply.send(result);
   });
 
   // xml is optional — "just a name" creates a real, empty Application; the description flow
@@ -207,7 +216,7 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
   // "Ask about this app" — a read-only, plain-English metadata query answered strictly from the
   // application's own XML (see aiService.ts's answerApplicationQuestion). Never writes anything,
   // so unlike /generate there is no review/apply step: the answer is the whole result.
-  app.post("/runtime-applications/:id/ask", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+  app.post("/runtime-applications/:id/ask", AI_LIMIT, async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     const owned = await getOwnedApplication(Number(req.params.id), req.user.id);
     const body = RuntimeApplicationAskSchema.parse(req.body);
     const detail = await getApplication(owned.id);
@@ -215,17 +224,19 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
     if (detail.elements.length === 0) {
       return reply.send({ answer: "This application is still empty — describe what it should do first, then ask about it here." });
     }
-    try {
-      const answer = await answerApplicationQuestion(body.question, buildApplicationXml(detail), body.history);
-      return reply.send({ answer });
-    } catch (e) {
-      throw new HttpError(500, `Couldn't answer that right now: ${e instanceof Error ? e.message : e}`);
-    }
+    const answer = await withAiAllowance(req.user, "ask", owned.id, async (sink) => {
+      try {
+        return await answerApplicationQuestion(body.question, buildApplicationXml(detail), body.history, sink);
+      } catch (e) {
+        throw new HttpError(500, `Couldn't answer that right now: ${e instanceof Error ? e.message : e}`);
+      }
+    });
+    return reply.send({ answer });
   });
 
   // Design tab — "describe the look": returns a new <Theme> element for review. Like /generate it
   // writes nothing; applying it is an ordinary PATCH with that Theme as the fragment.
-  app.post("/runtime-applications/:id/design", async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+  app.post("/runtime-applications/:id/design", AI_LIMIT, async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     const owned = await getOwnedApplication(Number(req.params.id), req.user.id);
     const body = RuntimeApplicationDesignSchema.parse(req.body);
     const detail = await getApplication(owned.id);
@@ -233,11 +244,14 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
     const themeXml = detail.elements.find((e) => e.tag === "Theme")?.xml || "";
     const entityNames = detail.elements.filter((e) => e.tag === "Entity").map((e) => e.name);
     const summary = `"${detail.name}" — entities: ${entityNames.join(", ") || "none yet"}`;
-    try {
-      return reply.send({ xml: await generateThemeXml(body.description, themeXml, summary) });
-    } catch (e) {
-      throw new HttpError(500, `Couldn't design that look: ${e instanceof Error ? e.message : e}`);
-    }
+    const xml = await withAiAllowance(req.user, "design", owned.id, async (sink) => {
+      try {
+        return await generateThemeXml(body.description, themeXml, summary, sink);
+      } catch (e) {
+        throw new HttpError(500, `Couldn't design that look: ${e instanceof Error ? e.message : e}`);
+      }
+    });
+    return reply.send({ xml });
   });
 
   // Design tab — "bring your own brand": colors and fonts read from a public website. Fenced
@@ -292,6 +306,36 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
       const row = await guard(() => withTx((tx) => getEntityRow(tx, owned.id, entity, req.params.key)));
       if (!row) throw new HttpError(404, "Row not found");
       return reply.send({ row: sanitizeRow(row) });
+    }
+  );
+
+  // "Import CSV" into one module, as the owner — see csvImport.ts. All-or-nothing per row, never
+  // per file: good rows go in, bad ones come back with their row numbers.
+  app.post(
+    "/runtime-applications/:id/entities/:entityName/import",
+    { ...BULK_LIMIT, bodyLimit: IMPORT_BODY_LIMIT },
+    async (req: FastifyRequest<{ Params: { id: string; entityName: string } }>, reply) => {
+      const owned = await getOwnedApplication(Number(req.params.id), req.user.id);
+      const body = ImportRowsSchema.parse(req.body);
+      const detail = await getApplication(owned.id);
+      if (!detail) throw new HttpError(404, "Application not found");
+      const model = buildAppModel(detail.elements);
+      const entity = model.entities.find((e) => e.name === req.params.entityName);
+      if (!entity) throw new HttpError(404, "Entity not found");
+      if (entity.isAccount) throw new HttpError(400, "People can't be imported — invite them from Publish instead.");
+      const auditingEl = entity.auditing ? detail.elements.find((e) => e.tag === "Auditing" && e.name === entity.auditing) : undefined;
+      const result = await guard(() =>
+        withTx((tx) =>
+          importRows(tx, {
+            applicationId: owned.id, model, entity,
+            validations: detail.elements.filter((e) => e.tag === "Validation").map((e) => parseValidationElement(e.xml)),
+            auditing: auditingEl ? parseAuditingElement(auditingEl.xml) : null,
+            autoNumbers: autoNumbersOf(detail.elements),
+            identity: req.user.email, role: null,
+          }, body.rows)
+        )
+      );
+      return reply.send(result);
     }
   );
 
@@ -472,7 +516,7 @@ export default async function runtimeApplicationRoutes(app: FastifyInstance) {
         })
       );
       applySessionResults(reply, owned.id, resultActions);
-      dispatchEmailActions(resultActions);
+      dispatchEmailActions(resultActions, detail.name);
       return reply.send({ actions: resultActions });
     }
   );

@@ -119,6 +119,11 @@ export const RuntimeApplicationChangePasswordSchema = z.object({
   newPassword: z.string().min(1),
 });
 
+// "Import CSV": rows already mapped column -> field name by the browser (see csvImport.ts).
+export const ImportRowsSchema = z.object({
+  rows: z.array(z.record(z.string().max(100), z.union([z.string().max(10000), z.number(), z.boolean(), z.null()]))).min(1).max(1000),
+});
+
 export const RuntimeApplicationRunSchema = z.object({
   elementId: z.string(), // the Screen's button id/Grid name whose click/rowClick fired this
   action: z.string(), // the resolved action attribute — a built-in (save/cancel/delete/openRecord) or a named <Action>

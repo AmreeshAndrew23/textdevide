@@ -11,6 +11,15 @@ import {
   UserRegisterSchema, UserLoginSchema, GoogleTokenRequestSchema, GithubCodeRequestSchema, UserUpdateSchema,
 } from "../models/schemas.js";
 import { requireAuth } from "./authGuard.js";
+import { HttpError } from "../services/authService.js";
+import { usageFor } from "../services/aiUsage.js";
+import { emailProvider } from "../services/emailService.js";
+import { isLocked, recordFailure, recordSuccess } from "../runtimeEngine/loginAttemptGuard.js";
+import { AUTH_LIMIT } from "./rateLimits.js";
+
+// loginAttemptGuard keys attempts by application; the Studio's own sign-in uses 0, which no
+// application id ever is (they start at 1).
+const STUDIO = 0;
 
 // Allowed values for the Configuration screen dropdowns — port of routes/auth.py's constants.
 const DATE_FORMATS = ["YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY", "DD-MMM-YYYY", "DD.MM.YYYY"];
@@ -24,28 +33,48 @@ const LANGUAGES = [
 ];
 
 export default async function authRoutes(app: FastifyInstance) {
-  app.post("/auth/register", async (req, reply) => {
+  app.post("/auth/register", AUTH_LIMIT, async (req, reply) => {
     const body = UserRegisterSchema.parse(req.body);
     const user = await registerUser(body.email, body.password, body.full_name ?? undefined);
     const token = createAccessToken({ sub: String(user.id) });
     return reply.send({ access_token: token, token_type: "bearer", user: serializeUser(user) });
   });
 
-  app.post("/auth/login", async (req, reply) => {
+  // Five wrong passwords lock that email for 15 minutes, whichever addresses they came from.
+  app.post("/auth/login", AUTH_LIMIT, async (req, reply) => {
     const body = UserLoginSchema.parse(req.body);
-    const user = await authenticateUser(body.email, body.password);
+    const lockKey = `studio:${body.email}`;
+    if (isLocked(STUDIO, lockKey)) throw new HttpError(429, "Too many sign-in attempts. Try again in 15 minutes.");
+    let user;
+    try {
+      user = await authenticateUser(body.email, body.password);
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 401) recordFailure(STUDIO, lockKey);
+      throw e;
+    }
+    recordSuccess(STUDIO, lockKey);
     const token = createAccessToken({ sub: String(user.id) });
     return reply.send({ access_token: token, token_type: "bearer", user: serializeUser(user) });
   });
 
-  app.post("/auth/google", async (req, reply) => {
+  // How much of today's AI allowance is left, and what the last weeks cost.
+  app.get("/ai-usage", { preHandler: requireAuth }, async (req, reply) => {
+    return reply.send(await usageFor(req.user));
+  });
+
+  // Whether the Studio can send email, so screens can say "we emailed them" or "copy the link".
+  app.get("/email-status", { preHandler: requireAuth }, async (_req, reply) => {
+    return reply.send({ configured: emailProvider() !== null, provider: emailProvider() });
+  });
+
+  app.post("/auth/google", AUTH_LIMIT, async (req, reply) => {
     const body = GoogleTokenRequestSchema.parse(req.body);
     const user = await googleLogin(body.credential);
     const token = createAccessToken({ sub: String(user.id) });
     return reply.send({ access_token: token, token_type: "bearer", user: serializeUser(user) });
   });
 
-  app.post("/auth/github", async (req, reply) => {
+  app.post("/auth/github", AUTH_LIMIT, async (req, reply) => {
     const body = GithubCodeRequestSchema.parse(req.body);
     const user = await githubLogin(body.code, body.redirect_uri ?? undefined);
     const token = createAccessToken({ sub: String(user.id) });

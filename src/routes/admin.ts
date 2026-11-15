@@ -3,19 +3,10 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/connection.js";
 import { promptLogs, projects, users } from "../db/schema.js";
 import { getCurrentUser, HttpError } from "../services/authService.js";
+import { costUsd, usageForEveryone } from "../services/aiUsage.js";
 
-// Port of routes/admin.py's token-usage view — $ per 1,000,000 tokens, OpenAI's published rates
-// for the models this app actually calls. Priced at read time from the stored `model` name
-// (never a snapshotted price), so historical rows stay accurate even if these constants change
-// later. An unrecognized/null model falls back to this app's current default model's rate.
-const PRICING: Record<string, { input: number; output: number }> = {
-  "gpt-4o-mini": { input: 0.15, output: 0.6 },
-  "gpt-4o": { input: 2.5, output: 10.0 },
-  // Price cut shortly after its July 2026 launch (from $1/$6 to this) — re-check before trusting
-  // this for a long-lived cost report if it's been a while since this was last verified.
-  "gpt-5.6-luna": { input: 0.2, output: 1.2 },
-};
-const DEFAULT_PRICING = PRICING["gpt-5.6-luna"];
+// Port of routes/admin.py's token-usage view (the retired project engine's prompt logs). Prices
+// live in services/aiUsage.ts, shared with the Runtime Engine's own usage tracking.
 
 const SCHEMA_KINDS = new Set(["extract_entities", "refine_entities", "schema_assistant"]);
 const UI_KINDS = new Set([
@@ -29,10 +20,7 @@ function bucketFor(kind: string): "schema" | "ui" | "other" {
   return "other";
 }
 
-function cost(model: string | null, promptTokens: number, completionTokens: number): number {
-  const rates = (model && PRICING[model]) || DEFAULT_PRICING;
-  return (promptTokens / 1_000_000) * rates.input + (completionTokens / 1_000_000) * rates.output;
-}
+const cost = costUsd;
 
 type BucketUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number; cost_usd: number; call_count: number };
 function emptyBucket(): BucketUsage {
@@ -48,6 +36,11 @@ async function requireSuperuser(req: FastifyRequest, _reply: FastifyReply) {
 }
 
 export default async function adminRoutes(app: FastifyInstance) {
+  // The Studio's AI usage across every user, last 30 days — what the daily allowance protects.
+  app.get("/admin/ai-usage", { preHandler: requireSuperuser }, async (_req, reply) => {
+    return reply.send(await usageForEveryone());
+  });
+
   app.get("/admin/token-usage", { preHandler: requireSuperuser }, async (_req, reply) => {
     const rows = await db
       .select({

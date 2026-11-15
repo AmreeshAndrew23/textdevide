@@ -115,6 +115,17 @@ const CREATE_TABLE_SQL = [
      created_by VARCHAR,
      created_at TIMESTAMPTZ DEFAULT now()
    )`,
+  `CREATE TABLE IF NOT EXISTS ai_usage (
+     id SERIAL PRIMARY KEY,
+     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     kind VARCHAR NOT NULL,
+     application_id INTEGER,
+     model VARCHAR,
+     prompt_tokens INTEGER NOT NULL DEFAULT 0,
+     completion_tokens INTEGER NOT NULL DEFAULT 0,
+     total_tokens INTEGER NOT NULL DEFAULT 0,
+     created_at TIMESTAMPTZ DEFAULT now()
+   )`,
   `CREATE TABLE IF NOT EXISTS runtime_app_invites (
      id SERIAL PRIMARY KEY,
      application_id INTEGER NOT NULL REFERENCES runtime_applications(id) ON DELETE CASCADE,
@@ -128,6 +139,7 @@ const CREATE_TABLE_SQL = [
 // Runs after the columns exist — a public link name can belong to only one app.
 const AFTER_COLUMNS_SQL = [
   `CREATE UNIQUE INDEX IF NOT EXISTS runtime_applications_slug_idx ON runtime_applications (slug) WHERE slug IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS ai_usage_user_time_idx ON ai_usage (user_id, created_at)`,
 ];
 
 export async function syncSchema(): Promise<void> {

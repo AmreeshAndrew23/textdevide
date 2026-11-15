@@ -85,6 +85,13 @@ export function canReadEntity(model: AppModel, entityName: string, viewer: Viewe
   return workScreens(model, viewer).some((s) => screenEntityName(s) === entityName);
 }
 
+// Bulk import is allowed exactly where adding one record by hand is: a screen this viewer can open,
+// on this entity, with a Save button. Never into the account entity (people join by invite).
+export function canImportInto(model: AppModel, entityName: string, viewer: Viewer): boolean {
+  if (entityName === model.accountEntity?.name) return false;
+  return workScreens(model, viewer).some((s) => s.entity === entityName && isActionAllowed(s, "save"));
+}
+
 export function isActionAllowed(screen: ScreenDef, action: string): boolean {
   if (isAuthScreen(screen.name)) return AUTH_SCREEN_ACTIONS[screen.name].has(action);
   if (AUTH_ACTIONS.has(action)) return false;

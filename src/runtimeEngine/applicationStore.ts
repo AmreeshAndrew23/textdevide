@@ -211,6 +211,7 @@ export async function saveApplicationNodes(
     throw new HttpError(400, e instanceof Error ? e.message : String(e));
   }
 
+  forgetApplication(applicationId);
   await guard(() =>
     withTx(async (tx) => {
       await tx.run("MATCH (a:RtApplication {applicationId: $id}) OPTIONAL MATCH (a)-[:CONTAINS]->(child) DETACH DELETE a, child", {
@@ -230,7 +231,7 @@ export async function saveApplicationNodes(
       await linkElements(tx, applicationId, manifest);
       await linkOwner(tx, applicationId, ownerEmail);
     })
-  );
+  ).finally(() => forgetApplication(applicationId));
 
   const elementCounts: Record<string, number> = {};
   for (const el of manifest.elements) elementCounts[el.tag] = (elementCounts[el.tag] || 0) + 1;
@@ -313,7 +314,7 @@ export async function mergeApplicationNodes(
       await linkElements(tx, applicationId, fullManifest);
       await linkOwner(tx, applicationId, ownerEmail);
     })
-  );
+  ).finally(() => forgetApplication(applicationId));
 
   const detail = await getApplication(applicationId);
   const elementCounts: Record<string, number> = {};
@@ -321,7 +322,34 @@ export async function mergeApplicationNodes(
   return { name: detail?.name ?? "", theme: detail?.theme ?? null, database: detail?.database ?? null, elementCounts };
 }
 
+// Every request against a running app (list rows, save, a dropdown's options...) needs the app's
+// definition, and a dashboard fires several at once — reading it from Neo4j each time was most of
+// their latency. Cached here, dropped on every write below (all of an app's structure goes through
+// this file), and frozen so no caller can change the shared copy. The TTL only bounds staleness if
+// a second server instance ever writes the same app.
+const DETAIL_TTL_MS = 60_000;
+const detailCache = new Map<number, { detail: ApplicationDetail; at: number }>();
+// Bumped on every write, so a read that started before a change can't cache the old version.
+let generation = 0;
+function forgetApplication(applicationId: number): void {
+  generation++;
+  detailCache.delete(applicationId);
+}
+
 export async function getApplication(applicationId: number): Promise<ApplicationDetail | null> {
+  const hit = detailCache.get(applicationId);
+  if (hit && Date.now() - hit.at < DETAIL_TTL_MS) return hit.detail;
+  const startedAt = generation;
+  const detail = await readApplication(applicationId);
+  if (detail && startedAt === generation) {
+    for (const el of detail.elements) Object.freeze(el);
+    Object.freeze(detail.elements);
+    detailCache.set(applicationId, { detail: Object.freeze(detail), at: Date.now() });
+  }
+  return detail;
+}
+
+async function readApplication(applicationId: number): Promise<ApplicationDetail | null> {
   return guard(async () => {
     const session = neo4jSession();
     try {
@@ -394,7 +422,7 @@ export async function deleteApplicationNodes(applicationId: number): Promise<voi
         id: toDriverValue(applicationId),
       });
     })
-  );
+  ).finally(() => forgetApplication(applicationId));
 }
 
 export type { ParsedTopLevelElement };
